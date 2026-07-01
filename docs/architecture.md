@@ -151,6 +151,7 @@ they reflect emergent behavior of the interaction.
 | `:liveness_violated` | A liveness timer expired without reaching the target state. |
 | `:precedence_violated` | Entered a state without the required predecessor in history. |
 | `:ordering_violated` | A monotonicity check on message field values failed. |
+| `:correspondence_violated` | A close event fired with no matching open (counted on state-changing branches, matching the TLA+ model). |
 
 Decision rule: property violations are reported after a successful transition.
 The reply is still forwarded to the client (the transition succeeded), but the
@@ -345,7 +346,7 @@ it possible to search for documentation or suppress specific checks.
 **Determinism errors (E020):**
 - E020 -- ambiguous dispatch (multiple transitions for same state + tag).
 
-**Property errors (E030-E036):**
+**Property errors (E030-E038):**
 - E030 -- bounded check references undefined track.
 - E031 -- correspondence check references undefined open event.
 - E032 -- local_invariant check references undefined state.
@@ -353,6 +354,8 @@ it possible to search for documentation or suppress specific checks.
 - E034 -- precedence check references undefined target or required state.
 - E035 -- field path references unknown event.
 - E036 -- field not found in message parameters.
+- E037 -- liveness assuming: references unknown message tag.
+- E038 -- correspondence checks share an open event with different close sets.
 
 **Track errors (E040):**
 - E040 -- duplicate track name.
@@ -370,9 +373,11 @@ downgrade to a warning and any stale spec is deleted.
 - E045 -- `where:` constraint not compilable to TLA+.
 - E046 -- symmetry set does not resolve to a model-value domain.
 
-**Warnings (W001-W002):**
+**Warnings (W001-W005):**
 - W001 -- state unreachable from initial state.
 - W002 -- no terminal state reachable from initial state.
+- W005 -- liveness check without assuming: is verified under blanket
+  WF_vars(Next), where any client loop or reachable terminal fails it.
 
 ### Help text
 
