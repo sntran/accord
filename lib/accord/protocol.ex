@@ -1229,12 +1229,15 @@ defmodule Accord.Protocol do
       shared = Enum.filter(ir.tracks, & &1.shared)
 
       exclusives =
-        for prop <- ir.properties, check <- prop.checks, check.kind == :exclusive, do: prop.name
+        for prop <- ir.properties,
+            check <- prop.checks,
+            check.kind in [:exclusive, :distinct],
+            do: {check.kind, prop.name}
 
       if shared != [] or exclusives != [] do
         declared =
           Enum.map(shared, &"shared track :#{&1.name}") ++
-            Enum.map(exclusives, &"exclusive check in :#{&1}")
+            Enum.map(exclusives, fn {kind, name} -> "#{kind} check in :#{name}" end)
 
         IO.warn(
           "W003: #{inspect(ir.name)} declares #{Enum.join(declared, ", ")} but model " <>

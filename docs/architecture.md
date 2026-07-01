@@ -197,6 +197,7 @@ check-task note — never silent (ADR-007, ADR-009).
 | `reachable` | — | compile-time graph check (annotated, not asserted) |
 | `shared:` tracks across sessions | per-monitor copy only (ghost) | shared scalar at `sessions: N` |
 | `exclusive` | — (ghost) | cross-session invariant at `sessions >= 2` |
+| `distinct` | — (ghost) | cross-session uniqueness invariant at `sessions >= 2` |
 
 The ghost constructs (`shared:`, `exclusive`, `sessions: N`) exist because the
 server is the ground truth for cross-session state; duplicating it at runtime
@@ -401,8 +402,9 @@ it possible to search for documentation or suppress specific checks.
 - E050 -- more than two roles declared (protocols are two-party).
 - E051 -- duplicate role name.
 
-**Session errors (E060):**
+**Session errors (E060-E061):**
 - E060 -- exclusive check references undefined state.
+- E061 -- distinct check references an undefined or shared track.
 
 **TLA+ fidelity errors (E041-E046):** anything the model cannot faithfully
 express is a loud, span-carrying diagnostic — never a silent drop. Under the

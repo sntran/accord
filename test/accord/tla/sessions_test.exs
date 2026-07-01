@@ -108,6 +108,73 @@ defmodule Accord.TLA.SessionsTest do
     end
   end
 
+  describe "distinct" do
+    test "distinct becomes a cross-session uniqueness invariant" do
+      ir = Accord.Test.DistributedQueue.Protocol.__ir__()
+      config = Accord.TLA.ModelConfig.apply_inline(%ModelConfig{}, ir)
+      {:ok, result} = Compiler.compile(ir, config)
+
+      assert result.tla =~
+               "NoSharedLeaseDistinct == \\A si, sj \\in Sessions : " <>
+                 "(si /= sj) => (holding[si] = 0 \\/ holding[si] /= holding[sj])"
+
+      assert result.cfg =~ "INVARIANT NoSharedLeaseDistinct"
+    end
+
+    test "sessions: 1 annotates distinct instead of asserting it" do
+      ir = %{Accord.Test.DistributedQueue.Protocol.__ir__() | model: []}
+      {:ok, result} = Compiler.compile(ir, %ModelConfig{domains: %{pos_integer: 1..3}})
+
+      assert result.tla =~ "requires multi-session checking"
+      refute result.cfg =~ "NoSharedLeaseDistinct"
+    end
+
+    test "distinct over a shared track is E061" do
+      error =
+        assert_raise CompileError, fn ->
+          defmodule BadDistinct do
+            use Accord.Protocol, tla: :off
+
+            initial :ready
+
+            track :fence, :non_neg_integer, default: 0, shared: true
+
+            state :ready do
+              on :stop, reply: :stopped, goto: :done
+            end
+
+            state :done, terminal: true
+
+            property :nonsense do
+              distinct :fence, empty: 0
+            end
+          end
+        end
+
+      assert error.description =~ "E061"
+      assert error.description =~ "shared track"
+    end
+
+    test "distinct over an undefined track is E061" do
+      error =
+        assert_raise CompileError, fn ->
+          defmodule MissingDistinct do
+            use Accord.Protocol, tla: :off
+
+            initial :ready
+            state :ready, terminal: true
+
+            property :nonsense do
+              distinct :ghost, empty: 0
+            end
+          end
+        end
+
+      assert error.description =~ "E061"
+      assert error.description =~ ":ghost"
+    end
+  end
+
   describe "exclusive without multi-session" do
     test "sessions: 1 annotates exclusive instead of asserting it" do
       result = compile(1)

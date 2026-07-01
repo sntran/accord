@@ -226,6 +226,34 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
+  defp build_property(prop_name, %{kind: :distinct} = check, ctx) do
+    tla_name = camelize(prop_name) <> "Distinct"
+    track = Atom.to_string(check.spec.track)
+    empty = render_empty(check.spec.empty)
+
+    if Sessions.multi?(ctx.sessions) do
+      formula =
+        "#{tla_name} == \\A si, sj \\in Sessions : " <>
+          "(si /= sj) => (#{track}[si] = #{empty} \\/ #{track}[si] /= #{track}[sj])"
+
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: formula,
+        comment: "distinct: #{prop_name} (no two sessions share a #{track})"
+      }
+    else
+      %Property{
+        name: tla_name,
+        kind: :auxiliary,
+        formula:
+          "\\* distinct: no two sessions share a non-empty #{track} — " <>
+            "requires multi-session checking (sessions >= 2)",
+        comment: "distinct: #{prop_name}"
+      }
+    end
+  end
+
   defp build_property(prop_name, %{kind: :reachable} = check, _ctx) do
     tla_name = camelize(prop_name)
     target = Atom.to_string(check.spec.target)
@@ -245,6 +273,11 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
   # Pass through unknown kinds.
   defp build_property(_prop_name, _check, _ctx), do: nil
+
+  defp render_empty(nil), do: "NULL"
+  defp render_empty(n) when is_integer(n), do: Integer.to_string(n)
+  defp render_empty(a) when is_atom(a), do: ~s("#{a}")
+  defp render_empty(s) when is_binary(s), do: ~s("#{s}")
 
   defp runtime_only(tla_name, description) do
     %Property{

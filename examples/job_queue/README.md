@@ -30,11 +30,12 @@ someone else. Double processing, found exhaustively before any code ran.
 mix accord.check Accord.Examples.JobQueue.Protocol
 ```
 
-The cross-worker claim — no two workers hold the same lease — needs two
-interleaved sessions and shared state: see the multi-session
-DistributedLock fixture (`test/support/protocols/distributed_lock.ex`),
-where TLC proves mutual exclusion at `sessions: 2` and finds the
-two-workers-both-locked interleaving when the holder guard is dropped.
+The cross-worker claim — no two workers hold the same lease — is
+checkable with `distinct :holding, empty: 0` at `sessions: 2`: see the
+DistributedQueue fixture (`test/support/protocols/distributed_queue.ex`),
+where TLC proves the fencing constraint makes leases unique, and hands
+both workers token 1 in two steps when the constraint is dropped. The
+mutual-exclusion variant lives in the DistributedLock fixture.
 
 ## What the monitor adds
 

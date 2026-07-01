@@ -85,6 +85,17 @@ defmodule Accord.TLA.CheckTest do
     end
   end
 
+  describe "distinct leases across sessions" do
+    test "the fencing constraint makes leases unique — TLC proves distinct",
+         %{tmp_dir: tmp_dir} do
+      assert_passes(Accord.Test.DistributedQueue.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "without fencing, both workers get token 1", %{tmp_dir: tmp_dir} do
+      assert_fails(Accord.Test.DistributedQueueUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
+    end
+  end
+
   describe "server-push events" do
     test "TLC interleaves pushes with calls and proves the demand invariant",
          %{tmp_dir: tmp_dir} do

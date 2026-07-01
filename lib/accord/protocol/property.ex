@@ -199,6 +199,27 @@ defmodule Accord.Protocol.Property do
   end
 
   @doc false
+  # Cross-session uniqueness: no two sessions hold the same non-empty
+  # value of a per-session track — "no two workers hold the same lease".
+  # Model-only, verified by TLC at sessions >= 2 (see ADR-009).
+  defmacro distinct(track_name, opts) do
+    empty = Keyword.fetch!(opts, :empty)
+    line = __CALLER__.line
+
+    quote do
+      checks = Module.get_attribute(__MODULE__, :accord_property_checks)
+
+      check = %Check{
+        kind: :distinct,
+        spec: %{track: unquote(track_name), empty: unquote(empty)},
+        span: Pentiment.Span.search(line: unquote(line), pattern: "distinct")
+      }
+
+      Module.put_attribute(__MODULE__, :accord_property_checks, [check | checks])
+    end
+  end
+
+  @doc false
   defmacro reachable(target) do
     line = __CALLER__.line
 

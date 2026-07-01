@@ -19,6 +19,8 @@ defmodule Accord.IR.Check do
   - `:forbidden` — negated invariant: `fn state, tracks -> bool`.
   - `:exclusive` — at most one session occupies the state at a time
     (multi-session model checking only).
+  - `:distinct` — no two sessions hold the same non-empty value of a
+    per-session track (multi-session model checking only).
   """
 
   @type kind ::
@@ -33,6 +35,7 @@ defmodule Accord.IR.Check do
           | :reachable
           | :forbidden
           | :exclusive
+          | :distinct
 
   @type t :: %__MODULE__{
           kind: kind(),

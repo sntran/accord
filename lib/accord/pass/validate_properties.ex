@@ -181,6 +181,52 @@ defmodule Accord.Pass.ValidateProperties do
   end
 
   defp validate_check(
+         %IR.Check{kind: :distinct} = check,
+         ir,
+         track_names,
+         _states,
+         _tags,
+         errors
+       ) do
+    track = check.spec[:track]
+
+    cond do
+      track not in track_names ->
+        span = derive_arg_span(check.span, ":#{track}")
+
+        report =
+          Report.error("distinct check references undefined track :#{track}")
+          |> Report.with_code("E061")
+          |> maybe_add_source(ir.source_file)
+          |> maybe_add_span_label(span, "track :#{track} is not defined")
+          |> Report.with_help(
+            "defined tracks are: #{Enum.map_join(track_names, ", ", &":#{&1}")}"
+          )
+
+        [report | errors]
+
+      shared_track?(ir, track) ->
+        span = derive_arg_span(check.span, ":#{track}")
+
+        report =
+          Report.error(
+            "distinct check over shared track :#{track} — a shared track is one " <>
+              "value observed by every session, so cross-session distinctness is " <>
+              "meaningless"
+          )
+          |> Report.with_code("E061")
+          |> maybe_add_source(ir.source_file)
+          |> maybe_add_span_label(span, "declared here")
+          |> Report.with_help("distinct applies to per-session tracks")
+
+        [report | errors]
+
+      true ->
+        errors
+    end
+  end
+
+  defp validate_check(
          %IR.Check{kind: :liveness} = check,
          ir,
          _tracks,
@@ -243,6 +289,10 @@ defmodule Accord.Pass.ValidateProperties do
           "liveness in_state(:locked), leads_to: in_state(:unlocked), assuming: [:release]"
       )
     end
+  end
+
+  defp shared_track?(ir, name) do
+    Enum.any?(ir.tracks, &(&1.name == name and &1.shared))
   end
 
   # A state timeout on the trigger state discharges the fairness caveat:
