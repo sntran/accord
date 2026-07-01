@@ -320,6 +320,7 @@ defmodule Accord.Protocol do
       Module.put_attribute(__MODULE__, :accord_on_goto_span, nil)
       Module.put_attribute(__MODULE__, :accord_on_guard, nil)
       Module.put_attribute(__MODULE__, :accord_on_update, nil)
+      Module.put_attribute(__MODULE__, :accord_on_timeout, nil)
       Module.put_attribute(__MODULE__, :accord_on_branches, [])
 
       unquote(block)
@@ -331,6 +332,7 @@ defmodule Accord.Protocol do
       goto_span = Module.get_attribute(__MODULE__, :accord_on_goto_span)
       guard_pair = Module.get_attribute(__MODULE__, :accord_on_guard)
       update_pair = Module.get_attribute(__MODULE__, :accord_on_update)
+      call_timeout = Module.get_attribute(__MODULE__, :accord_on_timeout)
       explicit_branches = Module.get_attribute(__MODULE__, :accord_on_branches) |> Enum.reverse()
 
       in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
@@ -366,6 +368,7 @@ defmodule Accord.Protocol do
         branches: branches,
         guard: guard_pair,
         update: update_pair,
+        call_timeout: call_timeout,
         span: unquote(span),
         block_span: unquote(block_span)
       }
@@ -384,6 +387,7 @@ defmodule Accord.Protocol do
       Module.delete_attribute(__MODULE__, :accord_on_goto_span)
       Module.delete_attribute(__MODULE__, :accord_on_guard)
       Module.delete_attribute(__MODULE__, :accord_on_update)
+      Module.delete_attribute(__MODULE__, :accord_on_timeout)
       Module.delete_attribute(__MODULE__, :accord_on_branches)
 
       import Accord.Protocol.Block, only: []
@@ -393,6 +397,7 @@ defmodule Accord.Protocol do
   defmacro on(message_spec, opts) when is_list(opts) do
     reply_spec = Keyword.fetch!(opts, :reply)
     next_state = Keyword.get(opts, :goto)
+    call_timeout = Keyword.get(opts, :timeout)
 
     {message_pattern, message_types, message_arg_names, message_arg_spans} =
       parse_message_spec(message_spec)
@@ -438,6 +443,7 @@ defmodule Accord.Protocol do
                 )
             }
           ],
+          call_timeout: unquote(call_timeout),
           span: unquote(span)
         }
 
@@ -476,6 +482,7 @@ defmodule Accord.Protocol do
                 )
             }
           ],
+          call_timeout: unquote(call_timeout),
           span: unquote(span)
         }
 

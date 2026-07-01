@@ -164,12 +164,15 @@ defmodule Accord.Monitor do
   end
 
   defp forward_call(transition, message, from, state, data) do
+    # Per-transition timeout takes precedence over the monitor default.
+    timeout = transition.call_timeout || data.call_timeout
+
     try do
-      reply = GenServer.call(data.upstream, message, data.call_timeout)
+      reply = GenServer.call(data.upstream, message, timeout)
       handle_reply(transition, message, reply, from, state, data)
     catch
       :exit, {:timeout, _} ->
-        violation = Violation.timeout(state, message, data.call_timeout)
+        violation = Violation.timeout(state, message, timeout)
         handle_violation(violation, from, state, data)
     end
   end

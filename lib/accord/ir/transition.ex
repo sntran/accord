@@ -20,6 +20,7 @@ defmodule Accord.IR.Transition do
           branches: [Accord.IR.Branch.t()],
           guard: guard_pair() | nil,
           update: guard_pair() | nil,
+          call_timeout: pos_integer() | nil,
           span: Pentiment.Span.t() | nil,
           block_span: Pentiment.Span.t() | nil
         }
@@ -32,6 +33,7 @@ defmodule Accord.IR.Transition do
     :kind,
     :guard,
     :update,
+    :call_timeout,
     :span,
     :block_span,
     message_types: [],

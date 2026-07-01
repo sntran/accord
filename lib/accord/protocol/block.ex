@@ -95,6 +95,13 @@ defmodule Accord.Protocol.Block do
   end
 
   @doc false
+  defmacro timeout(milliseconds) do
+    quote do
+      Module.put_attribute(__MODULE__, :accord_on_timeout, unquote(milliseconds))
+    end
+  end
+
+  @doc false
   defmacro branch(reply_spec, opts) do
     next_state = Keyword.fetch!(opts, :goto)
     where_fn = Keyword.get(opts, :where)
