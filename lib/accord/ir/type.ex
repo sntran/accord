@@ -89,6 +89,82 @@ defmodule Accord.IR.Type do
   defp flatten_union(type), do: [type]
 
   @doc """
+  Whether every value of `sub` is also a value of `sup`.
+
+  The subtyping relation behind protocol compatibility checking
+  (`Accord.Compat`): argument types may widen across versions
+  (contravariance) and reply types may narrow (covariance), both
+  expressed through this predicate.
+
+  Conservative: `false` means "not provably a subtype" — unknown
+  combinations never silently pass.
+  """
+  @spec subtype?(t(), t()) :: boolean()
+  def subtype?(type, type), do: true
+  def subtype?(_sub, :term), do: true
+
+  # Literals against their carriers.
+  def subtype?({:literal, v}, sup) when is_integer(v) do
+    case sup do
+      :integer -> true
+      :pos_integer -> v > 0
+      :non_neg_integer -> v >= 0
+      _ -> subtype_union?({:literal, v}, sup)
+    end
+  end
+
+  def subtype?({:literal, v}, sup) when is_boolean(v) do
+    sup in [:boolean, :atom] or subtype_union?({:literal, v}, sup)
+  end
+
+  def subtype?({:literal, v}, sup) when is_atom(v) do
+    sup == :atom or subtype_union?({:literal, v}, sup)
+  end
+
+  def subtype?({:literal, v}, sup) when is_binary(v) do
+    sup in [:binary, :string] or subtype_union?({:literal, v}, sup)
+  end
+
+  # Integer hierarchy.
+  def subtype?(:pos_integer, sup) when sup in [:non_neg_integer, :integer], do: true
+  def subtype?(:non_neg_integer, :integer), do: true
+
+  # Booleans are atoms; strings and binaries coincide at runtime.
+  def subtype?(:boolean, :atom), do: true
+  def subtype?(:string, :binary), do: true
+  def subtype?(:binary, :string), do: true
+
+  # Compound types: covariant elements.
+  def subtype?({:list, sub}, {:list, sup}), do: subtype?(sub, sup)
+
+  def subtype?({:tuple, subs}, {:tuple, sups}) when length(subs) == length(sups) do
+    subs |> Enum.zip(sups) |> Enum.all?(fn {s, p} -> subtype?(s, p) end)
+  end
+
+  def subtype?({:tagged, tag, sub_inner}, {:tagged, tag, sup_inner}) do
+    subtype_inner?(List.wrap(sub_inner), List.wrap(sup_inner))
+  end
+
+  # Unions: every member of a sub-union must fit; a non-union fits a
+  # union when it fits some member.
+  def subtype?({:union, subs}, sup) do
+    Enum.all?(subs, &subtype?(&1, sup))
+  end
+
+  def subtype?(sub, {:union, _} = sup), do: subtype_union?(sub, sup)
+
+  def subtype?(_sub, _sup), do: false
+
+  defp subtype_union?(sub, {:union, sups}), do: Enum.any?(sups, &subtype?(sub, &1))
+  defp subtype_union?(_sub, _sup), do: false
+
+  defp subtype_inner?(subs, sups) when length(subs) == length(sups) do
+    subs |> Enum.zip(sups) |> Enum.all?(fn {s, p} -> subtype?(s, p) end)
+  end
+
+  defp subtype_inner?(_, _), do: false
+
+  @doc """
   Converts a type to a human-readable string.
   """
   @spec to_string(t()) :: String.t()
