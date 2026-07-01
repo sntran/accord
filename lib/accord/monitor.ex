@@ -26,6 +26,8 @@ defmodule Accord.Monitor do
     :downstream,
     :tracks,
     :violation_policy,
+    :trace_sink,
+    trace_seq: 0,
     call_timeout: 5_000,
     liveness_timeout: nil,
     # Property checking state.
@@ -48,6 +50,9 @@ defmodule Accord.Monitor do
   - `:violation_policy` — `:log` | `:reject` | `:crash` | `{mod, fun}`. Default `:crash`.
   - `:call_timeout` — timeout for upstream calls in ms. Default 5000.
   - `:liveness_timeout` — override all per-property liveness timeouts. Default `nil` (use per-property defaults).
+  - `:trace_sink` — a `(Accord.Trace.Event.t() -> any())` fun or a pid
+    receiving `{:accord_trace, event}` for every applied transition
+    (see `Accord.TLA.TraceSpec` for replaying traces against the spec).
   """
   @spec start_link(Compiled.t(), keyword()) :: :gen_statem.start_ret()
   def start_link(%Compiled{} = compiled, opts) do
@@ -56,9 +61,10 @@ defmodule Accord.Monitor do
     policy = Keyword.get(opts, :violation_policy, :crash)
     timeout = Keyword.get(opts, :call_timeout, 5_000)
     liveness_timeout = Keyword.get(opts, :liveness_timeout)
+    trace_sink = Keyword.get(opts, :trace_sink)
     name = Keyword.get(opts, :name)
 
-    init_arg = {compiled, upstream, downstream, policy, timeout, liveness_timeout}
+    init_arg = {compiled, upstream, downstream, policy, timeout, liveness_timeout, trace_sink}
 
     if name do
       :gen_statem.start_link({:local, name}, __MODULE__, init_arg, [])
@@ -103,7 +109,7 @@ defmodule Accord.Monitor do
   def callback_mode, do: :handle_event_function
 
   @impl true
-  def init({compiled, upstream, downstream, policy, timeout, liveness_timeout}) do
+  def init({compiled, upstream, downstream, policy, timeout, liveness_timeout, trace_sink}) do
     data = %__MODULE__{
       compiled: compiled,
       upstream: upstream,
@@ -112,6 +118,7 @@ defmodule Accord.Monitor do
       violation_policy: policy,
       call_timeout: timeout,
       liveness_timeout: liveness_timeout,
+      trace_sink: trace_sink,
       visited_states: MapSet.new([compiled.ir.initial])
     }
 
@@ -299,6 +306,7 @@ defmodule Accord.Monitor do
       {:ok, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, prev_state, message, reply, next_state)
 
         timer_actions =
           liveness_actions(updated_data, next_state) ++
@@ -309,6 +317,7 @@ defmodule Accord.Monitor do
       {:violation, violation, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, prev_state, message, reply, next_state)
 
         timer_actions =
           liveness_actions(updated_data, next_state) ++
@@ -335,6 +344,7 @@ defmodule Accord.Monitor do
     case check_properties(:__state_timeout__, state, target, data.tracks, data.tracks, data) do
       {:ok, updated_data} ->
         updated_data = track_visited_state(updated_data, target)
+        updated_data = emit_trace(updated_data, state, :__state_timeout__, nil, target)
 
         timer_actions =
           liveness_actions(updated_data, target) ++
@@ -344,6 +354,7 @@ defmodule Accord.Monitor do
 
       {:violation, violation, updated_data} ->
         updated_data = track_visited_state(updated_data, target)
+        updated_data = emit_trace(updated_data, state, :__state_timeout__, nil, target)
 
         timer_actions =
           liveness_actions(updated_data, target) ++
@@ -351,6 +362,23 @@ defmodule Accord.Monitor do
 
         handle_event_property_violation(violation, target, updated_data, timer_actions)
     end
+  end
+
+  # One trace event per applied transition (nil sink: free).
+  defp emit_trace(%{trace_sink: nil} = data, _prev, _message, _reply, _next), do: data
+
+  defp emit_trace(data, prev_state, message, reply, next_state) do
+    event = %Accord.Trace.Event{
+      seq: data.trace_seq,
+      prev_state: prev_state,
+      message: message,
+      reply: reply,
+      next_state: next_state,
+      tracks: data.tracks
+    }
+
+    Accord.Trace.emit(data.trace_sink, event)
+    %{data | trace_seq: data.trace_seq + 1}
   end
 
   # Arms the target state's timer on real entry. Self-loops keep the
@@ -452,6 +480,7 @@ defmodule Accord.Monitor do
       {:ok, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, state, message, nil, next_state)
 
         timer_actions =
           liveness_actions(updated_data, next_state) ++
@@ -463,6 +492,7 @@ defmodule Accord.Monitor do
       {:violation, violation, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, state, message, nil, next_state)
 
         timer_actions =
           liveness_actions(updated_data, next_state) ++
