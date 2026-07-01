@@ -128,11 +128,15 @@ reply contract. The monitor detects this after receiving the reply.
 | Kind | When it fires |
 |------|--------------|
 | `:invalid_reply` | The reply does not match any branch's declared reply type. |
-| `:timeout` | The server did not respond within the configured timeout. |
+| `:constraint_failed` | The reply matched a branch's type but violated its `where:` constraint, and no later branch accepted it. |
+| `:timeout` | The server did not respond within the configured timeout (per-transition `timeout:` or the monitor default). |
 
 Decision rule: if the message was valid but the server's response was not, the
 server is at fault. Server violations are caught at step 4 of the call pipeline
-(reply type checking after `GenServer.call`).
+(reply type checking after `GenServer.call`). Branch selection uses the same
+semantics as the TLA+ model: the first branch whose type matches AND whose
+`where:` constraint holds is taken; a constraint failure falls through to
+later branches before being reported.
 
 ### :property blame
 
@@ -349,6 +353,22 @@ it possible to search for documentation or suppress specific checks.
 - E034 -- precedence check references undefined target or required state.
 - E035 -- field path references unknown event.
 - E036 -- field not found in message parameters.
+
+**Track errors (E040):**
+- E040 -- duplicate track name.
+
+**TLA+ fidelity errors (E041-E046):** anything the model cannot faithfully
+express is a loud, span-carrying diagnostic — never a silent drop. Under the
+default `tla: :strict` these abort compilation; under `tla: :warn` they
+downgrade to a warning and any stale spec is deleted.
+- E041 -- guard or property expression not compilable to TLA+.
+- E042 -- update not compilable (the tracks would be modeled as UNCHANGED,
+  making invariants over them hold vacuously).
+- E043 -- identifier would not resolve in the generated spec (unbound guard
+  variable, unknown track field, update writing a misspelled track).
+- E044 -- track default/init outside its model domain.
+- E045 -- `where:` constraint not compilable to TLA+.
+- E046 -- symmetry set does not resolve to a model-value domain.
 
 **Warnings (W001-W002):**
 - W001 -- state unreachable from initial state.
