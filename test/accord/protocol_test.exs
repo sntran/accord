@@ -691,4 +691,20 @@ defmodule Accord.ProtocolTest do
       end
     end
   end
+
+  describe "__model_resources__/1" do
+    test "includes the protocol model path and the project config path" do
+      paths = Accord.Protocol.__model_resources__(model: "test/support/protocols/model.exs")
+
+      assert Path.expand("test/support/protocols/model.exs") in paths
+      assert Enum.any?(paths, &String.ends_with?(&1, ".accord_model.exs"))
+    end
+
+    test "includes only the project config path when no model option is given" do
+      paths = Accord.Protocol.__model_resources__([])
+
+      assert [project_path] = paths
+      assert String.ends_with?(project_path, ".accord_model.exs")
+    end
+  end
 end

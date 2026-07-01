@@ -58,6 +58,22 @@ defmodule Accord.Protocol do
   @spec in_state(atom()) :: {:in_state, atom()}
   def in_state(name), do: {:in_state, name}
 
+  @doc false
+  # Model config paths registered as external resources for the using module.
+  #
+  # Paths are registered whether or not the file currently exists: a config
+  # file created after the first compile must still trigger recompilation.
+  @spec __model_resources__(keyword()) :: [Path.t()]
+  def __model_resources__(opts) do
+    project_root = Mix.Project.build_path() |> Path.join("../../") |> Path.expand()
+    protocol_path = Keyword.get(opts, :model)
+    project_path = Path.join(project_root, ".accord_model.exs")
+
+    [protocol_path, project_path]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Path.expand/1)
+  end
+
   defmacro __using__(opts) do
     quote do
       import Accord.Protocol,
@@ -81,6 +97,12 @@ defmodule Accord.Protocol do
       Module.register_attribute(__MODULE__, :accord_tracks, accumulate: true)
       Module.register_attribute(__MODULE__, :accord_properties, accumulate: true)
       Module.put_attribute(__MODULE__, :accord_opts, unquote(Macro.escape(opts)))
+
+      # Model config files shape the generated TLA+ spec, so editing them
+      # must trigger recompilation — otherwise a stale spec would be checked.
+      for path <- Accord.Protocol.__model_resources__(unquote(opts)) do
+        Module.put_attribute(__MODULE__, :external_resource, path)
+      end
 
       @before_compile Accord.Protocol
     end
