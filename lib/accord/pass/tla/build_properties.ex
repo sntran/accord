@@ -9,9 +9,12 @@ defmodule Accord.Pass.TLA.BuildProperties do
   - `:action` → `[][P(vars, vars')]_vars` — action property
   - `:liveness` → `P ~> Q` with WF/SF — temporal property
   - `:bounded` → `[](x <= N)` — bounded invariant
-  - `:correspondence` → auxiliary counter invariant
-  - `:reachable` → TLC explores state space (no formula needed, just cfg)
+  - `:correspondence` → auxiliary counter invariant (unkeyed only)
   - `:forbidden` → `[](~P)` — negated invariant
+  - `:reachable` → compile-time graph check; annotated in the spec, not
+    asserted by TLC
+  - `:ordered`, `:precedence`, keyed `:correspondence` → runtime-only:
+    rendered as a visible comment block and reported by `mix accord.check`
   """
 
   alias Accord.IR
@@ -128,18 +131,39 @@ defmodule Accord.Pass.TLA.BuildProperties do
   defp build_property(prop_name, %{kind: :correspondence} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
     open = Atom.to_string(check.spec.open)
-    _close = Enum.map(check.spec.close, &Atom.to_string/1)
 
-    # Correspondence requires an auxiliary counter variable.
-    # The invariant is that the counter is always >= 0.
-    formula = "#{tla_name} == #{open}_pending >= 0"
+    if Map.get(check.spec, :by) do
+      # Keyed correspondence counts per key value; the model's single
+      # global counter cannot express that, so it is runtime-only.
+      runtime_only(
+        tla_name,
+        "correspondence #{open} by :#{check.spec.by} (#{prop_name})"
+      )
+    else
+      # Correspondence requires an auxiliary counter variable.
+      # The invariant is that the counter is always >= 0.
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: "#{tla_name} == #{open}_pending >= 0",
+        comment: "correspondence: #{prop_name}"
+      }
+    end
+  end
 
-    %Property{
-      name: tla_name,
-      kind: :invariant,
-      formula: formula,
-      comment: "correspondence: #{prop_name}"
-    }
+  defp build_property(prop_name, %{kind: :ordered} = check, _ir, _track_names) do
+    runtime_only(
+      camelize(prop_name),
+      "ordered #{inspect(check.spec.event)} by :#{check.spec.by} (#{prop_name})"
+    )
+  end
+
+  defp build_property(prop_name, %{kind: :precedence} = check, _ir, _track_names) do
+    runtime_only(
+      camelize(prop_name),
+      "precedence #{inspect(check.spec.target)} requires " <>
+        "#{inspect(check.spec.required)} (#{prop_name})"
+    )
   end
 
   defp build_property(prop_name, %{kind: :forbidden} = check, ir, track_names) do
@@ -156,20 +180,34 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
-  defp build_property(prop_name, %{kind: :reachable}, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :reachable} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
-    target = Atom.to_string(prop_name)
+    target = Atom.to_string(check.spec.target)
 
+    # Reachability is checked at compile time by graph analysis
+    # (ValidateReachability); nothing in the .cfg asserts it, so the
+    # comment must not claim TLC verification.
     %Property{
       name: tla_name,
       kind: :auxiliary,
-      formula: "\\* reachable: #{target} — verified by TLC state space exploration",
+      formula:
+        "\\* reachable: #{target} — checked at compile time by graph " <>
+          "reachability; not asserted by TLC",
       comment: "reachable: #{prop_name}"
     }
   end
 
   # Pass through unknown kinds.
   defp build_property(_prop_name, _check, _ir, _track_names), do: nil
+
+  defp runtime_only(tla_name, description) do
+    %Property{
+      name: tla_name,
+      kind: :runtime_only,
+      formula: "\\* runtime-only: #{description}",
+      comment: nil
+    }
+  end
 
   # Compiles the check's expression AST, or returns the fallback when the
   # check carries no expression.

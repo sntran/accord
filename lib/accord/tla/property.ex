@@ -5,9 +5,14 @@ defmodule Accord.TLA.Property do
   Produced by the `BuildProperties` pass. Each property maps to a TLA+
   formula — either an INVARIANT (state predicate), a temporal PROPERTY,
   or an auxiliary definition.
+
+  `:runtime_only` marks checks the model cannot express (`ordered`,
+  `precedence`, keyed correspondence): they render as a visible comment
+  block in the spec and are reported by `mix accord.check`, so a green
+  check never silently implies they were verified.
   """
 
-  @type kind :: :invariant | :temporal | :auxiliary
+  @type kind :: :invariant | :temporal | :auxiliary | :runtime_only
 
   @type t :: %__MODULE__{
           name: String.t(),

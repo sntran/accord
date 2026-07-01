@@ -146,19 +146,33 @@ defmodule Accord.Pass.TLA.Emit do
   end
 
   defp render_tla_properties(properties) do
-    if properties == [] do
-      ""
-    else
-      props =
-        properties
-        |> Enum.map(fn prop ->
-          comment = if prop.comment, do: "\\* #{prop.comment}\n", else: ""
-          "#{comment}#{prop.formula}\n"
-        end)
-        |> Enum.join("\n")
+    {runtime_only, checked} = Enum.split_with(properties, &(&1.kind == :runtime_only))
 
-      "\\* Properties\n#{props}"
-    end
+    checked_section =
+      if checked == [] do
+        ""
+      else
+        props =
+          checked
+          |> Enum.map(fn prop ->
+            comment = if prop.comment, do: "\\* #{prop.comment}\n", else: ""
+            "#{comment}#{prop.formula}\n"
+          end)
+          |> Enum.join("\n")
+
+        "\\* Properties\n#{props}"
+      end
+
+    runtime_only_section =
+      if runtime_only == [] do
+        ""
+      else
+        lines = Enum.map_join(runtime_only, "\n", & &1.formula)
+
+        "\n\\* Checks enforced by the runtime monitor only — NOT model checked:\n#{lines}\n"
+      end
+
+    checked_section <> runtime_only_section
   end
 
   defp render_tla_state_constraint(%StateSpace{state_constraint: nil}), do: ""

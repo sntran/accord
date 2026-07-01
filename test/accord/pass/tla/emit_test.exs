@@ -242,6 +242,21 @@ defmodule Accord.Pass.TLA.EmitTest do
       # Should not have a dangling "Properties" section.
       refute tla =~ "\\* Properties"
     end
+
+    test "runtime-only checks render as a visible comment block" do
+      prop = %Property{
+        name: "AcksOrdered",
+        kind: :runtime_only,
+        formula: "\\* runtime-only: ordered :ack by :token (acks_ordered)"
+      }
+
+      {:ok, %{tla: tla, cfg: cfg}} = Emit.run(minimal_state_space(), [sample_action()], [prop])
+
+      assert tla =~ "enforced by the runtime monitor only"
+      assert tla =~ "ordered :ack by :token"
+      # Never listed in the cfg — TLC checks nothing for them.
+      refute cfg =~ "AcksOrdered"
+    end
   end
 
   describe "CFG generation" do

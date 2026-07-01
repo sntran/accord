@@ -214,6 +214,8 @@ defmodule Mix.Tasks.Accord.Check do
           "#{stats.distinct_states} states explored" <>
           if(stats.depth, do: ", depth #{stats.depth}", else: "")
       )
+
+      report_runtime_only_checks(mod)
     end
 
     # Report skips (deliberate tla: :off opt-outs).
@@ -275,6 +277,40 @@ defmodule Mix.Tasks.Accord.Check do
   defp report_failure(mod, {:error, reason, detail}) do
     Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{inspect(mod)} — #{reason}: #{detail}")
   end
+
+  # A green check must never silently imply that runtime-only checks
+  # (ordered, precedence, keyed correspondence) were model checked.
+  defp report_runtime_only_checks(mod) do
+    case runtime_only_checks(mod) do
+      [] ->
+        :ok
+
+      descriptions ->
+        Mix.shell().info(
+          "  #{IO.ANSI.faint()}↳ enforced at runtime only: " <>
+            "#{Enum.join(descriptions, ", ")}#{IO.ANSI.reset()}"
+        )
+    end
+  end
+
+  defp runtime_only_checks(mod) do
+    if function_exported?(mod, :__ir__, 0) do
+      for prop <- mod.__ir__().properties,
+          check <- prop.checks,
+          runtime_only_check?(check) do
+        "#{check.kind}(#{prop.name})"
+      end
+    else
+      []
+    end
+  end
+
+  defp runtime_only_check?(%{kind: kind}) when kind in [:ordered, :precedence], do: true
+
+  defp runtime_only_check?(%{kind: :correspondence, spec: spec}),
+    do: Map.get(spec, :by) != nil
+
+  defp runtime_only_check?(_), do: false
 
   defp violation_label(%{kind: :invariant, property: property}) do
     "invariant #{property || "unknown"} violated"

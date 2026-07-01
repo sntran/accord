@@ -235,7 +235,10 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     properties
     |> Enum.flat_map(fn prop ->
       prop.checks
-      |> Enum.filter(&(&1.kind == :correspondence))
+      # Keyed correspondence (by:) counts per key value; a single global
+      # counter would model something else, so those checks are
+      # runtime-only and get no counter variable.
+      |> Enum.filter(&(&1.kind == :correspondence and Map.get(&1.spec, :by) == nil))
       |> Enum.map(fn check ->
         open = check.spec.open
         close = check.spec.close

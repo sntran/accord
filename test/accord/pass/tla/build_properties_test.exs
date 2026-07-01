@@ -259,6 +259,89 @@ defmodule Accord.Pass.TLA.BuildPropertiesTest do
     end
   end
 
+  describe "runtime-only checks" do
+    test "ordered produces a runtime_only property, never a silent drop" do
+      ir =
+        base_ir([
+          %Property{
+            name: :acks_ordered,
+            checks: [%Check{kind: :ordered, spec: %{event: :ack, by: :token}}]
+          }
+        ])
+
+      {:ok, [prop]} = BuildProperties.run(ir)
+
+      assert prop.kind == :runtime_only
+      assert prop.formula =~ "runtime-only"
+      assert prop.formula =~ "ordered"
+      assert prop.formula =~ "token"
+    end
+
+    test "precedence produces a runtime_only property" do
+      ir =
+        base_ir([
+          %Property{
+            name: :must_authorize,
+            checks: [%Check{kind: :precedence, spec: %{target: :captured, required: :authorized}}]
+          }
+        ])
+
+      {:ok, [prop]} = BuildProperties.run(ir)
+
+      assert prop.kind == :runtime_only
+      assert prop.formula =~ "precedence"
+    end
+
+    test "keyed correspondence produces a runtime_only property" do
+      ir =
+        base_ir([
+          %Property{
+            name: :per_job,
+            checks: [
+              %Check{kind: :correspondence, spec: %{open: :checkout, close: [:ack], by: :job_id}}
+            ]
+          }
+        ])
+
+      {:ok, [prop]} = BuildProperties.run(ir)
+
+      assert prop.kind == :runtime_only
+      assert prop.formula =~ "by :job_id"
+    end
+
+    test "unkeyed correspondence still produces a counter invariant" do
+      ir =
+        base_ir([
+          %Property{
+            name: :open_close,
+            checks: [
+              %Check{kind: :correspondence, spec: %{open: :open, close: [:close], by: nil}}
+            ]
+          }
+        ])
+
+      {:ok, [prop]} = BuildProperties.run(ir)
+
+      assert prop.kind == :invariant
+      assert prop.formula =~ "open_pending >= 0"
+    end
+
+    test "reachable does not claim TLC verification" do
+      ir =
+        base_ir([
+          %Property{
+            name: :target_reachable,
+            checks: [%Check{kind: :reachable, spec: %{target: :done}}]
+          }
+        ])
+
+      {:ok, [prop]} = BuildProperties.run(ir)
+
+      assert prop.formula =~ "not asserted by TLC"
+      refute prop.formula =~ "verified by TLC"
+    end
+  end
+
   describe "fidelity errors" do
     test "untranslatable invariant expression reports E041" do
       ir =
