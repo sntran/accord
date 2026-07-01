@@ -12,3 +12,4 @@ This directory contains architectural decision records (ADRs) for the accord2 pr
 | [006](006-pentiment-error-reporting.md) | Errors use pentiment for source-annotated diagnostics with labeled code spans, making violations actionable for both humans and tooling. |
 | [007](007-strict-tla-compilation.md) | TLA+ spec generation failures abort compilation by default (`tla: :strict`); anything the model cannot express is a loud diagnostic, and stale specs are never verified. |
 | [008](008-roles-events-direction-blame.md) | Protocols are two-party with direction-derived blame; the `event` primitive validates server pushes through the monitor and models them as TLA+ actions. |
+| [009](009-multi-session-ghost-state.md) | Multi-session model checking with ghost shared state: `sessions: N` and `shared:` tracks are verified by TLC, not runtime-enforced; the asymmetry is declared loudly. |

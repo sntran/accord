@@ -177,6 +177,35 @@ Property violations under `:log` and `:reject` forward the reply normally and
 log the violation as a side effect. Under `:crash`, the reply is sent but the
 monitor stops immediately after.
 
+## What the runtime checks vs. what TLC checks
+
+The two pipelines share one IR, but their coverage is deliberately asymmetric.
+Every asymmetry is declared per-construct — a warning, a spec annotation, or a
+check-task note — never silent (ADR-007, ADR-009).
+
+| Construct | Runtime monitor | TLC |
+|-----------|-----------------|-----|
+| States, transitions, message/reply types | enforced per message | exhaustive within domains |
+| Guards, `where:` constraints | evaluated per message | action preconditions |
+| Tracks + updates | applied per session | modeled per session |
+| `invariant`, `local_invariant`, `action`, `bounded`, `forbidden` | checked after each transition | INVARIANT / temporal PROPERTY |
+| `correspondence` (unkeyed) | branch-resolved counter, violation on close-without-open | auxiliary counter invariant |
+| `correspondence ... by:` (keyed) | per-key counting | runtime-only (labeled in spec, W004) |
+| `ordered`, `precedence` | enforced | runtime-only (labeled in spec, W004) |
+| `liveness` | wall-clock timer (`timeout:`) | untimed `~>` under `assuming:` fairness |
+| `timeout:` (per transition) | enforced | not modeled (untimed) |
+| `reachable` | — | compile-time graph check (annotated, not asserted) |
+| `shared:` tracks across sessions | per-monitor copy only (ghost) | shared scalar at `sessions: N` |
+| `exclusive` | — (ghost) | cross-session invariant at `sessions >= 2` |
+
+The ghost constructs (`shared:`, `exclusive`, `sessions: N`) exist because the
+server is the ground truth for cross-session state; duplicating it at runtime
+would be a distributed-systems problem of its own. Runtime checking of
+shared-track properties is therefore weaker than the model: a server issuing
+non-monotonic fence tokens across two clients passes each monitor individually
+but fails TLC. W003 warns when ghost constructs are declared without
+`sessions: 2`.
+
 ## Closure lifting
 
 ### The problem
@@ -370,6 +399,9 @@ it possible to search for documentation or suppress specific checks.
 - E050 -- more than two roles declared (protocols are two-party).
 - E051 -- duplicate role name.
 
+**Session errors (E060):**
+- E060 -- exclusive check references undefined state.
+
 **TLA+ fidelity errors (E041-E046):** anything the model cannot faithfully
 express is a loud, span-carrying diagnostic — never a silent drop. Under the
 default `tla: :strict` these abort compilation; under `tla: :warn` they
@@ -386,6 +418,10 @@ downgrade to a warning and any stale spec is deleted.
 **Warnings (W001-W005):**
 - W001 -- state unreachable from initial state.
 - W002 -- no terminal state reachable from initial state.
+- W003 -- shared tracks or exclusive checks declared but model checking is
+  single-session (`sessions: 1`).
+- W004 -- property kind enforced at runtime only (rendered in the spec's
+  runtime-only block and reported by `mix accord.check`).
 - W005 -- liveness check without assuming: is verified under blanket
   WF_vars(Next), where any client loop or reachable terminal fails it.
 
