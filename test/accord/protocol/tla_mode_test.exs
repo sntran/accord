@@ -77,22 +77,26 @@ defmodule Accord.Protocol.TLAModeTest do
   end
 
   describe "tla: :strict (default)" do
-    test "aborts compilation when spec generation fails" do
-      assert_raise ArgumentError, ~r/outside its model domain/, fn ->
-        defmodule StrictProtocol do
-          use Accord.Protocol
+    test "aborts compilation with a formatted E044 when spec generation fails" do
+      error =
+        assert_raise CompileError, fn ->
+          defmodule StrictProtocol do
+            use Accord.Protocol
 
-          initial :ready
+            initial :ready
 
-          track :n, :non_neg_integer, default: 1000
+            track :n, :non_neg_integer, default: 1000
 
-          state :ready do
-            on :stop, reply: :stopped, goto: :stopped
+            state :ready do
+              on :stop, reply: :stopped, goto: :stopped
+            end
+
+            state :stopped, terminal: true
           end
-
-          state :stopped, terminal: true
         end
-      end
+
+      assert error.description =~ "E044"
+      assert error.description =~ "outside its model domain"
     end
 
     test "reports :ok status when generation succeeds" do

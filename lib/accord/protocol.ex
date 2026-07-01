@@ -753,23 +753,22 @@ defmodule Accord.Protocol do
         {:ok, ir}
 
       {:error, reports} ->
-        source =
-          if ir.source_file && File.exists?(ir.source_file) do
-            Pentiment.Source.from_file(ir.source_file)
-          else
-            %{}
-          end
-
-        message =
-          reports
-          |> Enum.map(fn report -> Pentiment.format(report, source) end)
-          |> Enum.join("\n\n")
-
         raise CompileError,
-          description: message,
+          description: format_reports(reports, ir),
           file: env.file,
           line: env.line
     end
+  end
+
+  defp format_reports(reports, ir) do
+    source =
+      if ir.source_file && File.exists?(ir.source_file) do
+        Pentiment.Source.from_file(ir.source_file)
+      else
+        %{}
+      end
+
+    Enum.map_join(reports, "\n\n", fn report -> Pentiment.format(report, source) end)
   end
 
   # -- TLA+ Compilation --
@@ -804,14 +803,28 @@ defmodule Accord.Protocol do
         project_root: project_root
       )
 
-    {:ok, result} = Accord.TLA.Compiler.compile(ir, config)
+    case Accord.TLA.Compiler.compile(ir, config) do
+      {:ok, result} ->
+        # Write .tla and .cfg to _build/accord/.
+        Files.write(ir.name, result)
 
-    # Write .tla and .cfg to _build/accord/.
-    Files.write(ir.name, result)
+        # Build span map for __tla_span__/1.
+        span_map = SpanMap.build(ir, result.actions)
+        {:ok, Map.put(result, :span_map, span_map)}
 
-    # Build span map for __tla_span__/1.
-    span_map = SpanMap.build(ir, result.actions)
-    {:ok, Map.put(result, :span_map, span_map)}
+      {:error, reports} ->
+        case mode do
+          :strict ->
+            raise CompileError,
+              description: format_reports(reports, ir),
+              file: env.file,
+              line: env.line
+
+          :warn ->
+            summary = Enum.map_join(reports, "; ", & &1.message)
+            warn_tla_failure(ir, env, summary, format_reports(reports, ir))
+        end
+    end
   rescue
     e ->
       case mode do
@@ -819,19 +832,22 @@ defmodule Accord.Protocol do
           reraise e, __STACKTRACE__
 
         :warn ->
-          # Delete any spec from a previous compile: a stale spec that no
-          # longer matches the protocol must never be verified.
-          Files.delete(ir.name)
-
-          summary = Exception.message(e)
-
-          IO.warn(
-            "TLA+ compilation failed for #{inspect(ir.name)}: #{summary}",
-            Macro.Env.stacktrace(env)
-          )
-
-          {:error, summary}
+          message = Exception.message(e)
+          warn_tla_failure(ir, env, message, message)
       end
+  end
+
+  defp warn_tla_failure(ir, env, summary, detail) do
+    # Delete any spec from a previous compile: a stale spec that no
+    # longer matches the protocol must never be verified.
+    Files.delete(ir.name)
+
+    IO.warn(
+      "TLA+ compilation failed for #{inspect(ir.name)}:\n#{detail}",
+      Macro.Env.stacktrace(env)
+    )
+
+    {:error, summary}
   end
 
   defp tla_mode(opts, ir, env) do

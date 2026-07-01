@@ -76,7 +76,7 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
       assert counter_var.init == "2"
     end
 
-    test "raises when default is outside resolved domain" do
+    test "reports E044 when default is outside resolved domain" do
       ir = %{
         minimal_ir()
         | tracks: [
@@ -84,9 +84,24 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
           ]
       }
 
-      assert_raise ArgumentError, ~r/track :counter default 42 is outside/, fn ->
-        BuildStateSpace.run(ir, default_config())
-      end
+      assert {:error, [report]} = BuildStateSpace.run(ir, default_config())
+      assert report.code == "E044"
+      assert report.message =~ "track :counter default 42 is outside"
+    end
+
+    test "reports one E044 per offending track" do
+      ir = %{
+        minimal_ir()
+        | tracks: [
+            %Track{name: :counter, type: :integer, default: 42},
+            %Track{name: :fine, type: :integer, default: 0},
+            %Track{name: :other, type: :integer, default: -99}
+          ]
+      }
+
+      assert {:error, reports} = BuildStateSpace.run(ir, default_config())
+      assert length(reports) == 2
+      assert Enum.all?(reports, &(&1.code == "E044"))
     end
 
     test "init override replaces protocol default" do

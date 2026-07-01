@@ -10,9 +10,19 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
 
   alias Accord.IR
   alias Accord.TLA.{ModelConfig, StateSpace}
+  alias Pentiment.Report
 
-  @spec run(IR.t(), ModelConfig.t()) :: {:ok, StateSpace.t()}
+  import Accord.Pass.Helpers, only: [maybe_add_source: 2, maybe_add_span_label: 3]
+
+  @spec run(IR.t(), ModelConfig.t()) :: {:ok, StateSpace.t()} | {:error, [Report.t()]}
   def run(%IR{} = ir, %ModelConfig{} = config) do
+    case collect_init_errors(ir, config) do
+      [] -> {:ok, build_state_space(ir, config)}
+      errors -> {:error, errors}
+    end
+  end
+
+  defp build_state_space(%IR{} = ir, %ModelConfig{} = config) do
     states = Map.keys(ir.states) |> Enum.map(&state_to_tla/1)
     has_local_inv = has_local_invariants?(ir)
 
@@ -36,8 +46,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
           else
             type_str
           end
-
-        validate_init!(track.name, init_value, domain)
 
         %{
           name: Atom.to_string(track.name),
@@ -86,7 +94,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     # Collect model value constants needed for the cfg.
     constants = collect_constants(ir, config)
 
-    state_space = %StateSpace{
+    %StateSpace{
       module_name: module_name,
       variables: variables,
       type_invariant: type_invariant,
@@ -97,8 +105,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       constants: constants,
       state_constraint: config.state_constraint
     }
-
-    {:ok, state_space}
   end
 
   defp state_to_tla(state_name), do: Atom.to_string(state_name)
@@ -108,13 +114,33 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     "{#{elements}}"
   end
 
-  defp validate_init!(track_name, init_value, domain) do
-    unless value_in_domain?(init_value, domain) do
-      raise ArgumentError,
-            "track :#{track_name} default #{inspect(init_value)} is outside " <>
-              "its model domain #{inspect_domain(domain)} — " <>
-              "add init: %{#{track_name}: <value>} to your model config"
-    end
+  # A track whose init value falls outside its model domain would make Init
+  # violate TypeInvariant on the very first state — report it at compile
+  # time with a span instead of letting TLC produce a confusing violation.
+  defp collect_init_errors(%IR{} = ir, %ModelConfig{} = config) do
+    Enum.flat_map(ir.tracks, fn track ->
+      domain = ModelConfig.resolve_domain(config, track.name, track.type)
+      init_value = ModelConfig.resolve_init(config, track.name, track.default)
+
+      if value_in_domain?(init_value, domain) do
+        []
+      else
+        [init_error(ir, track, init_value, domain)]
+      end
+    end)
+  end
+
+  defp init_error(ir, track, init_value, domain) do
+    Report.error(
+      "track :#{track.name} default #{inspect(init_value)} is outside " <>
+        "its model domain #{inspect_domain(domain)}"
+    )
+    |> Report.with_code("E044")
+    |> Report.with_help(
+      "add init: %{#{track.name}: <value>} to your model config, or widen the domain"
+    )
+    |> maybe_add_source(ir.source_file)
+    |> maybe_add_span_label(track.span, "declared here")
   end
 
   defp value_in_domain?(nil, _domain), do: true

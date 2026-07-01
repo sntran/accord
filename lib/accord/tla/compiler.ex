@@ -21,8 +21,12 @@ defmodule Accord.TLA.Compiler do
 
   @doc """
   Compiles a protocol IR to TLA+ module and config file strings.
+
+  Returns `{:error, reports}` when the protocol cannot be faithfully
+  expressed in TLA+ — the caller decides whether that aborts compilation
+  (`tla: :strict`) or degrades to a warning (`tla: :warn`).
   """
-  @spec compile(IR.t(), ModelConfig.t()) :: {:ok, result()}
+  @spec compile(IR.t(), ModelConfig.t()) :: {:ok, result()} | {:error, [Pentiment.Report.t()]}
   def compile(%IR{} = ir, %ModelConfig{} = config) do
     with {:ok, state_space} <- BuildStateSpace.run(ir, config),
          {:ok, actions} <- BuildActions.run(ir, state_space, config),
