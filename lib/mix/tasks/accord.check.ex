@@ -190,7 +190,9 @@ defmodule Mix.Tasks.Accord.Check do
     # checking stays on by default; --no-deadlock is the escape hatch.
     disable_deadlock = if deadlock?, do: [], else: ["-deadlock"]
 
-    args = base_args ++ disable_deadlock ++ [tla_file]
+    # -cleanup removes TLC's states/ metadata directories, which would
+    # otherwise accumulate in _build/accord/ across runs.
+    args = base_args ++ disable_deadlock ++ ["-cleanup", tla_file]
     args = if workers, do: args ++ ["-workers", Integer.to_string(workers)], else: args
 
     case System.cmd("java", args, cd: tla_dir, stderr_to_stdout: true) do

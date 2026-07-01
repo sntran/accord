@@ -1,41 +1,44 @@
 # accord2
 
-Runtime protocol contracts for Elixir with blame assignment and TLA+ model checking.
+Protocol contracts for Elixir in the lineage of Joe Armstrong's UBF (2002): one specification, checked twice — a runtime blame-assigning monitor and a TLA+ model checked by TLC.
 
 ## What it does
 
-Accord lets you declare a state machine protocol (states, transitions, message types, reply types, guards, tracks, properties) using a compile-time DSL. At compile time, it:
+Accord lets you declare a two-party protocol (states, transitions with typed replies, server-push events, guards, `where:` reply constraints, tracks, a property algebra) using a compile-time DSL. At compile time, it:
 
 1. Builds an intermediate representation (IR) from the DSL.
-2. Validates the IR through a pipeline of passes.
-3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime.
-4. Generates a TLA+ specification for exhaustive model checking with TLC.
+2. Validates the IR through a pipeline of passes (errors E001–E060, warnings W001–W005).
+3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime, with blame derived from message direction (`:client` | `:server` | `:property`, labeled with declared role names).
+4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks and `exclusive`).
 
 ## Architecture
 
-For a thorough treatment of the two-pipeline design, blame assignment, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md).
+For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–009); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md), including the deferred roadmap (protocol constants, state timeouts, check caching, trace validation, version compatibility).
 
 The IR (`Accord.IR`) is the single source of truth. Two pipelines flow from it:
 
 - **Downward (runtime)**: IR → transition table + track init → `Accord.Monitor` (gen_statem)
 - **Upward (verification)**: IR → state space → actions → properties → TLA+ `.tla` + `.cfg`
 
+Coverage is deliberately asymmetric and always declared: constructs TLC cannot express are labeled runtime-only (W004); ghost constructs the runtime cannot enforce (`shared:` tracks, `exclusive`) are warned about at `sessions: 1` (W003). Never silent.
+
 ### Key modules
 
 | Module | Responsibility |
 |--------|---------------|
-| `Accord.Protocol` | DSL macros, `@before_compile` orchestration |
-| `Accord.IR` | IR structs (State, Transition, Branch, Track, Property, Check) |
-| `Accord.Monitor` | Runtime gen_statem proxy with blame assignment |
-| `Accord.Pass.*` | Validation passes (structure, types, determinism, reachability, properties, field paths, span refinement) |
-| `Accord.Pass.Helpers` | Shared helpers for validation passes |
-| `Accord.Pass.Monitor.*` | Monitor compilation passes (BuildTransitionTable, BuildTrackInit) |
-| `Accord.Pass.TLA.*` | TLA+ compilation passes (BuildStateSpace, BuildActions, BuildProperties, Emit) |
-| `Accord.TLA.Compiler` | Orchestrates TLA+ pass pipeline |
-| `Accord.TLA.TLCParser` | Parses TLC stdout into structured results |
-| `Accord.TLA.ModelConfig` | Resolves finite domains for TLC model checking |
-| `Accord.Type.Check` | Runtime type checking for messages and replies |
-| `Accord.Violation` | Violation structs with blame (client/server/property) |
+| `Accord.Protocol` | DSL macros (`on`/`cast`/`event`/`track`/`model`/`property`), `@before_compile` orchestration, `tla:` strictness |
+| `Accord.IR` | IR structs (State, Transition, Branch, Track, Property, Check, Role) + inline model config |
+| `Accord.Monitor` | Runtime gen_statem proxy: calls, casts, server-push events (`:downstream`), blame assignment |
+| `Accord.Pass.*` | Validation passes (structure, roles, tracks, types, determinism, reachability, properties, field paths, span refinement) |
+| `Accord.Pass.TLA.*` | TLA+ passes (BuildStateSpace, BuildActions, BuildProperties, Emit) + `Expr` (fidelity errors E041–E045) |
+| `Accord.TLA.Compiler` | Orchestrates TLA+ passes; returns `{:error, reports}` on infidelity |
+| `Accord.TLA.Sessions` | Multi-session emission context (per-session vs shared variables) |
+| `Accord.TLA.GuardCompiler` | Elixir AST → TLA+ expressions; returns emitted identifiers for E043 validation |
+| `Accord.TLA.ModelConfig` | Finite domains: inline (track `domain:`, `model do`) > protocol file > project file > builtins |
+| `Accord.TLA.Files` | Single source of `_build/accord/` artifact paths (write/delete) |
+| `Accord.TLA.TLCParser` / `ViolationReport` | TLC stdout → structured results → pentiment diagnostics |
+| `Accord.Violation` | Violation structs with direction-derived blame |
+| `Accord.Test.*` | Shipped harnesses: ProtocolExerciser (propcheck), TLACheck (real TLC assertions), FaultyServer |
 
 ### Closure lifting
 
@@ -44,20 +47,24 @@ Guards, updates, invariants, and other user-provided functions are anonymous clo
 ## Development commands
 
 ```bash
-mix test                      # run all tests
-mix test test/accord/         # run unit tests
-mix test test/property/       # run property-based tests
+mix test                      # run all tests (includes :tlc tests when tla2tools.jar is available)
+mix test --only tlc           # only the real-TLC integration tests
 mix format                    # format code
-mix format --check-formatted  # check formatting
 mix dialyzer                  # static analysis
+mix accord.check              # model-check all protocols (deadlock on by default)
+mix run examples/job_queue/demo.exs   # run an example demo
 ```
+
+## Examples
+
+`examples/` compiles in dev and test (never :prod), so protocol compilation — full validation plus strict TLA+ emission — runs on every example in CI. Each example ships a correct server, a seeded design bug pinned by a real TLC run in `test/examples/`, and a demo script. Pedagogical order: circuit_breaker → payment → job_queue (flagship) → genstage_demand. The multi-session showcase is `test/support/protocols/distributed_lock.ex`.
 
 ## Testing conventions
 
-- Unit tests mirror `lib/` structure in `test/accord/`.
+- Unit tests mirror `lib/` structure in `test/accord/`; example tests in `test/examples/`.
 - Property-based tests (propcheck statem) live in `test/property/`.
-- Test support modules (protocols, faulty servers) in `test/support/`.
-- Test helpers build IR structs directly with `sample_ir` functions.
+- Test support modules (protocols, servers) in `test/support/`; reusable harnesses ship in `lib/accord/test/`.
+- TLC-dependent tests carry `@tag :tlc` + `:tmp_dir`; `test_helper.exs` excludes them when `tla2tools.jar` is absent.
 - Use `@moduletag :capture_log` for tests that trigger logged violations.
 - Use `:sys.get_state/1` as a synchronous barrier instead of `timer.sleep`.
 
@@ -66,4 +73,7 @@ mix dialyzer                  # static analysis
 - `Accord.Pass.Helpers` provides shared `maybe_add_source/2`, `maybe_add_span_label/3`, and `message_tag/1` for validation passes. Import it rather than duplicating.
 - The `message_tag/1` in `Monitor` and `TransitionTable` operates on raw runtime messages (atoms/tuples) — semantically different from the IR helpers version.
 - Validation passes return `{:ok, ir}` or `{:error, [Report.t()]}`. The compiler pipeline in `Protocol.compile_ir/2` chains them with `with`.
-- TLA+ passes return `{:ok, result}` and are orchestrated by `TLA.Compiler.compile/2`.
+- TLA+ passes return `{:ok, result}` or `{:error, [Report.t()]}`; anything the model cannot faithfully express must be a loud, span-carrying diagnostic — never a silent drop (ADR-007).
+- Branch selection (runtime) mirrors the model: first branch whose type matches AND whose `where:` constraint holds; constraint failures fall through before being reported as `:constraint_failed`.
+- Multi-session emission is gated on `Sessions.multi?/1`; `sessions: 1` output must remain byte-identical (pinned by tests in `test/accord/tla/sessions_test.exs`).
+- New DSL macros need `.formatter.exs` `locals_without_parens` entries.
