@@ -106,7 +106,7 @@ defmodule Accord.Test.TLACheck do
 
   defp run_tlc(protocol_mod, tmp_dir, opts) do
     ir = protocol_mod.__ir__()
-    config = resolve_config(protocol_mod, opts)
+    config = protocol_mod |> resolve_config(opts) |> ModelConfig.apply_inline(ir)
     {:ok, result} = Compiler.compile(ir, config)
 
     # The TLA+ filename must match the MODULE name inside the file.

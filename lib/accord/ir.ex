@@ -17,7 +17,8 @@ defmodule Accord.IR do
           tracks: [Track.t()],
           states: %{atom() => State.t()},
           anystate: [Transition.t()],
-          properties: [Property.t()]
+          properties: [Property.t()],
+          model: keyword()
         }
 
   @enforce_keys [:name, :initial]
@@ -29,6 +30,9 @@ defmodule Accord.IR do
     tracks: [],
     states: %{},
     anystate: [],
-    properties: []
+    properties: [],
+    # Inline model configuration from the `model do ... end` block
+    # (sessions, domains, max_list_length, state_constraint).
+    model: []
   ]
 end

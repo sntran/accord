@@ -106,6 +106,7 @@ defmodule Accord.Protocol do
           event: 1,
           event: 2,
           property: 2,
+          model: 1,
           in_state: 1
         ]
 
@@ -115,6 +116,7 @@ defmodule Accord.Protocol do
       Module.register_attribute(__MODULE__, :accord_roles, accumulate: true)
       Module.register_attribute(__MODULE__, :accord_tracks, accumulate: true)
       Module.register_attribute(__MODULE__, :accord_properties, accumulate: true)
+      Module.register_attribute(__MODULE__, :accord_model, accumulate: true)
       Module.put_attribute(__MODULE__, :accord_opts, unquote(Macro.escape(opts)))
 
       # Model config files shape the generated TLA+ spec, so editing them
@@ -171,6 +173,8 @@ defmodule Accord.Protocol do
   defmacro track(name, type, opts) do
     default = Keyword.fetch!(opts, :default)
     shared = Keyword.get(opts, :shared, false)
+    domain = Keyword.get(opts, :domain)
+    model_init = Keyword.get(opts, :model_init)
     type_value = parse_track_type(type)
     escaped_type = Macro.escape(type_value)
     span = span_from_name_ast(name, __CALLER__)
@@ -184,6 +188,8 @@ defmodule Accord.Protocol do
           type: unquote(escaped_type),
           default: unquote(default),
           shared: unquote(shared),
+          domain: unquote(domain),
+          model_init: unquote(model_init),
           span: unquote(span)
         }
       )
@@ -745,6 +751,31 @@ defmodule Accord.Protocol do
   end
 
   @doc """
+  Inline model configuration for TLC.
+
+  Declares finite domains and session count next to the protocol they
+  bound, with the highest precedence (inline > protocol model file >
+  project `.accord_model.exs` > builtins). Tracks may also declare
+  `domain:` and `model_init:` directly.
+
+      model do
+        sessions 2
+        domain :client_id, {:model_values, 2}
+        max_list_length 4
+        state_constraint "fence_token =< 5"
+      end
+  """
+  defmacro model(do: block) do
+    quote do
+      import Accord.Protocol.ModelBlock
+
+      unquote(block)
+
+      import Accord.Protocol.ModelBlock, only: []
+    end
+  end
+
+  @doc """
   Defines a named property with one or more checks.
 
       property :monotonic_tokens do
@@ -877,6 +908,7 @@ defmodule Accord.Protocol do
     roles_raw = Module.get_attribute(env.module, :accord_roles) |> Enum.reverse()
     tracks_raw = Module.get_attribute(env.module, :accord_tracks) |> Enum.reverse()
     properties_raw = Module.get_attribute(env.module, :accord_properties) |> Enum.reverse()
+    model_raw = Module.get_attribute(env.module, :accord_model) |> Enum.reverse()
 
     if is_nil(initial) do
       raise CompileError,
@@ -898,7 +930,8 @@ defmodule Accord.Protocol do
       tracks: tracks_raw,
       states: states,
       anystate: anystate_raw,
-      properties: properties_raw
+      properties: properties_raw,
+      model: model_raw
     }
 
     # Run validation pipeline.
@@ -1037,6 +1070,7 @@ defmodule Accord.Protocol do
         protocol_config_path: model_path,
         project_root: project_root
       )
+      |> ModelConfig.apply_inline(ir)
 
     warn_single_session_ghosts(ir, config, env)
 

@@ -91,6 +91,41 @@ defmodule Accord.TLA.ModelConfig do
   end
 
   @doc """
+  Applies the protocol's inline model configuration on top of a loaded
+  config.
+
+  Inline sources win over file-based config: track-level `domain:` and
+  `model_init:` options, and the `model do ... end` block (sessions,
+  domains, max_list_length, state_constraint). Keeping domains in the
+  protocol source means edits recompile the protocol — the spec can
+  never go stale against an external file.
+  """
+  @spec apply_inline(t(), Accord.IR.t()) :: t()
+  def apply_inline(%__MODULE__{} = config, %Accord.IR{} = ir) do
+    track_domains =
+      for track <- ir.tracks, track.domain != nil, into: %{}, do: {track.name, track.domain}
+
+    track_inits =
+      for track <- ir.tracks,
+          track.model_init != nil,
+          into: %{},
+          do: {track.name, track.model_init}
+
+    block_domains = for {:domain, {name, spec}} <- ir.model, into: %{}, do: {name, spec}
+
+    block = fn key -> ir.model |> Keyword.get_values(key) |> List.last() end
+
+    %__MODULE__{
+      config
+      | domains: config.domains |> Map.merge(block_domains) |> Map.merge(track_domains),
+        init: Map.merge(config.init, track_inits),
+        sessions: block.(:sessions) || config.sessions,
+        max_list_length: block.(:max_list_length) || config.max_list_length,
+        state_constraint: block.(:state_constraint) || config.state_constraint
+    }
+  end
+
+  @doc """
   Resolves a domain for a parameter by name and type.
 
   Checks in order:

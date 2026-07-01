@@ -11,6 +11,12 @@ protocol_macros = [
   event: 1,
   event: 2,
   property: 2,
+  model: 1,
+  # Accord.Protocol.ModelBlock (inside `model ... do` blocks)
+  sessions: 1,
+  domain: 2,
+  max_list_length: 1,
+  state_constraint: 1,
   # Accord.Protocol.Block (inside `on ... do` blocks)
   reply: 1,
   goto: 1,
