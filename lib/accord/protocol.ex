@@ -103,6 +103,8 @@ defmodule Accord.Protocol do
           anystate: 1,
           on: 2,
           cast: 1,
+          event: 1,
+          event: 2,
           property: 2,
           in_state: 1
         ]
@@ -519,6 +521,215 @@ defmodule Accord.Protocol do
         current = Module.get_attribute(__MODULE__, :accord_current_transitions)
         Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
       end
+    end
+  end
+
+  @doc """
+  Defines a server-push event (server → client, fire-and-forget).
+
+  Events are the reverse direction of `cast`: the server pushes them
+  through the monitor, which validates them against the current state and
+  forwards them downstream. Violations blame the server. Events may change
+  state (`goto:`), which `on`-style anystate transitions cannot.
+
+      state :subscribed do
+        event {:data, item :: term()} do
+          guard fn {:data, _}, tracks -> tracks.demand > 0 end
+          goto :subscribed
+          update fn {:data, _item}, tracks -> %{tracks | demand: tracks.demand - 1} end
+        end
+
+        event :halted, goto: :done
+      end
+
+  Event updates take `fn message, tracks` (there is no reply). State-level
+  events must declare `goto:`; anystate events must not (they stay in the
+  current state). Events cannot declare replies or branches.
+  """
+  defmacro event(message_spec) do
+    build_event_keyword(message_spec, [], __CALLER__)
+  end
+
+  defmacro event(message_spec, do: block) do
+    {message_pattern, message_types, message_arg_names, message_arg_spans} =
+      parse_message_spec(message_spec)
+
+    escaped_types = Macro.escape(message_types)
+    escaped_arg_names = Macro.escape(message_arg_names)
+    escaped_arg_spans = Macro.escape(message_arg_spans)
+    span = message_span_ast(message_spec, __CALLER__)
+
+    caller_file = __CALLER__.file
+    caller_line = __CALLER__.line
+    block_end_line = find_block_end_line(caller_file, caller_line)
+
+    block_span =
+      quote do
+        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+      end
+
+    quote do
+      import Accord.Protocol.Block
+
+      Module.put_attribute(__MODULE__, :accord_on_reply_type, nil)
+      Module.put_attribute(__MODULE__, :accord_on_reply_constraint, nil)
+      Module.put_attribute(__MODULE__, :accord_on_reply_span, nil)
+      Module.put_attribute(__MODULE__, :accord_on_goto, nil)
+      Module.put_attribute(__MODULE__, :accord_on_goto_span, nil)
+      Module.put_attribute(__MODULE__, :accord_on_guard, nil)
+      Module.put_attribute(__MODULE__, :accord_on_update, nil)
+      Module.put_attribute(__MODULE__, :accord_on_timeout, nil)
+      Module.put_attribute(__MODULE__, :accord_on_branches, [])
+
+      unquote(block)
+
+      goto_state = Module.get_attribute(__MODULE__, :accord_on_goto)
+      guard_pair = Module.get_attribute(__MODULE__, :accord_on_guard)
+      update_pair = Module.get_attribute(__MODULE__, :accord_on_update)
+
+      Accord.Protocol.__validate_event_block__(
+        __MODULE__,
+        unquote(caller_file),
+        unquote(caller_line)
+      )
+
+      in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
+
+      to =
+        Accord.Protocol.__event_target__(
+          goto_state,
+          in_anystate,
+          unquote(caller_file),
+          unquote(caller_line)
+        )
+
+      transition = %Transition{
+        message_pattern: unquote(message_pattern),
+        message_types: unquote(escaped_types),
+        message_arg_names: unquote(escaped_arg_names),
+        message_arg_spans: unquote(escaped_arg_spans),
+        kind: :event,
+        branches: [],
+        to: to,
+        guard: guard_pair,
+        update: update_pair,
+        span: unquote(span),
+        block_span: unquote(block_span)
+      }
+
+      if in_anystate do
+        Module.put_attribute(__MODULE__, :accord_anystate, transition)
+      else
+        current = Module.get_attribute(__MODULE__, :accord_current_transitions)
+        Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
+      end
+
+      Module.delete_attribute(__MODULE__, :accord_on_reply_type)
+      Module.delete_attribute(__MODULE__, :accord_on_reply_constraint)
+      Module.delete_attribute(__MODULE__, :accord_on_reply_span)
+      Module.delete_attribute(__MODULE__, :accord_on_goto)
+      Module.delete_attribute(__MODULE__, :accord_on_goto_span)
+      Module.delete_attribute(__MODULE__, :accord_on_guard)
+      Module.delete_attribute(__MODULE__, :accord_on_update)
+      Module.delete_attribute(__MODULE__, :accord_on_timeout)
+      Module.delete_attribute(__MODULE__, :accord_on_branches)
+
+      import Accord.Protocol.Block, only: []
+    end
+  end
+
+  defmacro event(message_spec, opts) when is_list(opts) do
+    build_event_keyword(message_spec, opts, __CALLER__)
+  end
+
+  defp build_event_keyword(message_spec, opts, caller) do
+    goto_state = Keyword.get(opts, :goto)
+
+    {message_pattern, message_types, message_arg_names, message_arg_spans} =
+      parse_message_spec(message_spec)
+
+    escaped_types = Macro.escape(message_types)
+    escaped_arg_names = Macro.escape(message_arg_names)
+    escaped_arg_spans = Macro.escape(message_arg_spans)
+    span = message_span_ast(message_spec, caller)
+    caller_file = caller.file
+    caller_line = caller.line
+
+    quote do
+      in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
+
+      to =
+        Accord.Protocol.__event_target__(
+          unquote(goto_state),
+          in_anystate,
+          unquote(caller_file),
+          unquote(caller_line)
+        )
+
+      transition = %Transition{
+        message_pattern: unquote(message_pattern),
+        message_types: unquote(escaped_types),
+        message_arg_names: unquote(escaped_arg_names),
+        message_arg_spans: unquote(escaped_arg_spans),
+        kind: :event,
+        branches: [],
+        to: to,
+        span: unquote(span)
+      }
+
+      if in_anystate do
+        Module.put_attribute(__MODULE__, :accord_anystate, transition)
+      else
+        current = Module.get_attribute(__MODULE__, :accord_current_transitions)
+        Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
+      end
+    end
+  end
+
+  @doc false
+  # Rejects reply/branch/timeout declarations inside event blocks: events
+  # are one-way pushes with no reply surface.
+  def __validate_event_block__(module, file, line) do
+    cond do
+      Module.get_attribute(module, :accord_on_reply_type) != nil or
+          Module.get_attribute(module, :accord_on_branches) != [] ->
+        raise CompileError,
+          description: "events cannot declare replies or branches (E004)",
+          file: file,
+          line: line
+
+      Module.get_attribute(module, :accord_on_timeout) != nil ->
+        raise CompileError,
+          description: "events are one-way pushes and do not support timeout",
+          file: file,
+          line: line
+
+      true ->
+        :ok
+    end
+  end
+
+  @doc false
+  # State-level events must say where they go; anystate events stay put.
+  def __event_target__(goto_state, in_anystate, file, line) do
+    cond do
+      in_anystate and goto_state != nil ->
+        raise CompileError,
+          description: "anystate events cannot specify goto:",
+          file: file,
+          line: line
+
+      not in_anystate and goto_state == nil ->
+        raise CompileError,
+          description: "state events must specify goto:",
+          file: file,
+          line: line
+
+      in_anystate ->
+        :__same__
+
+      true ->
+        goto_state
     end
   end
 

@@ -23,6 +23,7 @@ defmodule Accord.Monitor do
   defstruct [
     :compiled,
     :upstream,
+    :downstream,
     :tracks,
     :violation_policy,
     call_timeout: 5_000,
@@ -41,6 +42,9 @@ defmodule Accord.Monitor do
   ## Options
 
   - `:upstream` (required) — PID of the server to forward messages to.
+  - `:downstream` — PID that receives validated server-push events
+    (see `event/2`). `nil` means validate-only: events are checked and
+    consumed without forwarding.
   - `:violation_policy` — `:log` | `:reject` | `:crash` | `{mod, fun}`. Default `:crash`.
   - `:call_timeout` — timeout for upstream calls in ms. Default 5000.
   - `:liveness_timeout` — override all per-property liveness timeouts. Default `nil` (use per-property defaults).
@@ -48,12 +52,13 @@ defmodule Accord.Monitor do
   @spec start_link(Compiled.t(), keyword()) :: :gen_statem.start_ret()
   def start_link(%Compiled{} = compiled, opts) do
     upstream = Keyword.fetch!(opts, :upstream)
+    downstream = Keyword.get(opts, :downstream)
     policy = Keyword.get(opts, :violation_policy, :crash)
     timeout = Keyword.get(opts, :call_timeout, 5_000)
     liveness_timeout = Keyword.get(opts, :liveness_timeout)
     name = Keyword.get(opts, :name)
 
-    init_arg = {compiled, upstream, policy, timeout, liveness_timeout}
+    init_arg = {compiled, upstream, downstream, policy, timeout, liveness_timeout}
 
     if name do
       :gen_statem.start_link({:local, name}, __MODULE__, init_arg, [])
@@ -78,16 +83,31 @@ defmodule Accord.Monitor do
     :gen_statem.cast(monitor, {:accord_cast, message})
   end
 
+  @doc """
+  Pushes a server event through the monitor (server → client).
+
+  The server sends events via the monitor rather than directly to the
+  client, so the monitor can validate them against the protocol's
+  `event` declarations for the current state. Valid events are forwarded
+  to the `:downstream` pid (when configured) with `send/2`; violations
+  blame the server.
+  """
+  @spec event(pid() | atom(), term()) :: :ok
+  def event(monitor, message) do
+    :gen_statem.cast(monitor, {:accord_event, message})
+  end
+
   # -- gen_statem callbacks --
 
   @impl true
   def callback_mode, do: :handle_event_function
 
   @impl true
-  def init({compiled, upstream, policy, timeout, liveness_timeout}) do
+  def init({compiled, upstream, downstream, policy, timeout, liveness_timeout}) do
     data = %__MODULE__{
       compiled: compiled,
       upstream: upstream,
+      downstream: downstream,
       tracks: compiled.track_init,
       violation_policy: policy,
       call_timeout: timeout,
@@ -107,6 +127,11 @@ defmodule Accord.Monitor do
   # Asynchronous cast
   def handle_event(:cast, {:accord_cast, message}, state, data) do
     handle_cast(message, state, data)
+  end
+
+  # Server-push event
+  def handle_event(:cast, {:accord_event, message}, state, data) do
+    handle_push_event(message, state, data)
   end
 
   # Liveness timer expiry.
@@ -133,8 +158,13 @@ defmodule Accord.Monitor do
 
       true ->
         case TransitionTable.lookup(table, state, message) do
-          {:ok, transition} ->
+          {:ok, transition} when transition.kind == :call ->
             process_call_transition(transition, message, from, state, data)
+
+          {:ok, _transition} ->
+            # The tag belongs to a cast or a server event — not callable.
+            violation = Violation.invalid_message(state, message, valid_tags(table, state))
+            handle_violation(violation, from, state, data)
 
           :error ->
             violation = Violation.invalid_message(state, message, valid_tags(table, state))
@@ -145,7 +175,7 @@ defmodule Accord.Monitor do
 
   defp process_call_transition(transition, message, from, state, data) do
     # Step 1: Type-check message arguments.
-    case check_message_types(message, transition, state) do
+    case check_message_types(message, transition, state, :client) do
       :ok ->
         # Step 2: Evaluate guard (if present).
         case evaluate_guard(transition.guard, message, data.tracks) do
@@ -297,7 +327,7 @@ defmodule Accord.Monitor do
         case TransitionTable.lookup(table, state, message) do
           {:ok, transition} when transition.kind == :cast ->
             # Type-check message arguments.
-            case check_message_types(message, transition, state) do
+            case check_message_types(message, transition, state, :client) do
               :ok ->
                 # Forward to upstream.
                 GenServer.cast(data.upstream, message)
@@ -319,11 +349,94 @@ defmodule Accord.Monitor do
     end
   end
 
+  # -- Event Pipeline (server → client) --
+
+  defp handle_push_event(message, state, data) do
+    table = data.compiled.transition_table
+
+    cond do
+      TransitionTable.terminal?(table, state) ->
+        violation = Violation.session_ended(state, message, :server)
+        handle_cast_violation(violation, state, data)
+
+      true ->
+        case TransitionTable.lookup(table, state, message) do
+          {:ok, transition} when transition.kind == :event ->
+            process_event_transition(transition, message, state, data)
+
+          _ ->
+            violation = Violation.invalid_event(state, message, valid_event_tags(table, state))
+            handle_cast_violation(violation, state, data)
+        end
+    end
+  end
+
+  # Everything a pushed event violates is the server's fault — it is the
+  # sender. Blame derives from message direction, not pipeline position.
+  defp process_event_transition(transition, message, state, data) do
+    case check_message_types(message, transition, state, :server) do
+      :ok ->
+        case evaluate_guard(transition.guard, message, data.tracks) do
+          :ok ->
+            apply_event_transition(transition, message, state, data)
+
+          {:error, :guard_failed} ->
+            violation = Violation.guard_failed(state, message, :server)
+            handle_cast_violation(violation, state, data)
+        end
+
+      {:error, violation} ->
+        handle_cast_violation(violation, state, data)
+    end
+  end
+
+  defp apply_event_transition(transition, message, state, data) do
+    next_state = if transition.to == :__same__, do: state, else: transition.to
+    old_tracks = data.tracks
+    new_tracks = apply_event_update(transition.update, message, old_tracks)
+
+    case check_properties(message, state, next_state, old_tracks, new_tracks, data) do
+      {:ok, updated_data} ->
+        updated_data = %{updated_data | tracks: new_tracks}
+        updated_data = track_visited_state(updated_data, next_state)
+        timer_actions = liveness_actions(updated_data, next_state)
+        forward_event(data.downstream, message)
+        {:next_state, next_state, updated_data, timer_actions}
+
+      {:violation, violation, updated_data} ->
+        updated_data = %{updated_data | tracks: new_tracks}
+        updated_data = track_visited_state(updated_data, next_state)
+        timer_actions = liveness_actions(updated_data, next_state)
+        # Like all property violations, the (valid) event is still
+        # forwarded — the transition succeeded.
+        forward_event(data.downstream, message)
+        handle_event_property_violation(violation, next_state, updated_data, timer_actions)
+    end
+  end
+
+  # nil downstream means validate-only: the event is checked and consumed.
+  defp forward_event(nil, _message), do: :ok
+
+  defp forward_event(downstream, message) do
+    send(downstream, message)
+    :ok
+  end
+
+  defp apply_event_update(nil, _message, tracks), do: tracks
+
+  defp apply_event_update(%{fun: update_fn}, message, tracks) do
+    update_fn.(message, tracks)
+  end
+
+  defp valid_event_tags(table, state) do
+    for {{s, tag}, transition} <- table.table, s == state, transition.kind == :event, do: tag
+  end
+
   # -- Message Type Checking --
 
-  defp check_message_types(_message, %{message_types: []}, _state), do: :ok
+  defp check_message_types(_message, %{message_types: []}, _state, _blame), do: :ok
 
-  defp check_message_types(message, transition, state) when is_tuple(message) do
+  defp check_message_types(message, transition, state, blame) when is_tuple(message) do
     args = message |> Tuple.to_list() |> tl()
     types = transition.message_types
 
@@ -336,13 +449,13 @@ defmodule Accord.Monitor do
       |> Enum.find_value(:ok, fn {{arg, type}, pos} ->
         case Check.check(arg, type) do
           :ok -> nil
-          {:error, _} -> {:error, Violation.argument_type(state, message, pos, type, arg)}
+          {:error, _} -> {:error, Violation.argument_type(state, message, pos, type, arg, blame)}
         end
       end)
     end
   end
 
-  defp check_message_types(_message, _transition, _state), do: :ok
+  defp check_message_types(_message, _transition, _state, _blame), do: :ok
 
   # -- Guard Evaluation --
 
@@ -797,9 +910,30 @@ defmodule Accord.Monitor do
       :crash ->
         {:stop, {:protocol_violation, violation}, data}
 
+      {mod, fun} ->
+        apply(mod, fun, [violation])
+        {:keep_state, data}
+
       _ ->
         log_violation(violation)
         {:keep_state, data}
+    end
+  end
+
+  # Property violations on events still transition (the event was valid);
+  # the violation is reported through the policy.
+  defp handle_event_property_violation(violation, next_state, data, timer_actions) do
+    case data.violation_policy do
+      :crash ->
+        {:stop, {:protocol_violation, violation}, data}
+
+      {mod, fun} ->
+        apply(mod, fun, [violation])
+        {:next_state, next_state, data, timer_actions}
+
+      _ ->
+        log_violation(violation)
+        {:next_state, next_state, data, timer_actions}
     end
   end
 

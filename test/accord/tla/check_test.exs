@@ -66,6 +66,18 @@ defmodule Accord.TLA.CheckTest do
     end
   end
 
+  describe "server-push events" do
+    test "TLC interleaves pushes with calls and proves the demand invariant",
+         %{tmp_dir: tmp_dir} do
+      assert_passes(Accord.Test.Feed.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "removing the event guard lets TLC find the over-delivery interleaving",
+         %{tmp_dir: tmp_dir} do
+      assert_fails(Accord.Test.FeedUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
+    end
+  end
+
   describe "deadlock" do
     test "deadlock detects stuck non-terminal state by default", %{tmp_dir: tmp_dir} do
       # No check_deadlock flag needed — deadlock checking is the default.

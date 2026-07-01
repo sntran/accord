@@ -297,6 +297,76 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
     end
   end
 
+  describe "event actions" do
+    test "events become actions interleaved with call actions" do
+      ir = Accord.Test.Feed.Protocol.__ir__()
+      config = %ModelConfig{domains: %{demand: 0..3, pos_integer: 1..3}}
+
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+      {:ok, actions} = BuildActions.run(ir, ss, config)
+
+      names = Enum.map(actions, & &1.name)
+      assert "EventDataFromSubscribedToSubscribed" in names
+      assert "EventHaltedFromSubscribedToDone" in names
+      assert "AskFromSubscribedToSubscribed" in names
+    end
+
+    test "event guard becomes a precondition and update becomes primed" do
+      ir = Accord.Test.Feed.Protocol.__ir__()
+      config = %ModelConfig{domains: %{demand: 0..3, pos_integer: 1..3}}
+
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+      {:ok, actions} = BuildActions.run(ir, ss, config)
+
+      data = Enum.find(actions, &(&1.name == "EventDataFromSubscribedToSubscribed"))
+
+      assert "demand > 0" in data.preconditions
+      assert data.primed["demand"] == "(demand - 1)"
+      assert data.primed["state"] == ~s("subscribed")
+    end
+
+    test "anystate events produce a self-loop action per non-terminal state" do
+      ir = Accord.Test.Feed.Protocol.__ir__()
+      config = %ModelConfig{domains: %{demand: 0..3, pos_integer: 1..3}}
+
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+      {:ok, actions} = BuildActions.run(ir, ss, config)
+
+      notice = Enum.find(actions, &(&1.name == "EventServerNoticeFromSubscribedToSubscribed"))
+      assert notice
+      # Terminal :done gets no anystate event action.
+      refute Enum.any?(actions, &(&1.name =~ "FromDone"))
+    end
+
+    test "untranslatable event guard reports E041" do
+      guard_ast = quote(do: fn {:data, item}, tracks -> Enum.member?([1], item) end)
+
+      ir = %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :n, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: {:data, :_},
+                message_types: [:term],
+                message_arg_names: ["item"],
+                kind: :event,
+                to: :ready,
+                guard: %{fun: fn _m, _t -> true end, ast: guard_ast}
+              }
+            ]
+          }
+        }
+      }
+
+      assert {:error, [report]} = run_actions(ir)
+      assert report.code == "E041"
+    end
+  end
+
   describe "fidelity errors" do
     defp guarded_ir(guard_ast, opts \\ []) do
       arg_names = Keyword.get(opts, :arg_names, ["chips"])

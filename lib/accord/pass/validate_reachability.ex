@@ -53,15 +53,26 @@ defmodule Accord.Pass.ValidateReachability do
       state = Map.get(states, current, %IR.State{name: current})
 
       # Collect next states from this state's transitions and anystate.
+      # Branch targets cover calls; event targets live in transition.to.
       next_states =
         (state.transitions ++ anystate)
         |> Enum.flat_map(fn transition ->
-          Enum.map(transition.branches, fn branch ->
-            case branch.next_state do
-              :__same__ -> current
-              target -> target
+          branch_targets =
+            Enum.map(transition.branches, fn branch ->
+              case branch.next_state do
+                :__same__ -> current
+                target -> target
+              end
+            end)
+
+          event_targets =
+            case transition do
+              %{kind: :event, to: :__same__} -> [current]
+              %{kind: :event, to: target} when target != nil -> [target]
+              _ -> []
             end
-          end)
+
+          branch_targets ++ event_targets
         end)
         |> Enum.reject(&Map.has_key?(visited, &1))
 

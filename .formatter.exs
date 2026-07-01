@@ -8,6 +8,8 @@ protocol_macros = [
   anystate: 1,
   on: 2,
   cast: 1,
+  event: 1,
+  event: 2,
   property: 2,
   # Accord.Protocol.Block (inside `on ... do` blocks)
   reply: 1,

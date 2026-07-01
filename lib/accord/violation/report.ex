@@ -142,6 +142,12 @@ defmodule Accord.Violation.Report do
     |> add_valid_messages_help(v.expected)
   end
 
+  defp build_report(%Violation{kind: :invalid_event} = v) do
+    Report.error("server pushed an event not valid in state :#{v.state}")
+    |> Report.with_note("pushed #{inspect(v.message)} in state :#{v.state}")
+    |> add_valid_messages_help(v.expected)
+  end
+
   defp build_report(%Violation{kind: :guard_failed} = v) do
     Report.error("guard rejected message")
     |> Report.with_note("guard rejected #{inspect(v.message)} in state :#{v.state}")
@@ -324,6 +330,7 @@ defmodule Accord.Violation.Report do
   defp label_message(:liveness_violated, _), do: "property defined here"
   defp label_message(:invalid_reply, _), do: "reply type defined here"
   defp label_message(:constraint_failed, _), do: "where: constraint defined here"
+  defp label_message(:invalid_event, _), do: "expected events defined here"
   defp label_message(:argument_type, _), do: "type constraint defined here"
   defp label_message(:guard_failed, _), do: "guarded transition defined here"
   defp label_message(_, _), do: "transition defined here"

@@ -17,7 +17,13 @@ defmodule Accord.Violation do
   - `:invalid_reply` — reply doesn't match any branch type.
   - `:constraint_failed` — reply matched a branch type but violated its
     `where:` constraint (and no later branch accepted it).
+  - `:invalid_event` — server pushed an event with no matching `event`
+    declaration in the current state.
   - `:timeout` — server didn't respond in time.
+
+  Blame derives from message direction: `:argument_type`,
+  `:guard_failed`, and `:session_ended` blame the sender, which is the
+  client for calls/casts and the server for pushed events.
 
   ## Property violations
 
@@ -38,6 +44,7 @@ defmodule Accord.Violation do
           | :session_ended
           | :invalid_reply
           | :constraint_failed
+          | :invalid_event
           | :timeout
           | :invariant_violated
           | :action_violated
@@ -88,12 +95,14 @@ defmodule Accord.Violation do
   end
 
   @doc """
-  Creates a client violation for a wrong argument type.
+  Creates a violation for a wrong argument type.
+
+  Blames the sender: the client for calls/casts, the server for events.
   """
-  @spec argument_type(atom(), term(), non_neg_integer(), term(), term()) :: t()
-  def argument_type(state, message, position, expected_type, actual_value) do
+  @spec argument_type(atom(), term(), non_neg_integer(), term(), term(), blame()) :: t()
+  def argument_type(state, message, position, expected_type, actual_value, blame \\ :client) do
     %__MODULE__{
-      blame: :client,
+      blame: blame,
       kind: :argument_type,
       state: state,
       message: message,
@@ -107,12 +116,14 @@ defmodule Accord.Violation do
   end
 
   @doc """
-  Creates a client violation for a guard pre-condition failure.
+  Creates a violation for a guard pre-condition failure.
+
+  Blames the sender: the client for calls, the server for events.
   """
-  @spec guard_failed(atom(), term()) :: t()
-  def guard_failed(state, message) do
+  @spec guard_failed(atom(), term(), blame()) :: t()
+  def guard_failed(state, message, blame \\ :client) do
     %__MODULE__{
-      blame: :client,
+      blame: blame,
       kind: :guard_failed,
       state: state,
       message: message
@@ -120,16 +131,33 @@ defmodule Accord.Violation do
   end
 
   @doc """
-  Creates a client violation for sending after the session ended.
+  Creates a violation for sending after the session ended.
+
+  Blames the sender: the client for calls/casts, the server for events.
   """
-  @spec session_ended(atom(), term()) :: t()
-  def session_ended(state, message) do
+  @spec session_ended(atom(), term(), blame()) :: t()
+  def session_ended(state, message, blame \\ :client) do
     %__MODULE__{
-      blame: :client,
+      blame: blame,
       kind: :session_ended,
       state: state,
       message: message,
       expected: :none
+    }
+  end
+
+  @doc """
+  Creates a server violation for a pushed event not valid in the
+  current state.
+  """
+  @spec invalid_event(atom(), term(), list()) :: t()
+  def invalid_event(state, message, expected) do
+    %__MODULE__{
+      blame: :server,
+      kind: :invalid_event,
+      state: state,
+      message: message,
+      expected: expected
     }
   end
 

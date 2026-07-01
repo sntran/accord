@@ -75,6 +75,46 @@ defmodule Accord.Pass.TLA.BuildActions do
     tag = message_tag(transition.message_pattern)
     source = Atom.to_string(state_name)
 
+    if transition.kind == :event do
+      [
+        build_event_action(
+          ir,
+          state_name,
+          transition,
+          tag,
+          source,
+          state_space,
+          config,
+          all_var_names,
+          track_names
+        )
+      ]
+    else
+      build_branch_actions(
+        ir,
+        state_name,
+        transition,
+        tag,
+        source,
+        state_space,
+        config,
+        all_var_names,
+        track_names
+      )
+    end
+  end
+
+  defp build_branch_actions(
+         ir,
+         state_name,
+         transition,
+         tag,
+         source,
+         state_space,
+         config,
+         all_var_names,
+         track_names
+       ) do
     # For branching transitions, create one action per branch.
     case transition.branches do
       [] ->
@@ -256,6 +296,95 @@ defmodule Accord.Pass.TLA.BuildActions do
     }
   end
 
+  # A pushed event is one more action interleaved with client calls —
+  # this is where server-push pays off in the model: TLC explores races
+  # between requests and pushes that a single-direction model cannot
+  # represent. Same shape as a call action minus reply existentials.
+  defp build_event_action(
+         ir,
+         state_name,
+         transition,
+         tag,
+         source,
+         state_space,
+         config,
+         all_var_names,
+         track_names
+       ) do
+    target_state = resolve_next_state(transition.to, state_name)
+    target = Atom.to_string(target_state)
+    action_name = "Event#{camelize(tag)}From#{camelize(source)}To#{camelize(target)}"
+
+    {existential_vars, param_bindings} = build_existentials(transition, config)
+
+    guard_result = compile_guard(ir, transition, param_bindings, track_names)
+
+    # Update values may reference either the declared argument names
+    # (param_bindings) or the update fn head's own names (update_bindings).
+    update_bindings = build_event_update_bindings(transition, existential_vars)
+
+    track_primed_result =
+      build_track_primed(
+        ir,
+        transition,
+        nil,
+        Map.merge(param_bindings, update_bindings),
+        track_names
+      )
+
+    errors =
+      [guard_result, track_primed_result]
+      |> Enum.flat_map(fn
+        {:error, reports} -> reports
+        {:ok, _} -> []
+      end)
+
+    if errors != [] do
+      {:error, errors}
+    else
+      {:ok, guard_precondition} = guard_result
+      {:ok, track_primed} = track_primed_result
+
+      correspondence_primed = build_correspondence_primed(tag, source, target, state_space)
+
+      all_primed =
+        %{"state" => ~s("#{target}")}
+        |> Map.merge(track_primed)
+        |> Map.merge(correspondence_primed)
+
+      unchanged =
+        all_var_names
+        |> MapSet.difference(MapSet.new(Map.keys(all_primed)))
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      {:ok,
+       %Action{
+         name: action_name,
+         source_state: source,
+         target_state: target,
+         message_tag: tag,
+         preconditions: [~s(state = "#{source}")] ++ guard_precondition,
+         existential_vars: existential_vars,
+         primed: all_primed,
+         unchanged: unchanged,
+         comment: "server event #{tag} from #{source} to #{target}"
+       }}
+    end
+  end
+
+  # Event updates are `fn message, tracks` — map the fn head's message
+  # params to the existing message existentials by position.
+  defp build_event_update_bindings(
+         %Transition{update: %{ast: {:fn, _, [{:->, _, [[msg_pat | _], _body]}]}}},
+         existentials
+       ) do
+    msg_params = extract_pattern_params(msg_pat)
+    zip_to_existentials(msg_params, existentials)
+  end
+
+  defp build_event_update_bindings(_, _), do: %{}
+
   defp build_existentials(
          %Transition{
            message_pattern: pattern,
@@ -387,10 +516,13 @@ defmodule Accord.Pass.TLA.BuildActions do
   # `{:unsupported, ast}` when the body has a shape the extractor cannot
   # faithfully translate.
   defp extract_update({:fn, _, [{:->, _, [args, body]}]}, branch) do
-    ctx = %{
-      reply_var: fn_arg_var(args, 1),
-      tracks_var: fn_arg_var(args, length(args) - 1)
-    }
+    # Call updates are `fn msg, reply, tracks`; event updates are
+    # `fn msg, tracks` (no reply to dispatch on).
+    ctx =
+      case length(args) do
+        2 -> %{reply_var: nil, tracks_var: fn_arg_var(args, 1)}
+        _ -> %{reply_var: fn_arg_var(args, 1), tracks_var: fn_arg_var(args, length(args) - 1)}
+      end
 
     extract_update_body(body, branch, ctx)
   end
@@ -412,9 +544,14 @@ defmodule Accord.Pass.TLA.BuildActions do
         end
 
       # case reply do :ok -> body1; _ -> body2 end
-      # Resolve against the branch's reply type.
+      # Resolve against the branch's reply type. Events have no reply
+      # (branch is nil), so a case there is not statically resolvable.
       {:case, _, [_expr, [do: clauses]]} ->
-        resolve_case_for_branch(clauses, branch, ctx)
+        if branch == nil do
+          {:unsupported, ast}
+        else
+          resolve_case_for_branch(clauses, branch, ctx)
+        end
 
       # if reply == :ok, do: ..., else: ...
       # Resolvable when the condition compares the reply to a literal.
@@ -452,6 +589,8 @@ defmodule Accord.Pass.TLA.BuildActions do
   # Statically resolves an if condition against the branch's reply type.
   # Only literal comparison against the reply variable is resolvable; a
   # condition on tracks depends on runtime state the extractor cannot see.
+  defp resolve_if_condition(_cond, nil, _ctx), do: :unknown
+
   defp resolve_if_condition({:==, _, [left, right]}, branch, ctx) do
     case {reply_var?(left, ctx), reply_var?(right, ctx)} do
       {true, false} -> literal_equals_reply_type(right, branch.reply_type)

@@ -36,4 +36,10 @@ defmodule Accord do
   """
   @spec cast(pid() | atom(), term()) :: :ok
   defdelegate cast(monitor, message), to: Accord.Monitor
+
+  @doc """
+  Pushes a server event through a monitor (server → client).
+  """
+  @spec event(pid() | atom(), term()) :: :ok
+  defdelegate event(monitor, message), to: Accord.Monitor
 end
