@@ -242,7 +242,10 @@ defmodule Accord.Property.ExerciserTest do
     end
 
     @tag :property
-    test "detects action property violation from lock with decreasing tokens" do
+    test "detects stale tokens as constraint_failed from lock with decreasing tokens" do
+      # The where: constraint (token > fence_token) is enforced at runtime,
+      # so stale tokens are immediate server blame — the same refinement
+      # the TLA+ model checks as an action precondition.
       error =
         assert_raise ExerciserFailure, fn ->
           ProtocolExerciser.run(
@@ -253,9 +256,9 @@ defmodule Accord.Property.ExerciserTest do
           )
         end
 
-      assert Enum.any?(error.property_violations, fn v ->
-               v.kind == :action_violated and v.context.property == :monotonic_tokens
-             end)
+      failing = Enum.find(error.steps, &(not &1.passed))
+      assert failing != nil
+      assert {:accord_violation, %{blame: :server, kind: :constraint_failed}} = failing.actual
     end
 
     @tag :property
@@ -276,7 +279,7 @@ defmodule Accord.Property.ExerciserTest do
     end
 
     @tag :property
-    test "detects action property violation from lock with wrapping fence token" do
+    test "detects wrapped tokens as constraint_failed from lock with wrapping fence token" do
       error =
         assert_raise ExerciserFailure, fn ->
           ProtocolExerciser.run(
@@ -287,9 +290,9 @@ defmodule Accord.Property.ExerciserTest do
           )
         end
 
-      assert Enum.any?(error.property_violations, fn v ->
-               v.kind == :action_violated and v.context.property == :monotonic_tokens
-             end)
+      failing = Enum.find(error.steps, &(not &1.passed))
+      assert failing != nil
+      assert {:accord_violation, %{blame: :server, kind: :constraint_failed}} = failing.actual
     end
   end
 end

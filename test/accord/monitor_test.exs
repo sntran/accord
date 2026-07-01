@@ -583,4 +583,111 @@ defmodule Accord.MonitorTest do
       assert violation.blame == :property
     end
   end
+
+  describe "where: constraints — branch selection" do
+    defmodule Fallthrough.Protocol do
+      use Accord.Protocol
+
+      initial :ready
+
+      track :level, :non_neg_integer, default: 2
+
+      state :ready do
+        on :query do
+          branch({:value, v :: pos_integer()},
+            goto: :high,
+            where: fn {:value, v}, tracks -> v > tracks.level end
+          )
+
+          branch {:value, v :: pos_integer()}, goto: :ready
+        end
+
+        on :stop, reply: :stopped, goto: :stopped
+      end
+
+      state :high, terminal: true
+      state :stopped, terminal: true
+    end
+
+    test "reply satisfying the constraint takes the constrained branch" do
+      {:ok, server} = EchoServer.start_link(%{query: {:value, 5}})
+
+      {:ok, monitor} =
+        Monitor.start_link(Fallthrough.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: :reject
+        )
+
+      assert {:value, 5} = Monitor.call(monitor, :query)
+      assert {:high, _data} = :sys.get_state(monitor)
+    end
+
+    test "reply failing the constraint falls through to a later matching branch" do
+      # The model would take the unconstrained branch's action — the
+      # runtime must agree, not report a violation.
+      {:ok, server} = EchoServer.start_link(%{query: {:value, 1}})
+
+      {:ok, monitor} =
+        Monitor.start_link(Fallthrough.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: :reject
+        )
+
+      assert {:value, 1} = Monitor.call(monitor, :query)
+      assert {:ready, _data} = :sys.get_state(monitor)
+    end
+
+    test "reply failing all constraints with no fallback is server blame" do
+      compiled = Accord.Test.Lock.Protocol.__compiled__()
+      # Acquire reply with a stale token: type matches, constraint fails,
+      # no other branch accepts {:ok, _}.
+      {:ok, server} = EchoServer.start_link(%{acquire: {:ok, 3}, release: :ok})
+
+      {:ok, monitor} =
+        Monitor.start_link(compiled, upstream: server, violation_policy: :reject)
+
+      # First acquire: token 3 > fence 0 — fine.
+      assert {:ok, 3} = Monitor.call(monitor, {:acquire, :c1})
+      assert :ok = Monitor.call(monitor, {:release, 3})
+
+      # Second acquire returns token 3 again: 3 > 3 is false.
+      assert {:accord_violation, violation} = Monitor.call(monitor, {:acquire, :c1})
+      assert violation.kind == :constraint_failed
+      assert violation.blame == :server
+      assert violation.reply == {:ok, 3}
+      assert violation.context.reply_type == {:tagged, :ok, :pos_integer}
+    end
+
+    test "raising constraint counts as failed, not as a monitor crash" do
+      defmodule RaisingConstraint.Protocol do
+        use Accord.Protocol, tla: :off
+
+        initial :ready
+
+        track :level, :non_neg_integer, default: 0
+
+        state :ready do
+          on :query do
+            branch({:value, v :: pos_integer()},
+              goto: :ready,
+              where: fn {:value, v}, tracks -> v / tracks.level > 1 end
+            )
+          end
+        end
+      end
+
+      {:ok, server} = EchoServer.start_link(%{query: {:value, 5}})
+
+      {:ok, monitor} =
+        Monitor.start_link(RaisingConstraint.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: :reject
+        )
+
+      # level = 0 → division raises inside the constraint → treated as
+      # a failed constraint, reported as server blame.
+      assert {:accord_violation, violation} = Monitor.call(monitor, :query)
+      assert violation.kind == :constraint_failed
+    end
+  end
 end

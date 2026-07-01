@@ -36,6 +36,20 @@ defmodule Accord.ViolationSpanTest do
     def handle_cast(:heartbeat, state), do: {:noreply, state}
   end
 
+  # Server for the Monotonic protocol — echoes :ok for any set.
+  defmodule MonotonicServer do
+    use GenServer
+
+    def start_link, do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(_), do: {:ok, %{}}
+
+    @impl true
+    def handle_call({:set, _v}, _from, state), do: {:reply, :ok, state}
+    def handle_call(:stop, _from, state), do: {:reply, :stopped, state}
+  end
+
   # -- Helpers --
 
   defp source_line(path, line_number) do
@@ -59,9 +73,12 @@ defmodule Accord.ViolationSpanTest do
   # These are set directly on the violation struct via property.span.
 
   describe "property violation spans" do
-    test ":action_violated carries span of :monotonic_tokens" do
-      compiled = Accord.Test.Lock.Protocol.__compiled__()
-      {:ok, server} = DecreasingTokenServer.start_link()
+    test ":action_violated carries span of :monotonic_counter" do
+      # Lock's where: constraint now intercepts stale tokens before the
+      # action property can fail, so the action-span test uses the
+      # constraint-free Monotonic protocol.
+      compiled = Accord.Test.Monotonic.Protocol.__compiled__()
+      {:ok, server} = MonotonicServer.start_link()
       ViolationCollector.init()
 
       {:ok, monitor} =
@@ -70,22 +87,42 @@ defmodule Accord.ViolationSpanTest do
           violation_policy: {ViolationCollector, :handle}
         )
 
-      # Acquire: token=10, fence_token 0→10. Action passes.
-      assert {:ok, 10} = Monitor.call(monitor, {:acquire, :c1})
-      # Release: back to unlocked, fence_token stays 10.
-      assert :ok = Monitor.call(monitor, {:release, 10})
-      # Acquire: token=5, fence_token 10→5. Action violated.
-      assert {:ok, 5} = Monitor.call(monitor, {:acquire, :c2})
+      # Counter 0 → 3: action passes.
+      assert :ok = Monitor.call(monitor, {:set, 3})
+      # Counter 3 → 1: action violated.
+      assert :ok = Monitor.call(monitor, {:set, 1})
 
       [violation] = ViolationCollector.drain()
       assert violation.kind == :action_violated
-      assert violation.context.property == :monotonic_tokens
+      assert violation.context.property == :monotonic_counter
       assert violation.context.check_kind == :action
 
       assert %Pentiment.Span.Search{} = violation.span
-      assert violation.span.line == 64
       assert violation.span.pattern == "action"
       assert_search_span_valid(violation.span, compiled.ir.source_file)
+    end
+
+    test ":constraint_failed — stale token is server blame with the where: span" do
+      compiled = Accord.Test.Lock.Protocol.__compiled__()
+      {:ok, server} = DecreasingTokenServer.start_link()
+
+      {:ok, monitor} =
+        Monitor.start_link(compiled, upstream: server, violation_policy: :log)
+
+      # Acquire: token=10, fence_token 0→10. Constraint passes.
+      assert {:ok, 10} = Monitor.call(monitor, {:acquire, :c1})
+      # Release: back to unlocked, fence_token stays 10.
+      assert :ok = Monitor.call(monitor, {:release, 10})
+      # Acquire: token=5 while fence_token=10 — violates token > fence_token.
+      assert {:accord_violation, violation} = Monitor.call(monitor, {:acquire, :c2})
+
+      assert violation.kind == :constraint_failed
+      assert violation.blame == :server
+      assert violation.reply == {:ok, 5}
+
+      formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
+      assert formatted =~ "violated its where: constraint"
+      assert formatted =~ "where: constraint defined here"
     end
 
     test ":invariant_violated (local) carries span of :holder_consistency" do

@@ -175,13 +175,8 @@ defmodule Accord.Monitor do
   end
 
   defp handle_reply(transition, message, reply, from, state, data) do
-    reply_pairs =
-      Enum.map(transition.branches, fn %Branch{reply_type: type, next_state: ns} ->
-        {type, ns}
-      end)
-
-    case Check.check_reply(reply, reply_pairs) do
-      {:ok, next_state} ->
+    case select_branch(transition.branches, reply, data.tracks) do
+      {:ok, %Branch{next_state: next_state}} ->
         actual_next = if next_state == :__same__, do: state, else: next_state
 
         apply_transition_and_check_properties(
@@ -193,12 +188,61 @@ defmodule Accord.Monitor do
           data
         )
 
-      {:error, _reason} ->
+      {:error, {:constraint_failed, %Branch{reply_type: reply_type}}} ->
+        violation = Violation.constraint_failed(state, message, reply, reply_type)
+        handle_violation(violation, from, state, data)
+
+      {:error, :no_type_match} ->
         valid = Enum.map(transition.branches, & &1.reply_type)
         violation = Violation.invalid_reply(state, message, reply, valid)
         handle_violation(violation, from, state, data)
     end
   end
+
+  # Selects the branch for a reply: the first branch whose type matches
+  # AND whose where: constraint (if any) holds for the current tracks —
+  # the same semantics as the TLA+ model, where each branch is an action
+  # with the constraint as a precondition.
+  #
+  # When a branch matches on type but fails its constraint, later branches
+  # are still tried (the model would take their action instead); only if
+  # nothing accepts the reply is the first constraint failure reported.
+  defp select_branch(branches, reply, tracks) do
+    result =
+      Enum.reduce_while(branches, {:error, :no_type_match}, fn branch, acc ->
+        case Check.check(reply, branch.reply_type) do
+          :ok ->
+            if constraint_holds?(branch.constraint, reply, tracks) do
+              {:halt, {:ok, branch}}
+            else
+              # Remember the first constraint failure, keep trying.
+              acc =
+                case acc do
+                  {:error, :no_type_match} -> {:error, {:constraint_failed, branch}}
+                  other -> other
+                end
+
+              {:cont, acc}
+            end
+
+          {:error, _} ->
+            {:cont, acc}
+        end
+      end)
+
+    result
+  end
+
+  defp constraint_holds?(nil, _reply, _tracks), do: true
+
+  defp constraint_holds?(%{fun: fun}, reply, tracks) when is_function(fun) do
+    fun.(reply, tracks) == true
+  rescue
+    # A raising constraint cannot hold; the reply is treated as violating.
+    _ -> false
+  end
+
+  defp constraint_holds?(_, _reply, _tracks), do: true
 
   defp apply_transition_and_check_properties(transition, message, reply, from, next_state, data) do
     old_tracks = data.tracks

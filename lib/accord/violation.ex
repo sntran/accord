@@ -15,6 +15,8 @@ defmodule Accord.Violation do
   ## Server violations
 
   - `:invalid_reply` — reply doesn't match any branch type.
+  - `:constraint_failed` — reply matched a branch type but violated its
+    `where:` constraint (and no later branch accepted it).
   - `:timeout` — server didn't respond in time.
 
   ## Property violations
@@ -34,6 +36,7 @@ defmodule Accord.Violation do
           | :guard_failed
           | :session_ended
           | :invalid_reply
+          | :constraint_failed
           | :timeout
           | :invariant_violated
           | :action_violated
@@ -140,6 +143,27 @@ defmodule Accord.Violation do
       message: message,
       reply: reply,
       context: %{valid_replies: valid_replies}
+    }
+  end
+
+  @doc """
+  Creates a server violation for a reply that matched a branch's type but
+  violated its `where:` constraint.
+
+  The runtime enforces the same refinement the TLA+ model checks as an
+  action precondition — a server reply the model would never allow must
+  not pass silently at runtime.
+  """
+  @spec constraint_failed(atom(), term(), term(), term()) :: t()
+  def constraint_failed(state, message, reply, reply_type) do
+    %__MODULE__{
+      blame: :server,
+      kind: :constraint_failed,
+      state: state,
+      message: message,
+      reply: reply,
+      expected: reply_type,
+      context: %{reply_type: reply_type}
     }
   end
 

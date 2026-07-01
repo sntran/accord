@@ -127,6 +127,15 @@ defmodule Accord.Violation.Report do
     |> add_valid_replies_help(v.context)
   end
 
+  defp build_report(%Violation{kind: :constraint_failed} = v) do
+    Report.error("server reply violated its where: constraint")
+    |> Report.with_note("sent #{inspect(v.message)}, got #{inspect(v.reply)}")
+    |> Report.with_note(
+      "the reply matches type #{Type.to_string(v.context[:reply_type])} " <>
+        "but fails the declared refinement"
+    )
+  end
+
   defp build_report(%Violation{kind: :invalid_message} = v) do
     Report.error("message not valid in state :#{v.state}")
     |> Report.with_note("sent #{inspect(v.message)} in state :#{v.state}")
@@ -279,6 +288,18 @@ defmodule Accord.Violation.Report do
     end
   end
 
+  # Constraint failures point at the branch whose where: clause rejected
+  # the reply.
+  defp span_for_violation(:constraint_failed, violation, transition) do
+    reply_type = violation.context[:reply_type]
+    branch = Enum.find(transition.branches, fn branch -> branch.reply_type == reply_type end)
+
+    case branch do
+      %{span: span} when not is_nil(span) -> {span, :inline}
+      _ -> {transition.span, :block}
+    end
+  end
+
   defp span_for_violation(_kind, _violation, transition), do: {transition.span, :block}
 
   defp label_message(:invariant_violated, %{check_kind: :bounded}),
@@ -293,6 +314,7 @@ defmodule Accord.Violation.Report do
   defp label_message(:precedence_violated, _), do: "precedence check defined here"
   defp label_message(:liveness_violated, _), do: "property defined here"
   defp label_message(:invalid_reply, _), do: "reply type defined here"
+  defp label_message(:constraint_failed, _), do: "where: constraint defined here"
   defp label_message(:argument_type, _), do: "type constraint defined here"
   defp label_message(:guard_failed, _), do: "guarded transition defined here"
   defp label_message(_, _), do: "transition defined here"
