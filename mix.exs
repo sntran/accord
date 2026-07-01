@@ -35,7 +35,13 @@ defmodule Accord.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # examples/ compiles in dev and test so CI breaks when a DSL change
+  # breaks an example — protocol compilation runs the full validation
+  # pipeline and TLA+ emission, so "the examples compile" means "the
+  # examples validate and produce specs". Excluded from :prod to keep
+  # the hex package lean.
+  defp elixirc_paths(:test), do: ["lib", "test/support", "examples"]
+  defp elixirc_paths(:dev), do: ["lib", "examples"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
