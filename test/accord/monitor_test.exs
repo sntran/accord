@@ -6,6 +6,7 @@ defmodule Accord.MonitorTest do
   alias Accord.Monitor
   alias Accord.Monitor.Compiled
   alias Accord.Pass.Monitor.{BuildTrackInit, BuildTransitionTable}
+  alias Accord.Test.ViolationCollector
 
   @moduletag :capture_log
 
@@ -581,6 +582,71 @@ defmodule Accord.MonitorTest do
       assert_receive {:EXIT, ^monitor, {:protocol_violation, violation}}
       assert violation.kind == :invariant_violated
       assert violation.blame == :property
+    end
+  end
+
+  describe "correspondence — runtime enforcement" do
+    test "close without a matching open is a property violation" do
+      {:ok, server} = EchoServer.start_link(%{borrow: :ok, return: :ok, stop: :stopped})
+      ViolationCollector.init()
+
+      {:ok, monitor} =
+        Monitor.start_link(Accord.Test.CorrespondenceFail.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: {ViolationCollector, :handle}
+        )
+
+      # :return straight from :idle → :returned closes with no open. Like
+      # all property violations the (valid) reply is still forwarded; the
+      # violation is reported through the policy.
+      assert :ok = Monitor.call(monitor, :return)
+
+      assert [violation] = ViolationCollector.drain()
+      assert violation.kind == :correspondence_violated
+      assert violation.blame == :property
+      assert violation.context.property == :borrow_return
+      assert violation.context.open == :borrow
+      assert violation.context.close == :return
+    end
+
+    test "matched open/close pairs never violate" do
+      {:ok, server} = EchoServer.start_link(%{borrow: :ok, return: :ok, stop: :stopped})
+
+      {:ok, monitor} =
+        Monitor.start_link(Accord.Test.CorrespondenceFail.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: :reject
+        )
+
+      assert :ok = Monitor.call(monitor, :borrow)
+      assert :ok = Monitor.call(monitor, :return)
+      assert :ok = Monitor.call(monitor, :borrow)
+      assert :ok = Monitor.call(monitor, :return)
+    end
+
+    test "a rejected self-loop close does not decrement the counter" do
+      # Lock's release has two branches: :ok → :unlocked (closes) and
+      # {:error, :invalid_token} → :locked (self-loop, must not count —
+      # the TLA+ model counts only state-changing branches).
+      {:ok, server} = Accord.Test.Lock.Server.start_link()
+      ViolationCollector.init()
+
+      {:ok, monitor} =
+        Monitor.start_link(Accord.Test.Lock.Protocol.__compiled__(),
+          upstream: server,
+          violation_policy: {ViolationCollector, :handle}
+        )
+
+      assert {:ok, token} = Monitor.call(monitor, {:acquire, :c1})
+      # Wrong token: rejected, stays :locked — not a close.
+      assert {:error, :invalid_token} = Monitor.call(monitor, {:release, token + 99})
+      # Correct token: closes the open.
+      assert :ok = Monitor.call(monitor, {:release, token})
+      # A second acquire/release cycle stays balanced.
+      assert {:ok, token2} = Monitor.call(monitor, {:acquire, :c1})
+      assert :ok = Monitor.call(monitor, {:release, token2})
+
+      assert ViolationCollector.drain() == []
     end
   end
 

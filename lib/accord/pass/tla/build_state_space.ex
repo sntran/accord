@@ -16,7 +16,12 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
 
   @spec run(IR.t(), ModelConfig.t()) :: {:ok, StateSpace.t()} | {:error, [Report.t()]}
   def run(%IR{} = ir, %ModelConfig{} = config) do
-    case collect_init_errors(ir, config) ++ collect_symmetry_errors(ir, config) do
+    errors =
+      collect_init_errors(ir, config) ++
+        collect_symmetry_errors(ir, config) ++
+        collect_correspondence_errors(ir)
+
+    case errors do
       [] -> {:ok, build_state_space(ir, config)}
       errors -> {:error, errors}
     end
@@ -56,8 +61,9 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     # Build correspondence counter variables.
     correspondences = build_correspondences(ir)
 
-    correspondence_vars =
-      Enum.map(correspondences, fn corr ->
+    {correspondence_vars, counter_bounds} =
+      correspondences
+      |> Enum.map(fn corr ->
         domain =
           ModelConfig.resolve_domain(
             config,
@@ -66,13 +72,25 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
           )
 
         type_str = ModelConfig.domain_to_tla(domain)
-        %{name: corr.counter_var, type: type_str, init: "0"}
+        var = %{name: corr.counter_var, type: type_str, init: "0"}
+        {var, counter_bound(corr.counter_var, domain)}
       end)
+      |> Enum.unzip()
+
+    counter_bounds = Enum.reject(counter_bounds, &is_nil/1)
 
     variables = [state_var] ++ track_vars ++ correspondence_vars
 
-    # Build TypeInvariant.
-    type_invariant = build_type_invariant(variables)
+    # Build TypeInvariant. Correspondence counters are excluded: the
+    # named `pending >= 0` invariant is the meaningful check, and the
+    # upper bound moves to the state constraint so counter growth bounds
+    # exploration instead of misreporting as a type violation.
+    counter_names = MapSet.new(correspondence_vars, & &1.name)
+
+    type_invariant =
+      variables
+      |> Enum.reject(&MapSet.member?(counter_names, &1.name))
+      |> build_type_invariant()
 
     # Build Init.
     init = build_init(variables)
@@ -100,10 +118,25 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       states: states,
       correspondences: correspondences,
       constants: constants,
-      state_constraint: config.state_constraint,
+      state_constraint: compose_state_constraint(config.state_constraint, counter_bounds),
       symmetry_exprs: build_symmetry_exprs(config),
       terminal_states: terminal_states
     }
+  end
+
+  # The counter's upper bound becomes a state constraint conjunct so TLC
+  # stops exploring past it (bounded checking) instead of reporting a
+  # confusing TypeInvariant violation at nesting depth N+1.
+  defp counter_bound(counter_var, %Range{last: hi}), do: "#{counter_var} =< #{hi}"
+  defp counter_bound(_counter_var, _domain), do: nil
+
+  defp compose_state_constraint(config_constraint, counter_bounds) do
+    parts = List.wrap(config_constraint) ++ counter_bounds
+
+    case parts do
+      [] -> nil
+      parts -> Enum.join(parts, " /\\ ")
+    end
   end
 
   # Symmetry reduction applies only to domains the user explicitly listed
@@ -293,6 +326,42 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         counter_var = "#{open}_pending"
         %{open: open, close: close, counter_var: counter_var}
       end)
+    end)
+    # Identical checks (same open + close set) share one counter.
+    |> Enum.uniq()
+  end
+
+  # Two correspondences with the same open event but different close sets
+  # would both claim the "<open>_pending" counter variable, each needing
+  # different primed updates — the collision must be an error, not a
+  # duplicate VARIABLES declaration.
+  defp collect_correspondence_errors(%IR{properties: properties} = ir) do
+    properties
+    |> Enum.flat_map(fn prop ->
+      prop.checks
+      |> Enum.filter(&(&1.kind == :correspondence and Map.get(&1.spec, :by) == nil))
+      |> Enum.map(fn check -> {check.spec.open, MapSet.new(check.spec.close), check} end)
+    end)
+    |> Enum.group_by(fn {open, _closes, _check} -> open end)
+    |> Enum.flat_map(fn {open, entries} ->
+      distinct_closes = entries |> Enum.map(fn {_open, closes, _} -> closes end) |> Enum.uniq()
+
+      if length(distinct_closes) > 1 do
+        {_open, _closes, check} = List.last(entries)
+
+        [
+          Report.error(
+            "conflicting correspondence checks for open event :#{open} — " <>
+              "their close sets differ, but they would share one counter variable"
+          )
+          |> Report.with_code("E038")
+          |> Report.with_help("merge the checks into one close list, or key one of them with by:")
+          |> maybe_add_source(ir.source_file)
+          |> maybe_add_span_label(check.span, "conflicts with an earlier correspondence")
+        ]
+      else
+        []
+      end
     end)
   end
 end

@@ -210,6 +210,80 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
     end
   end
 
+  describe "correspondence counters" do
+    defp corr_ir(checks) do
+      %{minimal_ir() | properties: [%Property{name: :open_close, checks: checks}]}
+    end
+
+    test "counter is excluded from TypeInvariant and bounded by StateConstraint" do
+      ir =
+        corr_ir([
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: nil}}
+        ])
+
+      {:ok, ss} = BuildStateSpace.run(ir, default_config())
+
+      # Declared and initialized, but not type-constrained: the named
+      # `pending >= 0` invariant is the meaningful check.
+      assert Enum.any?(ss.variables, &(&1.name == "borrow_pending"))
+      refute ss.type_invariant =~ "borrow_pending"
+      assert ss.init =~ "borrow_pending = 0"
+
+      # The upper bound moves to the state constraint.
+      assert ss.state_constraint =~ "borrow_pending =< 3"
+    end
+
+    test "counter bound composes with a configured state constraint" do
+      ir =
+        corr_ir([
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: nil}}
+        ])
+
+      config = %ModelConfig{state_constraint: "counter =< 5"}
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+
+      assert ss.state_constraint =~ "counter =< 5"
+      assert ss.state_constraint =~ "borrow_pending =< 3"
+      assert ss.state_constraint =~ "/\\"
+    end
+
+    test "identical correspondence checks share one counter" do
+      ir =
+        corr_ir([
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: nil}},
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: nil}}
+        ])
+
+      {:ok, ss} = BuildStateSpace.run(ir, default_config())
+
+      counters = Enum.filter(ss.variables, &(&1.name == "borrow_pending"))
+      assert length(counters) == 1
+    end
+
+    test "same open with different close sets reports E038" do
+      ir =
+        corr_ir([
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: nil}},
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:discard], by: nil}}
+        ])
+
+      assert {:error, [report]} = BuildStateSpace.run(ir, default_config())
+      assert report.code == "E038"
+      assert report.message =~ ":borrow"
+    end
+
+    test "keyed correspondence gets no counter variable" do
+      ir =
+        corr_ir([
+          %Check{kind: :correspondence, spec: %{open: :borrow, close: [:return], by: :item}}
+        ])
+
+      {:ok, ss} = BuildStateSpace.run(ir, default_config())
+
+      refute Enum.any?(ss.variables, &(&1.name == "borrow_pending"))
+    end
+  end
+
   describe "boolean tracks" do
     test "domain, init, and TypeInvariant use TLA+ booleans consistently" do
       ir = %{

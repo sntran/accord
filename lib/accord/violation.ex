@@ -26,6 +26,7 @@ defmodule Accord.Violation do
   - `:liveness_violated` — a liveness timeout expired.
   - `:precedence_violated` — entered a state without required predecessor.
   - `:ordering_violated` — a monotonicity check on message fields failed.
+  - `:correspondence_violated` — a close event fired without a matching open.
   """
 
   @type blame :: :client | :server | :property
@@ -43,6 +44,7 @@ defmodule Accord.Violation do
           | :liveness_violated
           | :precedence_violated
           | :ordering_violated
+          | :correspondence_violated
 
   @type t :: %__MODULE__{
           blame: blame(),
@@ -251,6 +253,24 @@ defmodule Accord.Violation do
         property: property_name,
         last_value: last_value,
         current_value: current_value
+      }
+    }
+  end
+
+  @doc """
+  Creates a property violation for a close event without a matching open.
+  """
+  @spec correspondence_violated(atom(), atom(), atom(), atom()) :: t()
+  def correspondence_violated(state, property_name, open_tag, close_tag) do
+    %__MODULE__{
+      blame: :property,
+      kind: :correspondence_violated,
+      state: state,
+      message: close_tag,
+      context: %{
+        property: property_name,
+        open: open_tag,
+        close: close_tag
       }
     }
   end

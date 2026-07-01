@@ -187,6 +187,7 @@ defmodule Accord.Monitor do
           message,
           reply,
           from,
+          state,
           actual_next,
           data
         )
@@ -247,11 +248,19 @@ defmodule Accord.Monitor do
 
   defp constraint_holds?(_, _reply, _tracks), do: true
 
-  defp apply_transition_and_check_properties(transition, message, reply, from, next_state, data) do
+  defp apply_transition_and_check_properties(
+         transition,
+         message,
+         reply,
+         from,
+         prev_state,
+         next_state,
+         data
+       ) do
     old_tracks = data.tracks
     new_tracks = apply_update(transition.update, message, reply, data.tracks)
 
-    case check_properties(message, next_state, old_tracks, new_tracks, data) do
+    case check_properties(message, prev_state, next_state, old_tracks, new_tracks, data) do
       {:ok, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
@@ -357,23 +366,40 @@ defmodule Accord.Monitor do
 
   # -- Property Checking --
 
-  defp check_properties(message, next_state, old_tracks, new_tracks, data) do
+  defp check_properties(message, prev_state, next_state, old_tracks, new_tracks, data) do
     properties = data.compiled.ir.properties
 
     Enum.reduce_while(properties, {:ok, data}, fn property, {:ok, acc_data} ->
-      case check_property_checks(property, message, next_state, old_tracks, new_tracks, acc_data) do
+      case check_property_checks(
+             property,
+             message,
+             prev_state,
+             next_state,
+             old_tracks,
+             new_tracks,
+             acc_data
+           ) do
         {:ok, updated_data} -> {:cont, {:ok, updated_data}}
         {:violation, violation, updated_data} -> {:halt, {:violation, violation, updated_data}}
       end
     end)
   end
 
-  defp check_property_checks(property, message, next_state, old_tracks, new_tracks, data) do
+  defp check_property_checks(
+         property,
+         message,
+         prev_state,
+         next_state,
+         old_tracks,
+         new_tracks,
+         data
+       ) do
     Enum.reduce_while(property.checks, {:ok, data}, fn check, {:ok, acc_data} ->
       case check_single(
              check,
              property,
              message,
+             prev_state,
              next_state,
              old_tracks,
              new_tracks,
@@ -389,6 +415,7 @@ defmodule Accord.Monitor do
          %{kind: :invariant} = check,
          property,
          _msg,
+         _prev_state,
          next_state,
          _old,
          new_tracks,
@@ -413,6 +440,7 @@ defmodule Accord.Monitor do
          %{kind: :local_invariant} = check,
          property,
          message,
+         _prev_state,
          next_state,
          _old,
          new_tracks,
@@ -441,6 +469,7 @@ defmodule Accord.Monitor do
          %{kind: :action} = check,
          property,
          _msg,
+         _prev_state,
          next_state,
          old_tracks,
          new_tracks,
@@ -465,6 +494,7 @@ defmodule Accord.Monitor do
          %{kind: :bounded} = check,
          property,
          _msg,
+         _prev_state,
          next_state,
          _old,
          new_tracks,
@@ -491,6 +521,7 @@ defmodule Accord.Monitor do
          %{kind: :forbidden} = check,
          property,
          _msg,
+         _prev_state,
          next_state,
          _old,
          new_tracks,
@@ -515,6 +546,7 @@ defmodule Accord.Monitor do
          %{kind: :precedence} = check,
          property,
          _msg,
+         _prev_state,
          next_state,
          _old,
          _new,
@@ -543,6 +575,7 @@ defmodule Accord.Monitor do
          %{kind: :ordered} = check,
          property,
          message,
+         _prev_state,
          next_state,
          _old,
          _new,
@@ -572,37 +605,57 @@ defmodule Accord.Monitor do
     end
   end
 
+  # Correspondence counts on the resolved branch — only transitions that
+  # change state open or close (the same rule the TLA+ model uses for its
+  # counter variable). A rejected self-loop (e.g. a release that stays
+  # :locked) neither opens nor closes.
   defp check_single(
          %{kind: :correspondence} = check,
-         _property,
+         property,
          message,
-         _next_state,
+         prev_state,
+         next_state,
          _old,
          _new,
          data
        ) do
     tag = message_tag(message)
     corr = data.correspondence
+    state_changed? = prev_state != next_state
 
-    corr =
-      cond do
-        tag == check.spec.open ->
-          key = correspondence_key(check, message, :open)
-          Map.update(corr, key, 1, &(&1 + 1))
+    cond do
+      tag == check.spec.open and state_changed? ->
+        key = correspondence_key(check, message, :open)
+        {:ok, %{data | correspondence: Map.update(corr, key, 1, &(&1 + 1))}}
 
-        tag in check.spec.close ->
-          key = correspondence_key(check, message, :close)
-          Map.update(corr, key, 0, &max(&1 - 1, 0))
+      tag in check.spec.close and state_changed? ->
+        key = correspondence_key(check, message, :close)
+        count = Map.get(corr, key, 0) - 1
 
-        true ->
-          corr
-      end
+        if count < 0 do
+          # A close without a matching open. Reset to zero so one stray
+          # close is reported once, not on every subsequent message.
+          base =
+            Violation.correspondence_violated(next_state, property.name, check.spec.open, tag)
 
-    {:ok, %{data | correspondence: corr}}
+          violation = %{
+            base
+            | span: check.span,
+              context: Map.put(base.context, :check_kind, check.kind)
+          }
+
+          {:violation, violation, %{data | correspondence: Map.put(corr, key, 0)}}
+        else
+          {:ok, %{data | correspondence: Map.put(corr, key, count)}}
+        end
+
+      true ->
+        {:ok, data}
+    end
   end
 
   # Pass through other check kinds at runtime (design-time only).
-  defp check_single(_check, _property, _msg, _next_state, _old, _new, data) do
+  defp check_single(_check, _property, _msg, _prev_state, _next_state, _old, _new, data) do
     {:ok, data}
   end
 

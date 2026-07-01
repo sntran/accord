@@ -185,6 +185,14 @@ defmodule Accord.Violation.Report do
     |> Report.with_note("property :#{v.context[:property]} failed")
   end
 
+  defp build_report(%Violation{kind: :correspondence_violated} = v) do
+    Report.error("correspondence violated: close without a matching open")
+    |> Report.with_note("property :#{v.context[:property]} failed")
+    |> Report.with_note(
+      ":#{v.context[:close]} fired with no pending :#{v.context[:open]} to match"
+    )
+  end
+
   defp build_report(%Violation{} = v) do
     Report.error("protocol violation: #{v.kind}")
     |> Report.with_note("state: :#{v.state}, message: #{inspect(v.message)}")
@@ -311,6 +319,7 @@ defmodule Accord.Violation.Report do
   defp label_message(:invariant_violated, _), do: "invariant check defined here"
   defp label_message(:action_violated, _), do: "action check defined here"
   defp label_message(:ordering_violated, _), do: "ordered check defined here"
+  defp label_message(:correspondence_violated, _), do: "correspondence check defined here"
   defp label_message(:precedence_violated, _), do: "precedence check defined here"
   defp label_message(:liveness_violated, _), do: "property defined here"
   defp label_message(:invalid_reply, _), do: "reply type defined here"
