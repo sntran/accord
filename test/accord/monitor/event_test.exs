@@ -166,6 +166,73 @@ defmodule Accord.Monitor.EventTest do
     end
   end
 
+  describe "role labeling" do
+    defmodule RolesProtocol do
+      use Accord.Protocol, tla: :off
+
+      role :consumer
+      role :producer
+
+      initial :ready
+
+      state :ready do
+        on :ping, reply: :pong, goto: :ready
+        event :tick, goto: :ready
+      end
+    end
+
+    defmodule PongServer do
+      use GenServer
+
+      def start_link, do: GenServer.start_link(__MODULE__, nil)
+
+      @impl true
+      def init(_), do: {:ok, %{}}
+
+      @impl true
+      def handle_call(:ping, _from, state), do: {:reply, :pong, state}
+    end
+
+    test "client blame carries the first declared role" do
+      {:ok, server} = PongServer.start_link()
+
+      {:ok, monitor} =
+        Monitor.start_link(RolesProtocol.__compiled__(),
+          upstream: server,
+          violation_policy: :reject
+        )
+
+      assert {:accord_violation, violation} = Monitor.call(monitor, :unknown)
+      assert violation.blame == :client
+      assert violation.context.role == :consumer
+    end
+
+    test "server blame carries the second declared role" do
+      {:ok, server} = PongServer.start_link()
+      ViolationCollector.init()
+
+      {:ok, monitor} =
+        Monitor.start_link(RolesProtocol.__compiled__(),
+          upstream: server,
+          violation_policy: {ViolationCollector, :handle}
+        )
+
+      Monitor.event(monitor, :surprise)
+      _ = :sys.get_state(monitor)
+
+      assert [violation] = ViolationCollector.drain()
+      assert violation.blame == :server
+      assert violation.context.role == :producer
+    end
+
+    test "without declared roles, no role is attached" do
+      monitor = start_feed(violation_policy: :reject)
+
+      assert {:accord_violation, violation} = Monitor.call(monitor, :unknown)
+      refute Map.has_key?(violation.context, :role)
+    end
+  end
+
   describe "properties over events" do
     test "an event that violates an invariant still transitions and reports" do
       {:ok, server} = FeedServer.start_link()

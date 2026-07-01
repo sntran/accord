@@ -140,6 +140,15 @@ defmodule Accord.Protocol do
 
   @doc """
   Declares a participant role.
+
+  Protocols are two-party: the first declared role initiates calls and
+  casts (default `:client`), the second replies and pushes events
+  (default `:server`). Declared names label blame in diagnostics —
+  violations carry `context.role` alongside the canonical
+  `:client | :server` blame.
+
+      role :consumer
+      role :producer
   """
   defmacro role(name) do
     span = span_ast(__CALLER__)
@@ -960,6 +969,7 @@ defmodule Accord.Protocol do
 
     with {:ok, ir} <- Pass.RefineSpans.run(ir),
          {:ok, ir} <- run_pass(Pass.ValidateStructure, ir, env),
+         {:ok, ir} <- run_pass(Pass.ValidateRoles, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateTracks, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateTypes, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateDeterminism, ir, env),

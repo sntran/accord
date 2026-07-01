@@ -10,3 +10,5 @@ This directory contains architectural decision records (ADRs) for the accord2 pr
 | [004](004-closure-lifting.md) | DSL closures are lifted to named function captures because the compiler's temporary module does not exist at runtime, breaking `term_to_binary` serialization. |
 | [005](005-tla-plus-verification.md) | TLA+ is used for model checking because it provides exhaustive state space exploration, temporal property checking, and an established formal methods ecosystem. |
 | [006](006-pentiment-error-reporting.md) | Errors use pentiment for source-annotated diagnostics with labeled code spans, making violations actionable for both humans and tooling. |
+| [007](007-strict-tla-compilation.md) | TLA+ spec generation failures abort compilation by default (`tla: :strict`); anything the model cannot express is a loud diagnostic, and stale specs are never verified. |
+| [008](008-roles-events-direction-blame.md) | Protocols are two-party with direction-derived blame; the `event` primitive validates server pushes through the monitor and models them as TLA+ actions. |

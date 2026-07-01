@@ -885,7 +885,25 @@ defmodule Accord.Monitor do
 
   # -- Violation Handling --
 
+  # Declared role names label the blame in diagnostics: the first role
+  # initiates calls/casts (:client blame), the second replies and pushes
+  # events (:server blame).
+  defp assign_role(violation, data) do
+    case {violation.blame, data.compiled.ir.roles} do
+      {:client, [%{name: role} | _]} ->
+        %{violation | context: Map.put(violation.context, :role, role)}
+
+      {:server, [_, %{name: role} | _]} ->
+        %{violation | context: Map.put(violation.context, :role, role)}
+
+      _ ->
+        violation
+    end
+  end
+
   defp handle_violation(violation, from, _state, data) do
+    violation = assign_role(violation, data)
+
     case data.violation_policy do
       :log ->
         log_violation(violation)
@@ -906,6 +924,8 @@ defmodule Accord.Monitor do
   end
 
   defp handle_cast_violation(violation, _state, data) do
+    violation = assign_role(violation, data)
+
     case data.violation_policy do
       :crash ->
         {:stop, {:protocol_violation, violation}, data}
@@ -940,8 +960,14 @@ defmodule Accord.Monitor do
   defp log_violation(violation) do
     require Logger
 
+    blame_label =
+      case violation.context[:role] do
+        nil -> "#{violation.blame}"
+        role -> "#{violation.blame}, role :#{role}"
+      end
+
     Logger.warning(
-      "protocol violation: #{violation.kind} (#{violation.blame}) in state :#{violation.state} — #{inspect(violation.message)}"
+      "protocol violation: #{violation.kind} (#{blame_label}) in state :#{violation.state} — #{inspect(violation.message)}"
     )
   end
 

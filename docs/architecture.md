@@ -129,7 +129,13 @@ reply contract. The monitor detects this after receiving the reply.
 |------|--------------|
 | `:invalid_reply` | The reply does not match any branch's declared reply type. |
 | `:constraint_failed` | The reply matched a branch's type but violated its `where:` constraint, and no later branch accepted it. |
+| `:invalid_event` | The server pushed an event with no matching `event` declaration in the current state. |
 | `:timeout` | The server did not respond within the configured timeout (per-transition `timeout:` or the monitor default). |
+
+Pushed events blame the server for everything they violate — bad payload
+types, guard failures, pushes after a terminal state. Blame derives from
+message direction (the sender is at fault), not pipeline position; declared
+role names label it in `context.role`.
 
 Decision rule: if the message was valid but the server's response was not, the
 server is at fault. Server violations are caught at step 4 of the call pipeline
@@ -359,6 +365,10 @@ it possible to search for documentation or suppress specific checks.
 
 **Track errors (E040):**
 - E040 -- duplicate track name.
+
+**Role errors (E050-E051):**
+- E050 -- more than two roles declared (protocols are two-party).
+- E051 -- duplicate role name.
 
 **TLA+ fidelity errors (E041-E046):** anything the model cannot faithfully
 express is a loud, span-carrying diagnostic — never a silent drop. Under the
