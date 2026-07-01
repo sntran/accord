@@ -16,10 +16,29 @@ defmodule Mix.Tasks.Accord.Check do
       mix accord.check --no-deadlock            # disable deadlock checking
       mix accord.check --dump                   # write raw TLC output on failure
       mix accord.check --force                  # ignore the pass cache
+      mix accord.check --extra test/tla/LockProtocolChecks.tla
 
   Passing results are cached by content hash (spec, cfg, TLC jar,
   deadlock setting) in `_build/accord/.check_cache`; unchanged protocols
   skip TLC entirely. Failures are never cached.
+
+  ## Hand-written extension specs
+
+  `--extra` checks a user-authored TLA+ module that `EXTENDS` a
+  generated protocol module — custom invariants, refinement mappings,
+  anything the DSL cannot express — without ever editing generated
+  files, so regeneration is always safe:
+
+      ---- MODULE LockProtocolChecks ----
+      EXTENDS LockProtocol
+      HolderNeedsToken == (holder /= NULL) => (fence_token > 0)
+      ====
+
+  A sibling `.cfg` provides SPECIFICATION/INVARIANT/PROPERTY lines
+  (defaults to `SPECIFICATION Spec` if absent); the generated module's
+  CONSTANT, SYMMETRY, and CONSTRAINT lines are appended automatically,
+  so model values never need duplicating. The file name must match the
+  MODULE name. Repeat the flag for multiple modules.
 
   Protocols whose spec generation failed at compile time (`tla: :warn`)
   always count as failures: a protocol that cannot be checked is not
@@ -59,7 +78,8 @@ defmodule Mix.Tasks.Accord.Check do
           strict: :boolean,
           deadlock: :boolean,
           dump: :boolean,
-          force: :boolean
+          force: :boolean,
+          extra: :keep
         ]
       )
 
@@ -68,6 +88,7 @@ defmodule Mix.Tasks.Accord.Check do
     deadlock? = Keyword.get(opts, :deadlock, true)
     dump? = Keyword.get(opts, :dump, false)
     force? = Keyword.get(opts, :force, false)
+    extras = Keyword.get_values(opts, :extra)
 
     protocols =
       if modules == [] do
@@ -85,11 +106,11 @@ defmodule Mix.Tasks.Accord.Check do
         end)
       end
 
-    if protocols == [] do
+    if protocols == [] and extras == [] do
       Mix.shell().info("No Accord protocols found.")
       :ok
     else
-      Mix.shell().info("Checking #{length(protocols)} protocol(s)...\n")
+      Mix.shell().info("Checking #{length(protocols) + length(extras)} module(s)...\n")
 
       cache = if force?, do: %{}, else: CheckCache.load()
 
@@ -99,9 +120,100 @@ defmodule Mix.Tasks.Accord.Check do
           {{mod, result}, cache}
         end)
 
+      extra_results =
+        Enum.map(extras, fn path ->
+          check_extra(path, protocols, workers, deadlock?, dump?)
+        end)
+
       CheckCache.save(cache)
-      report_results(results)
+      report_results(results ++ extra_results)
     end
+  end
+
+  # -- Hand-Written Extension Specs --
+
+  # An extra module runs against the SAME generated artifacts: it is
+  # copied into _build/accord/ so EXTENDS resolves, its cfg (or a
+  # default) is merged with the generated module's CONSTANT/SYMMETRY/
+  # CONSTRAINT lines, and violations are mapped through the extended
+  # protocol's spans where possible. Extras are never cached.
+  defp check_extra(path, protocols, workers, deadlock?, dump?) do
+    with {:ok, content} <- File.read(path),
+         module_name = Path.basename(path, ".tla"),
+         {:ok, protocol_mod} <- resolve_extended_protocol(content, protocols) do
+      {proto_tla, proto_cfg} = Files.paths(protocol_mod)
+
+      if File.exists?(proto_tla) do
+        dest_tla = Path.join(Path.dirname(proto_tla), "#{module_name}.tla")
+        dest_cfg = Path.join(Path.dirname(proto_tla), "#{module_name}.cfg")
+        File.write!(dest_tla, content)
+        File.write!(dest_cfg, merged_extra_cfg(path, proto_cfg))
+
+        result =
+          case require_tlc() do
+            {:ok, tlc_jar} ->
+              run_tlc(protocol_mod, dest_tla, dest_cfg, tlc_jar, workers, deadlock?, dump?)
+
+            error ->
+              error
+          end
+
+        {{:extra, module_name, protocol_mod}, result}
+      else
+        {{:extra, module_name, protocol_mod}, {:error, :tla_not_found}}
+      end
+    else
+      {:error, :no_known_extends} ->
+        {{:extra, Path.basename(path, ".tla"), nil}, {:error, :no_known_extends}}
+
+      {:error, reason} ->
+        {{:extra, Path.basename(path, ".tla"), nil}, {:error, {:extra_unreadable, reason}}}
+    end
+  end
+
+  # The first EXTENDS entry matching a generated protocol module name
+  # identifies which protocol this module refines.
+  defp resolve_extended_protocol(content, protocols) do
+    by_name = Map.new(protocols, fn mod -> {Files.tla_module_name(mod), mod} end)
+
+    extended =
+      ~r/^EXTENDS\s+(.+)$/m
+      |> Regex.scan(content, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.flat_map(&String.split(&1, ","))
+      |> Enum.map(&String.trim/1)
+      |> Enum.find(&Map.has_key?(by_name, &1))
+
+    case extended do
+      nil -> {:error, :no_known_extends}
+      name -> {:ok, Map.fetch!(by_name, name)}
+    end
+  end
+
+  # User cfg (or a bare SPECIFICATION) plus the generated module's
+  # CONSTANT/SYMMETRY/CONSTRAINT lines — model values never need
+  # duplicating by hand.
+  defp merged_extra_cfg(extra_tla_path, proto_cfg_path) do
+    user_cfg_path = Path.rootname(extra_tla_path) <> ".cfg"
+
+    user_cfg =
+      case File.read(user_cfg_path) do
+        {:ok, content} -> content
+        {:error, _} -> "SPECIFICATION Spec\n"
+      end
+
+    inherited =
+      proto_cfg_path
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.filter(fn line ->
+        String.starts_with?(line, "CONSTANT") or
+          String.starts_with?(line, "SYMMETRY") or
+          String.starts_with?(line, "CONSTRAINT")
+      end)
+      |> Enum.reject(&String.contains?(user_cfg, &1))
+
+    user_cfg <> "\n" <> Enum.join(inherited, "\n") <> "\n"
   end
 
   # -- Protocol Discovery --
@@ -269,7 +381,7 @@ defmodule Mix.Tasks.Accord.Check do
     # Report successes.
     for {mod, {:ok, stats}} <- successes do
       Mix.shell().info(
-        "#{IO.ANSI.green()}✓#{IO.ANSI.reset()} #{inspect(mod)} — " <>
+        "#{IO.ANSI.green()}✓#{IO.ANSI.reset()} #{display_name(mod)} — " <>
           "#{stats.distinct_states} distinct states (#{stats.states_generated} generated" <>
           if(stats.depth, do: ", depth #{stats.depth}", else: "") <>
           ")" <> format_duration(stats)
@@ -318,11 +430,19 @@ defmodule Mix.Tasks.Accord.Check do
     label = violation_label(violation)
 
     Mix.shell().info(
-      "#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{inspect(mod)} — #{label} " <>
+      "#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{display_name(mod)} — #{label} " <>
         "(#{stats.distinct_states} states explored)"
     )
 
-    formatted = ViolationReport.format(violation, mod)
+    # Extra modules map violations through the protocol they extend —
+    # user-defined invariant names simply have no spans.
+    span_mod =
+      case mod do
+        {:extra, _name, protocol_mod} -> protocol_mod
+        mod -> mod
+      end
+
+    formatted = ViolationReport.format(violation, span_mod)
     Mix.shell().info("\n" <> formatted)
   end
 
@@ -337,18 +457,28 @@ defmodule Mix.Tasks.Accord.Check do
         :cfg_not_found -> ".cfg file not found (run `mix compile` first)"
         :tlc_not_found -> "TLC not found (set TLA2TOOLS_JAR or install to ~/.tla/)"
         :java_not_found -> "Java not found (TLC requires a JVM)"
+        :no_known_extends -> "EXTENDS no known generated protocol module"
+        {:extra_unreadable, why} -> "cannot read extra module: #{inspect(why)}"
         other -> inspect(other)
       end
 
-    Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{inspect(mod)} — #{message}")
+    Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{display_name(mod)} — #{message}")
   end
 
   defp report_failure(mod, {:error, reason, detail}) do
-    Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{inspect(mod)} — #{reason}: #{detail}")
+    Mix.shell().info(
+      "#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{display_name(mod)} — #{reason}: #{detail}"
+    )
   end
 
   defp format_duration(%{duration_ms: ms}) when is_integer(ms), do: " in #{ms}ms"
   defp format_duration(_stats), do: ""
+
+  defp display_name({:extra, name, protocol_mod}) when protocol_mod != nil,
+    do: "#{name} (extends #{inspect(protocol_mod)})"
+
+  defp display_name({:extra, name, _}), do: name
+  defp display_name(mod), do: inspect(mod)
 
   # A green check must never silently imply that runtime-only checks
   # (ordered, precedence, keyed correspondence) were model checked.
@@ -364,6 +494,8 @@ defmodule Mix.Tasks.Accord.Check do
         )
     end
   end
+
+  defp runtime_only_checks({:extra, _name, _mod}), do: []
 
   defp runtime_only_checks(mod) do
     if function_exported?(mod, :__ir__, 0) do
