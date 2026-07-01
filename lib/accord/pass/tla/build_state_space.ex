@@ -9,7 +9,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
   """
 
   alias Accord.IR
-  alias Accord.TLA.{ModelConfig, StateSpace}
+  alias Accord.TLA.{ModelConfig, Sessions, StateSpace}
   alias Pentiment.Report
 
   import Accord.Pass.Helpers, only: [maybe_add_source: 2, maybe_add_span_label: 3]
@@ -30,12 +30,18 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
   defp build_state_space(%IR{} = ir, %ModelConfig{} = config) do
     states = Map.keys(ir.states) |> Enum.map(&state_to_tla/1)
 
+    # Build correspondence counter names first so the session context
+    # knows the complete per-session variable set.
+    correspondences = build_correspondences(ir)
+    sessions = Sessions.build(ir, config.sessions, Enum.map(correspondences, & &1.counter_var))
+
     # Build variable list.
-    state_var = %{
-      name: "state",
-      type: state_type_expr(states),
-      init: ~s("#{ir.initial}")
-    }
+    state_var =
+      sessioned_var(sessions, %{
+        name: "state",
+        type: state_type_expr(states),
+        init: ~s("#{ir.initial}")
+      })
 
     track_vars =
       Enum.map(ir.tracks, fn track ->
@@ -51,15 +57,12 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
             type_str
           end
 
-        %{
+        sessioned_var(sessions, %{
           name: Atom.to_string(track.name),
           type: type_str,
           init: value_to_tla(init_value)
-        }
+        })
       end)
-
-    # Build correspondence counter variables.
-    correspondences = build_correspondences(ir)
 
     {correspondence_vars, counter_bounds} =
       correspondences
@@ -72,8 +75,8 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
           )
 
         type_str = ModelConfig.domain_to_tla(domain)
-        var = %{name: corr.counter_var, type: type_str, init: "0"}
-        {var, counter_bound(corr.counter_var, domain)}
+        var = sessioned_var(sessions, %{name: corr.counter_var, type: type_str, init: "0"})
+        {var, counter_bound(sessions, corr.counter_var, domain)}
       end)
       |> Enum.unzip()
 
@@ -101,14 +104,21 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       |> Module.split()
       |> List.last()
 
-    # Collect model value constants needed for the cfg.
-    constants = collect_constants(ir, config)
+    # Collect model value constants needed for the cfg. Session model
+    # values join them; the Sessions set itself gets its own cfg line.
+    constants =
+      collect_constants(ir, config) ++
+        if Sessions.multi?(sessions), do: Sessions.values(sessions), else: []
 
     terminal_states =
       ir.states
       |> Enum.filter(fn {_name, state} -> state.terminal end)
       |> Enum.map(fn {name, _state} -> state_to_tla(name) end)
       |> Enum.sort()
+
+    symmetry_exprs =
+      build_symmetry_exprs(config) ++
+        if Sessions.multi?(sessions), do: ["Permutations(Sessions)"], else: []
 
     %StateSpace{
       module_name: module_name,
@@ -119,16 +129,33 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       correspondences: correspondences,
       constants: constants,
       state_constraint: compose_state_constraint(config.state_constraint, counter_bounds),
-      symmetry_exprs: build_symmetry_exprs(config),
-      terminal_states: terminal_states
+      symmetry_exprs: symmetry_exprs,
+      terminal_states: terminal_states,
+      sessions: sessions
     }
+  end
+
+  # Per-session variables become functions over Sessions.
+  defp sessioned_var(sessions, %{name: name, type: type, init: init} = var) do
+    if Sessions.multi?(sessions) and MapSet.member?(sessions.per_session, name) do
+      %{
+        var
+        | type: "[Sessions -> #{type}]",
+          init: "[#{sessions.var} \\in Sessions |-> #{init}]"
+      }
+    else
+      var
+    end
   end
 
   # The counter's upper bound becomes a state constraint conjunct so TLC
   # stops exploring past it (bounded checking) instead of reporting a
   # confusing TypeInvariant violation at nesting depth N+1.
-  defp counter_bound(counter_var, %Range{last: hi}), do: "#{counter_var} =< #{hi}"
-  defp counter_bound(_counter_var, _domain), do: nil
+  defp counter_bound(sessions, counter_var, %Range{last: hi}) do
+    Sessions.forall(sessions, "#{Sessions.read(sessions, counter_var)} =< #{hi}")
+  end
+
+  defp counter_bound(_sessions, _counter_var, _domain), do: nil
 
   defp compose_state_constraint(config_constraint, counter_bounds) do
     parts = List.wrap(config_constraint) ++ counter_bounds

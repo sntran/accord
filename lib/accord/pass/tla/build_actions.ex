@@ -12,7 +12,7 @@ defmodule Accord.Pass.TLA.BuildActions do
   alias Accord.IR
   alias Accord.IR.Transition
   alias Accord.Pass.TLA.Expr
-  alias Accord.TLA.{Action, ModelConfig, StateSpace}
+  alias Accord.TLA.{Action, ModelConfig, Sessions, StateSpace}
   alias Pentiment.Report
 
   import Accord.Pass.Helpers, only: [maybe_add_source: 2, maybe_add_span_label: 3]
@@ -177,30 +177,42 @@ defmodule Accord.Pass.TLA.BuildActions do
        ) do
     target_state = resolve_next_state(branch.next_state, state_name)
     target = Atom.to_string(target_state)
+    sessions = state_space.sessions
 
     action_name = build_action_name(tag, source, target, suffix)
 
-    # Build existential variables for message parameters.
-    {existential_vars, param_bindings} =
+    # Build existential variables for message parameters. In a
+    # multi-session model the acting session is the first existential;
+    # positional bindings (update/constraint params) use the message
+    # existentials only.
+    {msg_existentials, param_bindings} =
       build_existentials(transition, config)
 
     # Preconditions.
-    preconditions = [~s(state = "#{source}")]
+    preconditions = [~s(#{Sessions.read(sessions, "state")} = "#{source}")]
 
     # Guard condition.
-    guard_result = compile_guard(ir, transition, param_bindings, track_names)
+    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
 
     # Build bindings for update fn params and additional reply existentials.
     {reply_existentials, update_bindings} =
-      build_update_bindings(transition, branch, existential_vars, config)
+      build_update_bindings(transition, branch, msg_existentials, config)
 
     # Constraint precondition from where clause.
     constraint_result =
-      build_constraint(ir, branch, reply_existentials, update_bindings, config, track_names)
+      build_constraint(
+        ir,
+        branch,
+        reply_existentials,
+        update_bindings,
+        config,
+        track_names,
+        sessions
+      )
 
     # Track updates from update AST.
     track_primed_result =
-      build_track_primed(ir, transition, branch, update_bindings, track_names)
+      build_track_primed(ir, transition, branch, update_bindings, track_names, sessions)
 
     # Collect errors from every failing site, not just the first.
     errors =
@@ -217,10 +229,12 @@ defmodule Accord.Pass.TLA.BuildActions do
       {:ok, {constraint_existentials, constraint_precondition}} = constraint_result
       {:ok, track_primed} = track_primed_result
 
-      existential_vars = existential_vars ++ reply_existentials ++ constraint_existentials
+      existential_vars =
+        session_existentials(sessions) ++
+          msg_existentials ++ reply_existentials ++ constraint_existentials
 
       # Primed assignments.
-      primed = %{"state" => ~s("#{target}")}
+      primed = %{"state" => Sessions.assign(sessions, "state", ~s("#{target}"))}
 
       # Correspondence counter updates.
       correspondence_primed =
@@ -253,7 +267,7 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp compile_guard(ir, transition, param_bindings, track_names) do
+  defp compile_guard(ir, transition, param_bindings, track_names, sessions) do
     case transition.guard do
       %{ast: ast} = guard when not is_nil(ast) ->
         span = Map.get(guard, :span) || transition.span
@@ -263,7 +277,8 @@ defmodule Accord.Pass.TLA.BuildActions do
                code: "E041",
                context: "guard",
                track_names: track_names,
-               span: span
+               span: span,
+               render_field: Sessions.render_field(sessions)
              ) do
           {:ok, tla} -> {:ok, [tla]}
           {:error, reports} -> {:error, reports}
@@ -274,11 +289,21 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp build_cast_action(_ir, _state_name, _transition, tag, source, _state_space, all_var_names) do
+  # The acting session, existentially quantified (multi-session only).
+  defp session_existentials(sessions) do
+    if Sessions.multi?(sessions) do
+      [{sessions.var, "Sessions"}]
+    else
+      []
+    end
+  end
+
+  defp build_cast_action(_ir, _state_name, _transition, tag, source, state_space, all_var_names) do
     # Casts don't change state (stay in same state). With no primed
     # variables the action is a pure stuttering step — semantically a
     # no-op for TLC, kept for spec readability.
     target = source
+    sessions = state_space.sessions
     action_name = "Cast#{camelize(tag)}From#{camelize(source)}"
 
     unchanged = all_var_names |> MapSet.to_list() |> Enum.sort()
@@ -288,8 +313,8 @@ defmodule Accord.Pass.TLA.BuildActions do
       source_state: source,
       target_state: target,
       message_tag: tag,
-      preconditions: [~s(state = "#{source}")],
-      existential_vars: [],
+      preconditions: [~s(#{Sessions.read(sessions, "state")} = "#{source}")],
+      existential_vars: session_existentials(sessions),
       primed: %{},
       unchanged: unchanged,
       comment: "cast #{tag} in #{source}"
@@ -313,15 +338,17 @@ defmodule Accord.Pass.TLA.BuildActions do
        ) do
     target_state = resolve_next_state(transition.to, state_name)
     target = Atom.to_string(target_state)
+    sessions = state_space.sessions
     action_name = "Event#{camelize(tag)}From#{camelize(source)}To#{camelize(target)}"
 
-    {existential_vars, param_bindings} = build_existentials(transition, config)
+    {msg_existentials, param_bindings} = build_existentials(transition, config)
+    existential_vars = session_existentials(sessions) ++ msg_existentials
 
-    guard_result = compile_guard(ir, transition, param_bindings, track_names)
+    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
 
     # Update values may reference either the declared argument names
     # (param_bindings) or the update fn head's own names (update_bindings).
-    update_bindings = build_event_update_bindings(transition, existential_vars)
+    update_bindings = build_event_update_bindings(transition, msg_existentials)
 
     track_primed_result =
       build_track_primed(
@@ -329,7 +356,8 @@ defmodule Accord.Pass.TLA.BuildActions do
         transition,
         nil,
         Map.merge(param_bindings, update_bindings),
-        track_names
+        track_names,
+        sessions
       )
 
     errors =
@@ -348,7 +376,7 @@ defmodule Accord.Pass.TLA.BuildActions do
       correspondence_primed = build_correspondence_primed(tag, source, target, state_space)
 
       all_primed =
-        %{"state" => ~s("#{target}")}
+        %{"state" => Sessions.assign(sessions, "state", ~s("#{target}"))}
         |> Map.merge(track_primed)
         |> Map.merge(correspondence_primed)
 
@@ -364,7 +392,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          source_state: source,
          target_state: target,
          message_tag: tag,
-         preconditions: [~s(state = "#{source}")] ++ guard_precondition,
+         preconditions:
+           [~s(#{Sessions.read(sessions, "state")} = "#{source}")] ++ guard_precondition,
          existential_vars: existential_vars,
          primed: all_primed,
          unchanged: unchanged,
@@ -428,7 +457,7 @@ defmodule Accord.Pass.TLA.BuildActions do
   defp extract_param_name(name, _idx) when is_atom(name), do: name
   defp extract_param_name(_, idx), do: :"arg#{idx}"
 
-  defp build_track_primed(_ir, %Transition{update: nil}, _branch, _bindings, _track_names),
+  defp build_track_primed(_ir, %Transition{update: nil}, _branch, _bindings, _track_names, _s),
     do: {:ok, %{}}
 
   defp build_track_primed(
@@ -436,7 +465,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          %Transition{update: %{ast: ast} = update} = transition,
          branch,
          bindings,
-         track_names
+         track_names,
+         sessions
        )
        when not is_nil(ast) do
     span = Map.get(update, :span) || transition.block_span || transition.span
@@ -454,13 +484,13 @@ defmodule Accord.Pass.TLA.BuildActions do
         {:error, [unsupported_update_report(ir, offending, span)]}
 
       {:ok, update_pairs} ->
-        compile_update_pairs(ir, update_pairs, bindings, track_names, span)
+        compile_update_pairs(ir, update_pairs, bindings, track_names, span, sessions)
     end
   end
 
-  defp build_track_primed(_, _, _, _, _), do: {:ok, %{}}
+  defp build_track_primed(_, _, _, _, _, _), do: {:ok, %{}}
 
-  defp compile_update_pairs(ir, update_pairs, bindings, track_names, span) do
+  defp compile_update_pairs(ir, update_pairs, bindings, track_names, span, sessions) do
     results =
       Enum.map(update_pairs, fn {key, val_ast} ->
         key_str = Atom.to_string(key)
@@ -471,9 +501,10 @@ defmodule Accord.Pass.TLA.BuildActions do
                  code: "E042",
                  context: "update",
                  track_names: track_names,
-                 span: span
+                 span: span,
+                 render_field: Sessions.render_field(sessions)
                ) do
-            {:ok, tla_val} -> {:ok, {key_str, tla_val}}
+            {:ok, tla_val} -> {:ok, {key_str, Sessions.assign(sessions, key_str, tla_val)}}
             {:error, reports} -> {:error, reports}
           end
         else
@@ -772,7 +803,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          _reply_existentials,
          _update_bindings,
          _config,
-         _track_names
+         _track_names,
+         _sessions
        ),
        do: {:ok, {[], []}}
 
@@ -782,7 +814,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          reply_existentials,
          update_bindings,
          config,
-         track_names
+         track_names,
+         sessions
        ) do
     case ast do
       {:fn, _, [{:->, _, [[reply_pat, _tracks_var], body]}]} ->
@@ -805,7 +838,8 @@ defmodule Accord.Pass.TLA.BuildActions do
                code: "E045",
                context: "where: constraint",
                track_names: track_names,
-               span: branch.span
+               span: branch.span,
+               render_field: Sessions.render_field(sessions)
              ) do
           {:ok, tla} -> {:ok, {extra_existentials, [tla]}}
           {:error, reports} -> {:error, reports}
@@ -904,18 +938,28 @@ defmodule Accord.Pass.TLA.BuildActions do
 
   # Builds primed assignments for correspondence counter variables.
   defp build_correspondence_primed(tag, source, target, %StateSpace{
-         correspondences: correspondences
+         correspondences: correspondences,
+         sessions: sessions
        }) do
     Enum.reduce(correspondences, %{}, fn corr, acc ->
       open_tag = Atom.to_string(corr.open)
       close_tags = Enum.map(corr.close, &Atom.to_string/1)
+      counter_read = Sessions.read(sessions, corr.counter_var)
 
       cond do
         tag == open_tag and source != target ->
-          Map.put(acc, corr.counter_var, "(#{corr.counter_var} + 1)")
+          Map.put(
+            acc,
+            corr.counter_var,
+            Sessions.assign(sessions, corr.counter_var, "(#{counter_read} + 1)")
+          )
 
         tag in close_tags and source != target ->
-          Map.put(acc, corr.counter_var, "(#{corr.counter_var} - 1)")
+          Map.put(
+            acc,
+            corr.counter_var,
+            Sessions.assign(sessions, corr.counter_var, "(#{counter_read} - 1)")
+          )
 
         true ->
           acc

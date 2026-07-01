@@ -30,7 +30,7 @@ defmodule Accord.TLA.Compiler do
   def compile(%IR{} = ir, %ModelConfig{} = config) do
     with {:ok, state_space} <- BuildStateSpace.run(ir, config),
          {:ok, actions} <- BuildActions.run(ir, state_space, config),
-         {:ok, properties} <- BuildProperties.run(ir),
+         {:ok, properties} <- BuildProperties.run(ir, state_space.sessions),
          {:ok, files} <- Emit.run(state_space, actions, properties) do
       {:ok,
        Map.merge(files, %{

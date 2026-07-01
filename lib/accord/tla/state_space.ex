@@ -28,7 +28,8 @@ defmodule Accord.TLA.StateSpace do
           constants: [String.t()],
           state_constraint: String.t() | nil,
           symmetry_exprs: [String.t()],
-          terminal_states: [String.t()]
+          terminal_states: [String.t()],
+          sessions: Accord.TLA.Sessions.t()
         }
 
   @enforce_keys [:module_name, :variables, :type_invariant, :init, :states]
@@ -42,6 +43,7 @@ defmodule Accord.TLA.StateSpace do
     constants: [],
     state_constraint: nil,
     symmetry_exprs: [],
-    terminal_states: []
+    terminal_states: [],
+    sessions: %Accord.TLA.Sessions{}
   ]
 end

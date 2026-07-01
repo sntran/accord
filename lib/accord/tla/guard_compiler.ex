@@ -44,11 +44,19 @@ defmodule Accord.TLA.GuardCompiler do
   Returns `{:ok, tla_string, emitted_identifiers}` on success, or
   `{:error, unsupported}` listing every sub-expression that has no TLA+
   equivalent.
+
+  ## Options
+
+  - `:render_field` — `(field_name, primed?) -> String.t()`; controls how
+    track-field accesses render. The default emits `field` / `field'`;
+    multi-session emission renders per-session tracks as `field[s]` /
+    `field'[s]`.
   """
-  @spec compile(Macro.t(), map()) ::
+  @spec compile(Macro.t(), map(), keyword()) ::
           {:ok, String.t(), [emitted_identifier()]} | {:error, [unsupported()]}
-  def compile(ast, bindings \\ %{}) do
-    {tla, acc} = do_compile(ast, bindings, new_acc())
+  def compile(ast, bindings \\ %{}, opts \\ []) do
+    render_field = Keyword.get(opts, :render_field, &default_render_field/2)
+    {tla, acc} = do_compile(ast, bindings, new_acc(render_field))
 
     case acc.unsupported do
       [] -> {:ok, tla, Enum.reverse(acc.idents)}
@@ -56,7 +64,10 @@ defmodule Accord.TLA.GuardCompiler do
     end
   end
 
-  defp new_acc, do: %{unsupported: [], idents: []}
+  defp default_render_field(field, false), do: field
+  defp default_render_field(field, true), do: field <> "'"
+
+  defp new_acc(render_field), do: %{unsupported: [], idents: [], render_field: render_field}
 
   defp add_ident(acc, name, kind), do: %{acc | idents: [{name, kind} | acc.idents]}
 
@@ -114,7 +125,7 @@ defmodule Accord.TLA.GuardCompiler do
 
   defp do_compile({{:., _meta1, [Access, :get]}, _meta2, [_map, key]}, _bindings, acc) do
     key_str = Atom.to_string(key)
-    {key_str, add_ident(acc, key_str, :field)}
+    {acc.render_field.(key_str, false), add_ident(acc, key_str, :field)}
   end
 
   defp do_compile({{:., _meta1, [{var, _meta2, _ctx}, field]}, _meta3, []}, bindings, acc)
@@ -123,8 +134,8 @@ defmodule Accord.TLA.GuardCompiler do
     acc = add_ident(acc, field_str, :field)
 
     case Map.get(bindings, var) do
-      :primed -> {"#{field_str}'", acc}
-      _ -> {field_str, acc}
+      :primed -> {acc.render_field.(field_str, true), acc}
+      _ -> {acc.render_field.(field_str, false), acc}
     end
   end
 

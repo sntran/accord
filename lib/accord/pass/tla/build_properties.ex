@@ -19,17 +19,18 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
   alias Accord.IR
   alias Accord.Pass.TLA.Expr
-  alias Accord.TLA.Property
+  alias Accord.TLA.{Property, Sessions}
 
-  @spec run(IR.t()) :: {:ok, [Property.t()]} | {:error, [Pentiment.Report.t()]}
-  def run(%IR{} = ir) do
+  @spec run(IR.t(), Sessions.t()) :: {:ok, [Property.t()]} | {:error, [Pentiment.Report.t()]}
+  def run(%IR{} = ir, sessions \\ %Sessions{}) do
     track_names = MapSet.new(ir.tracks, &Atom.to_string(&1.name))
+    ctx = %{ir: ir, track_names: track_names, sessions: sessions}
 
     results =
       ir.properties
       |> Enum.flat_map(fn prop ->
         Enum.map(prop.checks, fn check ->
-          build_property(prop.name, check, ir, track_names)
+          build_property(prop.name, check, ctx)
         end)
       end)
       |> Enum.reject(&is_nil/1)
@@ -46,48 +47,49 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
-  defp build_property(prop_name, %{kind: :invariant} = check, ir, track_names) do
+  defp build_property(prop_name, %{kind: :invariant} = check, ctx) do
     tla_name = camelize(prop_name)
 
-    with {:ok, expr} <- compile_check_expr(check, "invariant", ir, track_names, "TRUE") do
+    with {:ok, expr} <- compile_check_expr(check, "invariant", ctx, "TRUE") do
       %Property{
         name: tla_name,
         kind: :invariant,
-        formula: "#{tla_name} == #{expr}",
+        formula: "#{tla_name} == #{Sessions.forall(ctx.sessions, expr)}",
         comment: "invariant: #{prop_name}"
       }
     end
   end
 
-  defp build_property(prop_name, %{kind: :local_invariant} = check, ir, track_names) do
+  defp build_property(prop_name, %{kind: :local_invariant} = check, ctx) do
     tla_name = camelize(prop_name) <> camelize(check.spec.state)
     state = Atom.to_string(check.spec.state)
+    state_read = Sessions.read(ctx.sessions, "state")
 
-    with {:ok, body} <- compile_check_expr(check, "local invariant", ir, track_names, "TRUE") do
-      formula = ~s[#{tla_name} == (state = "#{state}") => (#{body})]
+    with {:ok, body} <- compile_check_expr(check, "local invariant", ctx, "TRUE") do
+      inner = ~s[(#{state_read} = "#{state}") => (#{body})]
 
       %Property{
         name: tla_name,
         kind: :invariant,
-        formula: formula,
+        formula: "#{tla_name} == #{Sessions.forall(ctx.sessions, inner)}",
         comment: "local invariant: #{prop_name} in state #{state}"
       }
     end
   end
 
-  defp build_property(prop_name, %{kind: :action} = check, ir, track_names) do
+  defp build_property(prop_name, %{kind: :action} = check, ctx) do
     tla_name = camelize(prop_name)
 
     vars =
-      ir.tracks
+      ctx.ir.tracks
       |> Enum.map(fn t -> Atom.to_string(t.name) end)
       |> Enum.join(", ")
 
     bindings = extract_action_bindings(check.spec.ast)
 
     with {:ok, body} <-
-           compile_check_expr(check, "action property", ir, track_names, "TRUE", bindings) do
-      formula = "#{tla_name} == [][#{body}]_<<#{vars}>>"
+           compile_check_expr(check, "action property", ctx, "TRUE", bindings) do
+      formula = "#{tla_name} == [][#{Sessions.forall(ctx.sessions, body)}]_<<#{vars}>>"
 
       %Property{
         name: tla_name,
@@ -98,12 +100,12 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
-  defp build_property(prop_name, %{kind: :liveness} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :liveness} = check, ctx) do
     tla_name = camelize(prop_name)
-    trigger = pred_to_tla(check.spec.trigger)
-    target = pred_to_tla(check.spec.target)
+    trigger = pred_to_tla(check.spec.trigger, ctx.sessions)
+    target = pred_to_tla(check.spec.target, ctx.sessions)
 
-    formula = "#{tla_name} == #{trigger} ~> #{target}"
+    formula = "#{tla_name} == #{Sessions.forall(ctx.sessions, "#{trigger} ~> #{target}")}"
 
     fairness_tags =
       case Map.get(check.spec, :assuming) do
@@ -121,12 +123,14 @@ defmodule Accord.Pass.TLA.BuildProperties do
     }
   end
 
-  defp build_property(prop_name, %{kind: :bounded} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :bounded} = check, ctx) do
     tla_name = camelize(prop_name)
     track = Atom.to_string(check.spec.track)
     max = check.spec.max
 
-    formula = "#{tla_name} == #{track} =< #{max}"
+    formula =
+      "#{tla_name} == " <>
+        Sessions.forall(ctx.sessions, "#{Sessions.read(ctx.sessions, track)} =< #{max}")
 
     %Property{
       name: tla_name,
@@ -136,7 +140,7 @@ defmodule Accord.Pass.TLA.BuildProperties do
     }
   end
 
-  defp build_property(prop_name, %{kind: :correspondence} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :correspondence} = check, ctx) do
     tla_name = camelize(prop_name)
     open = Atom.to_string(check.spec.open)
 
@@ -150,23 +154,25 @@ defmodule Accord.Pass.TLA.BuildProperties do
     else
       # Correspondence requires an auxiliary counter variable.
       # The invariant is that the counter is always >= 0.
+      counter_read = Sessions.read(ctx.sessions, "#{open}_pending")
+
       %Property{
         name: tla_name,
         kind: :invariant,
-        formula: "#{tla_name} == #{open}_pending >= 0",
+        formula: "#{tla_name} == #{Sessions.forall(ctx.sessions, "#{counter_read} >= 0")}",
         comment: "correspondence: #{prop_name}"
       }
     end
   end
 
-  defp build_property(prop_name, %{kind: :ordered} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :ordered} = check, _ctx) do
     runtime_only(
       camelize(prop_name),
       "ordered #{inspect(check.spec.event)} by :#{check.spec.by} (#{prop_name})"
     )
   end
 
-  defp build_property(prop_name, %{kind: :precedence} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :precedence} = check, _ctx) do
     runtime_only(
       camelize(prop_name),
       "precedence #{inspect(check.spec.target)} requires " <>
@@ -174,38 +180,53 @@ defmodule Accord.Pass.TLA.BuildProperties do
     )
   end
 
-  defp build_property(prop_name, %{kind: :forbidden} = check, ir, track_names) do
+  defp build_property(prop_name, %{kind: :forbidden} = check, ctx) do
     tla_name = camelize(prop_name)
 
     with {:ok, body} <-
-           compile_check_expr(check, "forbidden condition", ir, track_names, "FALSE") do
+           compile_check_expr(check, "forbidden condition", ctx, "FALSE") do
       %Property{
         name: tla_name,
         kind: :invariant,
-        formula: "#{tla_name} == ~(#{body})",
+        formula: "#{tla_name} == #{Sessions.forall(ctx.sessions, "~(#{body})")}",
         comment: "forbidden: #{prop_name}"
       }
     end
   end
 
-  defp build_property(prop_name, %{kind: :exclusive} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :exclusive} = check, ctx) do
     tla_name = camelize(prop_name) <> "Exclusive"
     state = Atom.to_string(check.spec.state)
 
-    # Cross-session mutual exclusion is only expressible in a
-    # multi-session model; the sessioned emission upgrades this to a
-    # quantified invariant. Single-session models annotate it honestly.
-    %Property{
-      name: tla_name,
-      kind: :auxiliary,
-      formula:
-        "\\* exclusive: at most one session in \"#{state}\" — " <>
-          "requires multi-session checking (sessions >= 2)",
-      comment: "exclusive: #{prop_name}"
-    }
+    if Sessions.multi?(ctx.sessions) do
+      # The payoff of multi-session checking: mutual exclusion across
+      # sessions as a real TLC invariant.
+      # Bound variables must not collide with the s1..sN session
+      # constants.
+      formula =
+        "#{tla_name} == \\A si, sj \\in Sessions : " <>
+          "(state[si] = \"#{state}\" /\\ state[sj] = \"#{state}\") => si = sj"
+
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: formula,
+        comment: "exclusive: #{prop_name} (at most one session in #{state})"
+      }
+    else
+      # Only expressible across sessions; annotate honestly (see W003).
+      %Property{
+        name: tla_name,
+        kind: :auxiliary,
+        formula:
+          "\\* exclusive: at most one session in \"#{state}\" — " <>
+            "requires multi-session checking (sessions >= 2)",
+        comment: "exclusive: #{prop_name}"
+      }
+    end
   end
 
-  defp build_property(prop_name, %{kind: :reachable} = check, _ir, _track_names) do
+  defp build_property(prop_name, %{kind: :reachable} = check, _ctx) do
     tla_name = camelize(prop_name)
     target = Atom.to_string(check.spec.target)
 
@@ -223,7 +244,7 @@ defmodule Accord.Pass.TLA.BuildProperties do
   end
 
   # Pass through unknown kinds.
-  defp build_property(_prop_name, _check, _ir, _track_names), do: nil
+  defp build_property(_prop_name, _check, _ctx), do: nil
 
   defp runtime_only(tla_name, description) do
     %Property{
@@ -236,15 +257,16 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
   # Compiles the check's expression AST, or returns the fallback when the
   # check carries no expression.
-  defp compile_check_expr(check, context, ir, track_names, fallback, bindings \\ %{}) do
+  defp compile_check_expr(check, context, ctx, fallback, bindings \\ %{}) do
     case check.spec do
       %{ast: ast} when not is_nil(ast) ->
         Expr.compile(ast, bindings,
-          ir: ir,
+          ir: ctx.ir,
           code: "E041",
           context: context,
-          track_names: track_names,
-          span: check.span
+          track_names: ctx.track_names,
+          span: check.span,
+          render_field: Sessions.render_field(ctx.sessions)
         )
 
       _ ->
@@ -252,8 +274,11 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
-  defp pred_to_tla({:in_state, state}), do: ~s(state = "#{state}")
-  defp pred_to_tla(other), do: inspect(other)
+  defp pred_to_tla({:in_state, state}, sessions) do
+    ~s(#{Sessions.read(sessions, "state")} = "#{state}")
+  end
+
+  defp pred_to_tla(other, _sessions), do: inspect(other)
 
   # Extracts bindings for action property fn params.
   # Maps the "old" param to :current and the "new" param to :primed.

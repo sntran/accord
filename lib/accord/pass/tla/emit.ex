@@ -6,7 +6,7 @@ defmodule Accord.Pass.TLA.Emit do
   file from the compiled TLA+ intermediate representation.
   """
 
-  alias Accord.TLA.{Action, Property, StateSpace}
+  alias Accord.TLA.{Action, Property, Sessions, StateSpace}
 
   @spec run(StateSpace.t(), [Action.t()], [Property.t()]) ::
           {:ok, %{tla: String.t(), cfg: String.t()}}
@@ -22,8 +22,13 @@ defmodule Accord.Pass.TLA.Emit do
     var_names = Enum.map(ss.variables, & &1.name)
     vars_decl = Enum.join(var_names, ", ")
 
+    # The Sessions set is a constant in the module; its value is bound in
+    # the cfg. Model values (including session values) live in ss.constants.
+    constant_names =
+      ss.constants ++ if(Sessions.multi?(ss.sessions), do: ["Sessions"], else: [])
+
     constants_decl =
-      case ss.constants do
+      case constant_names do
         [] -> []
         names -> ["CONSTANTS #{Enum.join(names, ", ")}", ""]
       end
@@ -40,7 +45,7 @@ defmodule Accord.Pass.TLA.Emit do
           "",
           "vars == <<#{vars_decl}>>",
           "",
-          render_tla_symmetry(ss),
+          render_tla_symmetry(ss, properties),
           render_tla_section("Type invariant", ss.type_invariant),
           render_tla_section("Init predicate", ss.init),
           render_tla_actions(actions),
@@ -122,8 +127,18 @@ defmodule Accord.Pass.TLA.Emit do
         terminals ->
           set = Enum.map_join(terminals, ", ", &~s("#{&1}"))
 
+          membership =
+            if Sessions.multi?(ss.sessions) do
+              # Only when every session has finished is the whole system
+              # allowed to stutter; otherwise remaining sessions act.
+              "\\A #{ss.sessions.var} \\in Sessions : " <>
+                "state[#{ss.sessions.var}] \\in {#{set}}"
+            else
+              "state \\in {#{set}}"
+            end
+
           "\\* Terminal states self-stutter so they are not deadlocks\n" <>
-            "Terminating ==\n    /\\ state \\in {#{set}}\n    /\\ UNCHANGED vars\n"
+            "Terminating ==\n    /\\ #{membership}\n    /\\ UNCHANGED vars\n"
       end
 
     disjunct_names =
@@ -239,11 +254,26 @@ defmodule Accord.Pass.TLA.Emit do
     "\\* State constraint for bounded model checking\nStateConstraint == #{constraint}\n"
   end
 
-  defp render_tla_symmetry(%StateSpace{symmetry_exprs: []}), do: ""
+  defp render_tla_symmetry(ss, properties) do
+    case active_symmetry(ss, properties) do
+      [] ->
+        ""
 
-  defp render_tla_symmetry(%StateSpace{symmetry_exprs: exprs}) do
-    "\\* Symmetry reduction over interchangeable model values\n" <>
-      "Symmetry == #{Enum.join(exprs, " \\union ")}\n"
+      exprs ->
+        "\\* Symmetry reduction over interchangeable model values\n" <>
+          "Symmetry == #{Enum.join(exprs, " \\union ")}\n"
+    end
+  end
+
+  # TLC's symmetry reduction is unsound for liveness checking (it can
+  # merge states on a fair cycle), so symmetry is suppressed whenever a
+  # ~> property is present.
+  defp active_symmetry(%StateSpace{symmetry_exprs: exprs}, properties) do
+    if Enum.any?(properties, &liveness?/1) do
+      []
+    else
+      exprs
+    end
   end
 
   # -- CFG File --
@@ -277,9 +307,10 @@ defmodule Accord.Pass.TLA.Emit do
         []
       end
 
-    # Symmetry reduction over model-value sets.
+    # Symmetry reduction over model-value sets (suppressed under
+    # liveness — unsound with TLC's symmetry reduction).
     symmetry =
-      if ss.symmetry_exprs == [] do
+      if active_symmetry(ss, properties) == [] do
         []
       else
         ["", "SYMMETRY Symmetry"]
@@ -292,7 +323,18 @@ defmodule Accord.Pass.TLA.Emit do
         names -> ["" | Enum.map(names, &"CONSTANT #{&1} = #{&1}")]
       end
 
-    all_sections = sections ++ invariants ++ temporals ++ constraint ++ symmetry ++ constants
+    # The Sessions set constant (multi-session only).
+    session_set =
+      if Sessions.multi?(ss.sessions) do
+        values = Enum.join(Sessions.values(ss.sessions), ", ")
+        ["CONSTANT Sessions = {#{values}}"]
+      else
+        []
+      end
+
+    all_sections =
+      sections ++ invariants ++ temporals ++ constraint ++ symmetry ++ constants ++ session_set
+
     Enum.join(all_sections, "\n") <> "\n"
   end
 end

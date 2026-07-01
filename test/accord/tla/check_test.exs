@@ -66,6 +66,25 @@ defmodule Accord.TLA.CheckTest do
     end
   end
 
+  describe "multi-session model checking" do
+    test "TLC proves mutual exclusion for the guarded distributed lock", %{tmp_dir: tmp_dir} do
+      assert_passes(Accord.Test.DistributedLock.Protocol,
+        tmp_dir: tmp_dir,
+        model_config_path: "test/support/protocols/distributed_lock_model.exs"
+      )
+    end
+
+    test "dropping the holder guard yields the two-sessions-both-locked counterexample",
+         %{tmp_dir: tmp_dir} do
+      # Fence tokens stay monotonic in the counterexample — fencing alone
+      # is not a lock. This interleaving is unrepresentable at sessions: 1.
+      assert_fails(Accord.Test.DistributedLockUnguarded.Protocol, :invariant,
+        tmp_dir: tmp_dir,
+        model_config_path: "test/support/protocols/distributed_lock_model.exs"
+      )
+    end
+  end
+
   describe "server-push events" do
     test "TLC interleaves pushes with calls and proves the demand invariant",
          %{tmp_dir: tmp_dir} do

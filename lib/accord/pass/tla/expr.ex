@@ -37,6 +37,8 @@ defmodule Accord.Pass.TLA.Expr do
   - `:track_names` — MapSet of track name strings; field accesses must
     resolve to one of them. Required.
   - `:span` — span for report labels. Optional.
+  - `:render_field` — forwarded to `GuardCompiler` (multi-session track
+    access rendering). Optional.
   """
   @spec compile(Macro.t(), map(), keyword()) :: {:ok, String.t()} | {:error, [Report.t()]}
   def compile(ast, bindings, opts) do
@@ -45,8 +47,9 @@ defmodule Accord.Pass.TLA.Expr do
     context = Keyword.fetch!(opts, :context)
     track_names = Keyword.fetch!(opts, :track_names)
     span = Keyword.get(opts, :span)
+    compiler_opts = Keyword.take(opts, [:render_field])
 
-    case GuardCompiler.compile(ast, bindings) do
+    case GuardCompiler.compile(ast, bindings, compiler_opts) do
       {:ok, tla, idents} ->
         case identifier_errors(idents, bindings, track_names, ir, span, context) do
           [] -> {:ok, tla}
