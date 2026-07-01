@@ -15,68 +15,64 @@ defmodule Accord.Pass.TLA.BuildProperties do
   """
 
   alias Accord.IR
-  alias Accord.TLA.{GuardCompiler, Property}
+  alias Accord.Pass.TLA.Expr
+  alias Accord.TLA.Property
 
-  @spec run(IR.t()) :: {:ok, [Property.t()]}
+  @spec run(IR.t()) :: {:ok, [Property.t()]} | {:error, [Pentiment.Report.t()]}
   def run(%IR{} = ir) do
-    properties =
+    track_names = MapSet.new(ir.tracks, &Atom.to_string(&1.name))
+
+    results =
       ir.properties
       |> Enum.flat_map(fn prop ->
         Enum.map(prop.checks, fn check ->
-          build_property(prop.name, check, ir)
+          build_property(prop.name, check, ir, track_names)
         end)
       end)
       |> Enum.reject(&is_nil/1)
 
-    {:ok, properties}
+    errors =
+      Enum.flat_map(results, fn
+        {:error, reports} -> reports
+        %Property{} -> []
+      end)
+
+    case errors do
+      [] -> {:ok, Enum.filter(results, &match?(%Property{}, &1))}
+      errors -> {:error, errors}
+    end
   end
 
-  defp build_property(prop_name, %{kind: :invariant} = check, _ir) do
+  defp build_property(prop_name, %{kind: :invariant} = check, ir, track_names) do
     tla_name = camelize(prop_name)
 
-    formula =
-      case check.spec do
-        %{ast: ast} when not is_nil(ast) ->
-          {:ok, expr} = GuardCompiler.compile(ast)
-          "#{tla_name} == #{expr}"
-
-        _ ->
-          "#{tla_name} == TRUE"
-      end
-
-    %Property{
-      name: tla_name,
-      kind: :invariant,
-      formula: formula,
-      comment: "invariant: #{prop_name}"
-    }
+    with {:ok, expr} <- compile_check_expr(check, "invariant", ir, track_names, "TRUE") do
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: "#{tla_name} == #{expr}",
+        comment: "invariant: #{prop_name}"
+      }
+    end
   end
 
-  defp build_property(prop_name, %{kind: :local_invariant} = check, _ir) do
+  defp build_property(prop_name, %{kind: :local_invariant} = check, ir, track_names) do
     tla_name = camelize(prop_name) <> camelize(check.spec.state)
     state = Atom.to_string(check.spec.state)
 
-    body =
-      case check.spec do
-        %{ast: ast} when not is_nil(ast) ->
-          {:ok, expr} = GuardCompiler.compile(ast)
-          expr
+    with {:ok, body} <- compile_check_expr(check, "local invariant", ir, track_names, "TRUE") do
+      formula = ~s[#{tla_name} == (state = "#{state}") => (#{body})]
 
-        _ ->
-          "TRUE"
-      end
-
-    formula = ~s[#{tla_name} == (state = "#{state}") => (#{body})]
-
-    %Property{
-      name: tla_name,
-      kind: :invariant,
-      formula: formula,
-      comment: "local invariant: #{prop_name} in state #{state}"
-    }
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: formula,
+        comment: "local invariant: #{prop_name} in state #{state}"
+      }
+    end
   end
 
-  defp build_property(prop_name, %{kind: :action} = check, ir) do
+  defp build_property(prop_name, %{kind: :action} = check, ir, track_names) do
     tla_name = camelize(prop_name)
 
     vars =
@@ -86,27 +82,20 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
     bindings = extract_action_bindings(check.spec.ast)
 
-    body =
-      case check.spec do
-        %{ast: ast} when not is_nil(ast) ->
-          {:ok, expr} = GuardCompiler.compile(ast, bindings)
-          expr
+    with {:ok, body} <-
+           compile_check_expr(check, "action property", ir, track_names, "TRUE", bindings) do
+      formula = "#{tla_name} == [][#{body}]_<<#{vars}>>"
 
-        _ ->
-          "TRUE"
-      end
-
-    formula = "#{tla_name} == [][#{body}]_<<#{vars}>>"
-
-    %Property{
-      name: tla_name,
-      kind: :temporal,
-      formula: formula,
-      comment: "action property: #{prop_name}"
-    }
+      %Property{
+        name: tla_name,
+        kind: :temporal,
+        formula: formula,
+        comment: "action property: #{prop_name}"
+      }
+    end
   end
 
-  defp build_property(prop_name, %{kind: :liveness} = check, _ir) do
+  defp build_property(prop_name, %{kind: :liveness} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
     trigger = pred_to_tla(check.spec.trigger)
     target = pred_to_tla(check.spec.target)
@@ -121,7 +110,7 @@ defmodule Accord.Pass.TLA.BuildProperties do
     }
   end
 
-  defp build_property(prop_name, %{kind: :bounded} = check, _ir) do
+  defp build_property(prop_name, %{kind: :bounded} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
     track = Atom.to_string(check.spec.track)
     max = check.spec.max
@@ -136,7 +125,7 @@ defmodule Accord.Pass.TLA.BuildProperties do
     }
   end
 
-  defp build_property(prop_name, %{kind: :correspondence} = check, _ir) do
+  defp build_property(prop_name, %{kind: :correspondence} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
     open = Atom.to_string(check.spec.open)
     _close = Enum.map(check.spec.close, &Atom.to_string/1)
@@ -153,30 +142,21 @@ defmodule Accord.Pass.TLA.BuildProperties do
     }
   end
 
-  defp build_property(prop_name, %{kind: :forbidden} = check, _ir) do
+  defp build_property(prop_name, %{kind: :forbidden} = check, ir, track_names) do
     tla_name = camelize(prop_name)
 
-    body =
-      case check.spec do
-        %{ast: ast} when not is_nil(ast) ->
-          {:ok, expr} = GuardCompiler.compile(ast)
-          expr
-
-        _ ->
-          "FALSE"
-      end
-
-    formula = "#{tla_name} == ~(#{body})"
-
-    %Property{
-      name: tla_name,
-      kind: :invariant,
-      formula: formula,
-      comment: "forbidden: #{prop_name}"
-    }
+    with {:ok, body} <-
+           compile_check_expr(check, "forbidden condition", ir, track_names, "FALSE") do
+      %Property{
+        name: tla_name,
+        kind: :invariant,
+        formula: "#{tla_name} == ~(#{body})",
+        comment: "forbidden: #{prop_name}"
+      }
+    end
   end
 
-  defp build_property(prop_name, %{kind: :reachable}, _ir) do
+  defp build_property(prop_name, %{kind: :reachable}, _ir, _track_names) do
     tla_name = camelize(prop_name)
     target = Atom.to_string(prop_name)
 
@@ -189,7 +169,25 @@ defmodule Accord.Pass.TLA.BuildProperties do
   end
 
   # Pass through unknown kinds.
-  defp build_property(_prop_name, _check, _ir), do: nil
+  defp build_property(_prop_name, _check, _ir, _track_names), do: nil
+
+  # Compiles the check's expression AST, or returns the fallback when the
+  # check carries no expression.
+  defp compile_check_expr(check, context, ir, track_names, fallback, bindings \\ %{}) do
+    case check.spec do
+      %{ast: ast} when not is_nil(ast) ->
+        Expr.compile(ast, bindings,
+          ir: ir,
+          code: "E041",
+          context: context,
+          track_names: track_names,
+          span: check.span
+        )
+
+      _ ->
+        {:ok, fallback}
+    end
+  end
 
   defp pred_to_tla({:in_state, state}), do: ~s(state = "#{state}")
   defp pred_to_tla(other), do: inspect(other)

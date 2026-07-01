@@ -11,16 +11,20 @@ defmodule Accord.Pass.TLA.BuildActions do
 
   alias Accord.IR
   alias Accord.IR.Transition
-  alias Accord.TLA.{Action, GuardCompiler, ModelConfig, StateSpace}
+  alias Accord.Pass.TLA.Expr
+  alias Accord.TLA.{Action, ModelConfig, StateSpace}
 
-  @spec run(IR.t(), StateSpace.t(), ModelConfig.t()) :: {:ok, [Action.t()]}
+  @spec run(IR.t(), StateSpace.t(), ModelConfig.t()) ::
+          {:ok, [Action.t()]} | {:error, [Pentiment.Report.t()]}
   def run(%IR{} = ir, %StateSpace{} = state_space, %ModelConfig{} = config) do
     all_var_names =
       state_space.variables
       |> Enum.map(& &1.name)
       |> MapSet.new()
 
-    actions =
+    track_names = MapSet.new(ir.tracks, &Atom.to_string(&1.name))
+
+    results =
       ir.states
       |> Enum.flat_map(fn {state_name, state} ->
         # Include anystate transitions for non-terminal states.
@@ -38,12 +42,22 @@ defmodule Accord.Pass.TLA.BuildActions do
             transition,
             state_space,
             config,
-            all_var_names
+            all_var_names,
+            track_names
           )
         end)
       end)
 
-    {:ok, actions}
+    errors =
+      Enum.flat_map(results, fn
+        {:error, reports} -> reports
+        {:ok, _action} -> []
+      end)
+
+    case errors do
+      [] -> {:ok, for({:ok, action} <- results, do: action)}
+      errors -> {:error, errors}
+    end
   end
 
   defp build_actions_for_transition(
@@ -52,7 +66,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          transition,
          state_space,
          config,
-         all_var_names
+         all_var_names,
+         track_names
        ) do
     tag = message_tag(transition.message_pattern)
     source = Atom.to_string(state_name)
@@ -61,7 +76,10 @@ defmodule Accord.Pass.TLA.BuildActions do
     case transition.branches do
       [] ->
         # Cast — no reply, no branch.
-        [build_cast_action(ir, state_name, transition, tag, source, state_space, all_var_names)]
+        [
+          {:ok,
+           build_cast_action(ir, state_name, transition, tag, source, state_space, all_var_names)}
+        ]
 
       branches ->
         # Count branches per target to detect action name collisions.
@@ -90,6 +108,7 @@ defmodule Accord.Pass.TLA.BuildActions do
                 state_space,
                 config,
                 all_var_names,
+                track_names,
                 suffix
               )
 
@@ -101,7 +120,7 @@ defmodule Accord.Pass.TLA.BuildActions do
   end
 
   defp build_call_action(
-         _ir,
+         ir,
          state_name,
          transition,
          branch,
@@ -110,6 +129,7 @@ defmodule Accord.Pass.TLA.BuildActions do
          state_space,
          config,
          all_var_names,
+         track_names,
          suffix
        ) do
     target_state = resolve_next_state(branch.next_state, state_name)
@@ -125,68 +145,99 @@ defmodule Accord.Pass.TLA.BuildActions do
     preconditions = [~s(state = "#{source}")]
 
     # Guard condition.
-    guard_precondition =
-      case transition.guard do
-        %{ast: ast} when not is_nil(ast) ->
-          {:ok, tla} = GuardCompiler.compile(ast, param_bindings)
-          [tla]
-
-        _ ->
-          []
-      end
-
-    # Primed assignments.
-    primed = %{"state" => ~s("#{target}")}
+    guard_result = compile_guard(ir, transition, param_bindings, track_names)
 
     # Build bindings for update fn params and additional reply existentials.
     {reply_existentials, update_bindings} =
       build_update_bindings(transition, branch, existential_vars, config)
 
     # Constraint precondition from where clause.
-    {constraint_existentials, constraint_precondition} =
-      build_constraint(branch, reply_existentials, update_bindings, config)
-
-    existential_vars = existential_vars ++ reply_existentials ++ constraint_existentials
+    constraint_result =
+      build_constraint(ir, branch, reply_existentials, update_bindings, config, track_names)
 
     # Track updates from update AST.
-    track_primed = build_track_primed(transition, branch, state_space, update_bindings)
+    track_primed_result =
+      build_track_primed(ir, transition, branch, update_bindings, track_names)
 
-    # Event variable.
-    event_primed =
-      if state_space.has_event_var do
-        %{"event" => ~s("#{tag}")}
-      else
-        %{}
-      end
+    # Collect errors from every failing site, not just the first.
+    errors =
+      [guard_result, constraint_result, track_primed_result]
+      |> Enum.flat_map(fn
+        {:error, reports} -> reports
+        {:ok, _} -> []
+      end)
 
-    # Correspondence counter updates.
-    correspondence_primed =
-      build_correspondence_primed(tag, source, target, state_space)
+    if errors != [] do
+      {:error, errors}
+    else
+      {:ok, guard_precondition} = guard_result
+      {:ok, {constraint_existentials, constraint_precondition}} = constraint_result
+      {:ok, track_primed} = track_primed_result
 
-    all_primed =
-      primed
-      |> Map.merge(track_primed)
-      |> Map.merge(event_primed)
-      |> Map.merge(correspondence_primed)
+      existential_vars = existential_vars ++ reply_existentials ++ constraint_existentials
 
-    # UNCHANGED: variables not in primed set.
-    unchanged =
-      all_var_names
-      |> MapSet.difference(MapSet.new(Map.keys(all_primed)))
-      |> MapSet.to_list()
-      |> Enum.sort()
+      # Primed assignments.
+      primed = %{"state" => ~s("#{target}")}
 
-    %Action{
-      name: action_name,
-      source_state: source,
-      target_state: target,
-      message_tag: tag,
-      preconditions: preconditions ++ guard_precondition ++ constraint_precondition,
-      existential_vars: existential_vars,
-      primed: all_primed,
-      unchanged: unchanged,
-      comment: "#{tag} from #{source} to #{target}"
-    }
+      # Event variable.
+      event_primed =
+        if state_space.has_event_var do
+          %{"event" => ~s("#{tag}")}
+        else
+          %{}
+        end
+
+      # Correspondence counter updates.
+      correspondence_primed =
+        build_correspondence_primed(tag, source, target, state_space)
+
+      all_primed =
+        primed
+        |> Map.merge(track_primed)
+        |> Map.merge(event_primed)
+        |> Map.merge(correspondence_primed)
+
+      # UNCHANGED: variables not in primed set.
+      unchanged =
+        all_var_names
+        |> MapSet.difference(MapSet.new(Map.keys(all_primed)))
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      {:ok,
+       %Action{
+         name: action_name,
+         source_state: source,
+         target_state: target,
+         message_tag: tag,
+         preconditions: preconditions ++ guard_precondition ++ constraint_precondition,
+         existential_vars: existential_vars,
+         primed: all_primed,
+         unchanged: unchanged,
+         comment: "#{tag} from #{source} to #{target}"
+       }}
+    end
+  end
+
+  defp compile_guard(ir, transition, param_bindings, track_names) do
+    case transition.guard do
+      %{ast: ast} = guard when not is_nil(ast) ->
+        span = Map.get(guard, :span) || transition.span
+
+        case Expr.compile(ast, param_bindings,
+               ir: ir,
+               code: "E041",
+               context: "guard",
+               track_names: track_names,
+               span: span
+             ) do
+          {:ok, tla} -> {:ok, [tla]}
+          {:error, reports} -> {:error, reports}
+        end
+
+      _ ->
+        {:ok, []}
+    end
   end
 
   defp build_cast_action(_ir, _state_name, _transition, tag, source, state_space, all_var_names) do
@@ -267,24 +318,55 @@ defmodule Accord.Pass.TLA.BuildActions do
   defp extract_param_name(name, _idx) when is_atom(name), do: name
   defp extract_param_name(_, idx), do: :"arg#{idx}"
 
-  defp build_track_primed(%Transition{update: nil}, _branch, _state_space, _bindings), do: %{}
+  defp build_track_primed(_ir, %Transition{update: nil}, _branch, _bindings, _track_names),
+    do: {:ok, %{}}
 
-  defp build_track_primed(%Transition{update: %{ast: ast}}, branch, _state_space, bindings)
+  defp build_track_primed(
+         ir,
+         %Transition{update: %{ast: ast} = update} = transition,
+         branch,
+         bindings,
+         track_names
+       )
        when not is_nil(ast) do
     # Try to extract map update key-value pairs from the AST,
     # resolving case expressions against the branch's reply type.
     update_pairs = extract_map_update_pairs(ast, branch)
+    span = Map.get(update, :span) || transition.block_span || transition.span
 
-    Map.new(update_pairs, fn {key, val_ast} ->
-      key_str = Atom.to_string(key)
+    results =
+      Enum.map(update_pairs, fn {key, val_ast} ->
+        key_str = Atom.to_string(key)
 
-      {:ok, tla_val} = GuardCompiler.compile(val_ast, bindings)
+        if MapSet.member?(track_names, key_str) do
+          case Expr.compile(val_ast, bindings,
+                 ir: ir,
+                 code: "E042",
+                 context: "update",
+                 track_names: track_names,
+                 span: span
+               ) do
+            {:ok, tla_val} -> {:ok, {key_str, tla_val}}
+            {:error, reports} -> {:error, reports}
+          end
+        else
+          {:error, [Expr.unknown_track_report(key_str, track_names, ir, span, "update")]}
+        end
+      end)
 
-      {key_str, tla_val}
-    end)
+    errors =
+      Enum.flat_map(results, fn
+        {:error, reports} -> reports
+        {:ok, _} -> []
+      end)
+
+    case errors do
+      [] -> {:ok, Map.new(for {:ok, pair} <- results, do: pair)}
+      errors -> {:error, errors}
+    end
   end
 
-  defp build_track_primed(_, _, _, _), do: %{}
+  defp build_track_primed(_, _, _, _, _), do: {:ok, %{}}
 
   # Extract key-value pairs from map update patterns like `%{tracks | key1: val, key2: val}`.
   # Resolves case expressions against the branch's reply type.
@@ -461,14 +543,23 @@ defmodule Accord.Pass.TLA.BuildActions do
   # Compiles a branch constraint (where clause) into a TLA+ precondition.
   # Maps the constraint fn's reply params to existing reply existential vars,
   # or creates new ones if the branch has no update fn.
-  defp build_constraint(%{constraint: nil}, _reply_existentials, _update_bindings, _config),
-    do: {[], []}
+  defp build_constraint(
+         _ir,
+         %{constraint: nil},
+         _reply_existentials,
+         _update_bindings,
+         _config,
+         _track_names
+       ),
+       do: {:ok, {[], []}}
 
   defp build_constraint(
-         %{constraint: %{ast: ast}, reply_type: reply_type},
+         ir,
+         %{constraint: %{ast: ast}, reply_type: reply_type} = branch,
          reply_existentials,
          update_bindings,
-         config
+         config,
+         track_names
        ) do
     case ast do
       {:fn, _, [{:->, _, [[reply_pat, _tracks_var], body]}]} ->
@@ -486,11 +577,19 @@ defmodule Accord.Pass.TLA.BuildActions do
             build_reply_existentials(reply_params, reply_types, config)
           end
 
-        {:ok, tla} = GuardCompiler.compile(body, bindings)
-        {extra_existentials, [tla]}
+        case Expr.compile(body, bindings,
+               ir: ir,
+               code: "E045",
+               context: "where: constraint",
+               track_names: track_names,
+               span: branch.span
+             ) do
+          {:ok, tla} -> {:ok, {extra_existentials, [tla]}}
+          {:error, reports} -> {:error, reports}
+        end
 
       _ ->
-        {[], []}
+        {:ok, {[], []}}
     end
   end
 

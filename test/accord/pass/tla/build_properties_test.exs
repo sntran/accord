@@ -258,4 +258,96 @@ defmodule Accord.Pass.TLA.BuildPropertiesTest do
       assert :invariant in kinds
     end
   end
+
+  describe "fidelity errors" do
+    test "untranslatable invariant expression reports E041" do
+      ir =
+        base_ir([
+          %Property{
+            name: :counter_valid,
+            checks: [
+              %Check{
+                kind: :invariant,
+                spec: %{
+                  fun: fn tracks -> rem(tracks.counter, 2) == 0 end,
+                  ast: quote(do: fn tracks -> Integer.mod(tracks.counter, 2) == 0 end)
+                }
+              }
+            ]
+          }
+        ])
+
+      assert {:error, [report]} = BuildProperties.run(ir)
+      assert report.code == "E041"
+      assert report.message =~ "cannot compile invariant to TLA+"
+    end
+
+    test "invariant referencing an unknown track reports E043" do
+      ir =
+        base_ir([
+          %Property{
+            name: :counter_valid,
+            checks: [
+              %Check{
+                kind: :invariant,
+                spec: %{
+                  fun: fn tracks -> tracks.counter >= 0 end,
+                  ast: quote(do: fn tracks -> tracks.countr >= 0 end)
+                }
+              }
+            ]
+          }
+        ])
+
+      assert {:error, [report]} = BuildProperties.run(ir)
+      assert report.code == "E043"
+      assert report.message =~ "unknown track `countr`"
+    end
+
+    test "local invariant conditioning on the message reports E043" do
+      # The msg param cannot be modeled: the spec has no per-state message
+      # variable, so conditioning on it would silently check something else.
+      ir =
+        base_ir([
+          %Property{
+            name: :msg_conditioned,
+            checks: [
+              %Check{
+                kind: :local_invariant,
+                spec: %{
+                  state: :ready,
+                  fun: fn msg, tracks -> msg != nil and tracks.counter >= 0 end,
+                  ast: quote(do: fn msg, tracks -> msg != nil and tracks.counter >= 0 end)
+                }
+              }
+            ]
+          }
+        ])
+
+      assert {:error, [report]} = BuildProperties.run(ir)
+      assert report.code == "E043"
+      assert report.message =~ "`msg`"
+    end
+
+    test "whole-tracks comparison in action property reports E041" do
+      ir =
+        base_ir([
+          %Property{
+            name: :anything_changed,
+            checks: [
+              %Check{
+                kind: :action,
+                spec: %{
+                  fun: fn old, new -> old != new end,
+                  ast: quote(do: fn old, new -> old != new end)
+                }
+              }
+            ]
+          }
+        ])
+
+      assert {:error, [report]} = BuildProperties.run(ir)
+      assert report.code == "E041"
+    end
+  end
 end

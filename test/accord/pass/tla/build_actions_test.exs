@@ -163,6 +163,7 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
               %Transition{
                 message_pattern: {:bet, :_},
                 message_types: [:pos_integer],
+                message_arg_names: ["chips"],
                 kind: :call,
                 branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}],
                 guard: %{
@@ -293,6 +294,161 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
 
       targets = Enum.map(try_actions, & &1.target_state) |> Enum.sort()
       assert targets == ["done", "ready"]
+    end
+  end
+
+  describe "fidelity errors" do
+    defp guarded_ir(guard_ast, opts \\ []) do
+      arg_names = Keyword.get(opts, :arg_names, ["chips"])
+
+      %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :balance, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: {:bet, :_},
+                message_types: [:pos_integer],
+                message_arg_names: arg_names,
+                kind: :call,
+                branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}],
+                guard: %{fun: fn _msg, _tracks -> true end, ast: guard_ast}
+              }
+            ]
+          }
+        }
+      }
+    end
+
+    defp run_actions(ir, config \\ %ModelConfig{}) do
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+      BuildActions.run(ir, ss, config)
+    end
+
+    test "untranslatable guard reports E041" do
+      ast = quote(do: fn {:bet, chips}, tracks -> Enum.max([chips, 1]) > 0 end)
+
+      assert {:error, [report]} = run_actions(guarded_ir(ast))
+      assert report.code == "E041"
+      assert report.message =~ "cannot compile guard to TLA+"
+      assert report.message =~ "Enum.max"
+    end
+
+    test "guard variable not matching a declared argument reports E043" do
+      # The declared name is `chips`; the guard binds `c` in its own head,
+      # which the model cannot connect to the msg_chips existential.
+      ast = quote(do: fn {:bet, c}, tracks -> c <= tracks.balance end)
+
+      assert {:error, [report]} = run_actions(guarded_ir(ast))
+      assert report.code == "E043"
+      assert report.message =~ "`c`"
+      assert Enum.any?(report.help, &(&1 =~ ":chips"))
+    end
+
+    test "guard referencing an unknown track reports E043" do
+      ast = quote(do: fn {:bet, chips}, tracks -> chips <= tracks.balancee end)
+
+      assert {:error, [report]} = run_actions(guarded_ir(ast))
+      assert report.code == "E043"
+      assert report.message =~ "unknown track `balancee`"
+      assert Enum.any?(report.help, &(&1 =~ "balance"))
+    end
+
+    test "update writing an unknown track reports E043" do
+      update_ast = quote(do: fn {:bet, chips}, _reply, tracks -> %{tracks | balanse: chips} end)
+
+      ir = %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :balance, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: {:bet, :_},
+                message_types: [:pos_integer],
+                message_arg_names: ["chips"],
+                kind: :call,
+                branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}],
+                update: %{fun: fn _m, _r, t -> t end, ast: update_ast}
+              }
+            ]
+          }
+        }
+      }
+
+      assert {:error, [report]} = run_actions(ir)
+      assert report.code == "E043"
+      assert report.message =~ "unknown track `balanse`"
+    end
+
+    test "untranslatable where: constraint reports E045" do
+      constraint_ast =
+        quote(do: fn {:ok, token}, tracks -> String.valid?(token) end)
+
+      ir = %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :balance, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: :go,
+                message_types: [],
+                kind: :call,
+                branches: [
+                  %Branch{
+                    reply_type: {:tagged, :ok, :pos_integer},
+                    next_state: :ready,
+                    constraint: %{fun: fn _r, _t -> true end, ast: constraint_ast}
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+
+      assert {:error, [report]} = run_actions(ir)
+      assert report.code == "E045"
+      assert report.message =~ "where: constraint"
+    end
+
+    test "errors from multiple sites are all collected" do
+      guard_ast = quote(do: fn {:bet, chips}, tracks -> Enum.max([chips, 1]) > 0 end)
+      update_ast = quote(do: fn {:bet, chips}, _reply, tracks -> %{tracks | balanse: chips} end)
+
+      ir = %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :balance, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: {:bet, :_},
+                message_types: [:pos_integer],
+                message_arg_names: ["chips"],
+                kind: :call,
+                branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}],
+                guard: %{fun: fn _m, _t -> true end, ast: guard_ast},
+                update: %{fun: fn _m, _r, t -> t end, ast: update_ast}
+              }
+            ]
+          }
+        }
+      }
+
+      assert {:error, reports} = run_actions(ir)
+      codes = reports |> Enum.map(& &1.code) |> Enum.sort()
+      assert codes == ["E041", "E043"]
     end
   end
 end
