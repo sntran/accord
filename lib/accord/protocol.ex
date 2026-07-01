@@ -44,11 +44,28 @@ defmodule Accord.Protocol do
   Casts are async fire-and-forget messages with no reply:
 
       cast :heartbeat
+
+  ## Options
+
+  `use Accord.Protocol` accepts:
+
+  - `:model` — path to a model config file providing finite domains for
+    TLC model checking (see `Accord.TLA.ModelConfig`).
+  - `:tla` — TLA+ spec generation mode:
+    - `:strict` (default) — spec generation failures abort compilation.
+    - `:warn` — failures downgrade to a compiler warning; any stale spec
+      from a previous compile is deleted so it can never be checked.
+    - `:off` — spec generation is skipped entirely.
+
+  The generation outcome is recorded in the module's `__tla_status__/0`
+  (`:ok`, `{:error, summary}`, or `:off`), which `mix accord.check` consults.
   """
 
   alias Accord.IR
   alias Accord.IR.{Branch, State, Transition}
-  alias Accord.TLA.{ModelConfig, SpanMap}
+  alias Accord.TLA.{Files, ModelConfig, SpanMap}
+
+  @tla_modes [:strict, :warn, :off]
 
   @doc """
   State predicate for use in liveness properties.
@@ -583,6 +600,7 @@ defmodule Accord.Protocol do
     fn_defs = fn_to_defs(fn_specs)
     span_defs = build_span_defs(tla_result)
     domains_map = build_domains_map(tla_result)
+    tla_status = build_tla_status(tla_result)
     monitor_module = Module.concat(env.module, Monitor)
     parent_module = env.module
 
@@ -595,6 +613,7 @@ defmodule Accord.Protocol do
       def __ir__, do: :erlang.binary_to_term(@accord_ir_bin)
       def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin)
       def __tla_domains__, do: unquote(Macro.escape(domains_map))
+      def __tla_status__, do: unquote(Macro.escape(tla_status))
 
       @doc false
       unquote_splicing(span_defs)
@@ -708,6 +727,12 @@ defmodule Accord.Protocol do
 
   defp build_domains_map(_), do: %{}
 
+  # Status baked into __tla_status__/0 so `mix accord.check` can report
+  # truthfully when a spec was never generated (rather than "file not found").
+  defp build_tla_status({:ok, _result}), do: :ok
+  defp build_tla_status({:error, summary}), do: {:error, summary}
+  defp build_tla_status(:off), do: :off
+
   defp compile_ir(ir, env) do
     alias Accord.Pass
 
@@ -749,7 +774,27 @@ defmodule Accord.Protocol do
 
   # -- TLA+ Compilation --
 
+  # Compiles the IR to TLA+ according to the `tla:` mode:
+  #
+  # - `:strict` (default) — spec generation failures abort compilation.
+  #   A protocol that claims TLA+ verification either gets a faithful spec
+  #   or does not compile; silently degrading would leave `mix accord.check`
+  #   verifying nothing (or worse, a stale spec).
+  # - `:warn` — failures downgrade to a compiler warning. Any stale spec
+  #   from a previous compile is deleted so it can never be checked.
+  # - `:off` — spec generation is skipped entirely (and stale files removed).
   defp compile_tla(ir, opts, env) do
+    case tla_mode(opts, ir, env) do
+      :off ->
+        Files.delete(ir.name)
+        :off
+
+      mode ->
+        do_compile_tla(ir, opts, env, mode)
+    end
+  end
+
+  defp do_compile_tla(ir, opts, env, mode) do
     model_path = Keyword.get(opts, :model)
     project_root = Mix.Project.build_path() |> Path.join("../../") |> Path.expand()
 
@@ -762,33 +807,46 @@ defmodule Accord.Protocol do
     {:ok, result} = Accord.TLA.Compiler.compile(ir, config)
 
     # Write .tla and .cfg to _build/accord/.
-    write_tla_files(ir.name, result, env)
+    Files.write(ir.name, result)
 
     # Build span map for __tla_span__/1.
     span_map = SpanMap.build(ir, result.actions)
     {:ok, Map.put(result, :span_map, span_map)}
   rescue
     e ->
-      IO.warn(
-        "TLA+ compilation failed for #{inspect(ir.name)}: #{Exception.message(e)}",
-        Macro.Env.stacktrace(env)
-      )
+      case mode do
+        :strict ->
+          reraise e, __STACKTRACE__
 
-      :error
+        :warn ->
+          # Delete any spec from a previous compile: a stale spec that no
+          # longer matches the protocol must never be verified.
+          Files.delete(ir.name)
+
+          summary = Exception.message(e)
+
+          IO.warn(
+            "TLA+ compilation failed for #{inspect(ir.name)}: #{summary}",
+            Macro.Env.stacktrace(env)
+          )
+
+          {:error, summary}
+      end
   end
 
-  defp write_tla_files(module_name, result, _env) do
-    # Derive path from module name: Lock.Protocol → lock/Protocol.
-    # The file base name must match the TLA+ MODULE name (PascalCase).
-    parts = Module.split(module_name)
-    dir_parts = parts |> Enum.slice(0..-2//1) |> Enum.map(&Macro.underscore/1)
+  defp tla_mode(opts, ir, env) do
+    mode = Keyword.get(opts, :tla, :strict)
 
-    base_dir = Path.join([Mix.Project.build_path(), "accord" | dir_parts])
-    base_name = List.last(parts)
+    unless mode in @tla_modes do
+      raise CompileError,
+        description:
+          "invalid tla: option #{inspect(mode)} for #{inspect(ir.name)}; " <>
+            "expected one of :strict, :warn, :off",
+        file: env.file,
+        line: env.line
+    end
 
-    File.mkdir_p!(base_dir)
-    File.write!(Path.join(base_dir, "#{base_name}.tla"), result.tla)
-    File.write!(Path.join(base_dir, "#{base_name}.cfg"), result.cfg)
+    mode
   end
 
   # -- Closure Lifting --

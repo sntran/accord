@@ -12,6 +12,12 @@ defmodule Mix.Tasks.Accord.Check do
       mix accord.check                          # check all protocols
       mix accord.check Lock.Protocol            # check a specific protocol
       mix accord.check --workers 4              # TLC parallelism
+      mix accord.check --strict                 # fail protocols with tla: :off
+
+  Protocols whose spec generation failed at compile time (`tla: :warn`)
+  always count as failures: a protocol that cannot be checked is not
+  verified. Protocols compiled with `tla: :off` are skipped unless
+  `--strict` is given.
 
   ## Requirements
 
@@ -26,7 +32,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   use Mix.Task
 
-  alias Accord.TLA.{TLCParser, ViolationReport}
+  alias Accord.TLA.{Files, TLCParser, ViolationReport}
 
   @shortdoc "Run TLC model checking on Accord protocols"
 
@@ -35,9 +41,10 @@ defmodule Mix.Tasks.Accord.Check do
     Mix.Task.run("compile", [])
 
     {opts, modules, _} =
-      OptionParser.parse(args, strict: [workers: :integer])
+      OptionParser.parse(args, strict: [workers: :integer, strict: :boolean])
 
     workers = Keyword.get(opts, :workers)
+    strict? = Keyword.get(opts, :strict, false)
 
     protocols =
       if modules == [] do
@@ -63,7 +70,7 @@ defmodule Mix.Tasks.Accord.Check do
 
       results =
         Enum.map(protocols, fn mod ->
-          {mod, check_protocol(mod, workers)}
+          {mod, check_protocol(mod, workers, strict?)}
         end)
 
       report_results(results)
@@ -95,10 +102,11 @@ defmodule Mix.Tasks.Accord.Check do
 
   # -- Protocol Checking --
 
-  defp check_protocol(mod, workers) do
+  defp check_protocol(mod, workers, strict?) do
     with :ok <- ensure_loaded(mod),
          :ok <- ensure_protocol(mod),
-         {tla_path, cfg_path} <- tla_paths(mod),
+         :ok <- ensure_tla_generated(mod, strict?),
+         {tla_path, cfg_path} <- Files.paths(mod),
          :ok <- ensure_file(tla_path, :tla_not_found),
          :ok <- ensure_file(cfg_path, :cfg_not_found),
          {:ok, tlc_jar} <- require_tlc() do
@@ -114,6 +122,22 @@ defmodule Mix.Tasks.Accord.Check do
     if function_exported?(mod, :__tla_span__, 1), do: :ok, else: {:error, :not_a_protocol}
   end
 
+  # A protocol whose spec generation failed cannot be checked, and "cannot
+  # check" must never read as "verified". Protocols with tla: :off are
+  # deliberate opt-outs: skipped by default, failures under --strict.
+  defp ensure_tla_generated(mod, strict?) do
+    case tla_status(mod) do
+      {:error, summary} -> {:error, {:tla_failed, summary}}
+      :off when strict? -> {:error, :tla_off}
+      :off -> {:skip, :tla_off}
+      _ -> :ok
+    end
+  end
+
+  defp tla_status(mod) do
+    if function_exported?(mod, :__tla_status__, 0), do: mod.__tla_status__(), else: :ok
+  end
+
   defp ensure_file(path, error_tag) do
     if File.exists?(path), do: :ok, else: {:error, error_tag}
   end
@@ -123,19 +147,6 @@ defmodule Mix.Tasks.Accord.Check do
       nil -> {:error, :tlc_not_found}
       jar -> {:ok, jar}
     end
-  end
-
-  defp tla_paths(mod) do
-    parts = Module.split(mod)
-    dir_parts = parts |> Enum.slice(0..-2//1) |> Enum.map(&Macro.underscore/1)
-
-    base_dir = Path.join([Mix.Project.build_path(), "accord" | dir_parts])
-    base_name = List.last(parts)
-
-    {
-      Path.join(base_dir, "#{base_name}.tla"),
-      Path.join(base_dir, "#{base_name}.cfg")
-    }
   end
 
   defp find_tlc do
@@ -185,11 +196,16 @@ defmodule Mix.Tasks.Accord.Check do
   # -- Result Reporting --
 
   defp report_results(results) do
-    {successes, failures} =
-      Enum.split_with(results, fn
-        {_mod, {:ok, _}} -> true
-        _ -> false
+    groups =
+      Enum.group_by(results, fn
+        {_mod, {:ok, _}} -> :success
+        {_mod, {:skip, _}} -> :skip
+        _ -> :failure
       end)
+
+    successes = Map.get(groups, :success, [])
+    skips = Map.get(groups, :skip, [])
+    failures = Map.get(groups, :failure, [])
 
     # Report successes.
     for {mod, {:ok, stats}} <- successes do
@@ -197,6 +213,13 @@ defmodule Mix.Tasks.Accord.Check do
         "#{IO.ANSI.green()}✓#{IO.ANSI.reset()} #{inspect(mod)} — " <>
           "#{stats.distinct_states} states explored" <>
           if(stats.depth, do: ", depth #{stats.depth}", else: "")
+      )
+    end
+
+    # Report skips (deliberate tla: :off opt-outs).
+    for {mod, {:skip, :tla_off}} <- skips do
+      Mix.shell().info(
+        "#{IO.ANSI.faint()}–#{IO.ANSI.reset()} #{inspect(mod)} — skipped (tla: :off)"
       )
     end
 
@@ -237,6 +260,8 @@ defmodule Mix.Tasks.Accord.Check do
       case reason do
         :module_not_found -> "module not found"
         :not_a_protocol -> "not an Accord protocol"
+        {:tla_failed, summary} -> "TLA+ spec generation failed at compile time: #{summary}"
+        :tla_off -> "TLA+ generation disabled (tla: :off) — failing under --strict"
         :tla_not_found -> ".tla file not found (run `mix compile` first)"
         :cfg_not_found -> ".cfg file not found (run `mix compile` first)"
         :tlc_not_found -> "TLC not found (set TLA2TOOLS_JAR or install to ~/.tla/)"
