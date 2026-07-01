@@ -107,6 +107,7 @@ defmodule Accord.Protocol do
           event: 2,
           property: 2,
           model: 1,
+          const: 2,
           in_state: 1
         ]
 
@@ -117,6 +118,7 @@ defmodule Accord.Protocol do
       Module.register_attribute(__MODULE__, :accord_tracks, accumulate: true)
       Module.register_attribute(__MODULE__, :accord_properties, accumulate: true)
       Module.register_attribute(__MODULE__, :accord_model, accumulate: true)
+      Module.register_attribute(__MODULE__, :accord_consts, [])
       Module.put_attribute(__MODULE__, :accord_opts, unquote(Macro.escape(opts)))
 
       # Model config files shape the generated TLA+ spec, so editing them
@@ -748,6 +750,42 @@ defmodule Accord.Protocol do
       true ->
         goto_state
     end
+  end
+
+  @doc """
+  Declares a protocol constant, referenced as `const(:name)` in guards,
+  updates, `where:` constraints, property functions, `bounded` maxima,
+  and timeouts.
+
+  Substituted at compile time, so the runtime closure and the TLA+ spec
+  both see the literal — a threshold declared once cannot drift between
+  the constraint that enforces it and the invariant that checks it.
+
+      const :threshold, 3
+
+      state :closed do
+        on :request do
+          branch(:tripped,
+            goto: :open,
+            where: fn _reply, tracks -> tracks.failures == const(:threshold) - 1 end
+          )
+        end
+      end
+  """
+  defmacro const(name, value) do
+    # Registered at EXPANSION time: substitution sites also read the
+    # constants at expansion time, and module bodies are fully expanded
+    # before evaluation — an evaluation-time write would be invisible to
+    # every later macro. Literal values only (their AST is the value).
+    Accord.Protocol.Const.register(
+      __CALLER__.module,
+      name,
+      value,
+      __CALLER__.file,
+      __CALLER__.line
+    )
+
+    quote do: :ok
   end
 
   @doc """

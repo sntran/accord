@@ -21,8 +21,10 @@ defmodule Accord.Examples.CircuitBreaker.Protocol do
 
   initial :closed
 
-  # The trip threshold (3) appears in the constraints, the updates, and
-  # the invariant below — protocol constants are future work.
+  # The trip threshold appears in the constraints and the invariant —
+  # declared once, substituted everywhere at compile time.
+  const :threshold, 3
+
   track :failures, :non_neg_integer, default: 0, domain: 0..4
 
   state :closed do
@@ -31,12 +33,12 @@ defmodule Accord.Examples.CircuitBreaker.Protocol do
 
       branch(:error,
         goto: :closed,
-        where: fn _reply, tracks -> tracks.failures < 2 end
+        where: fn _reply, tracks -> tracks.failures < const(:threshold) - 1 end
       )
 
       branch(:tripped,
         goto: :open,
-        where: fn _reply, tracks -> tracks.failures == 2 end
+        where: fn _reply, tracks -> tracks.failures == const(:threshold) - 1 end
       )
 
       update fn _msg, reply, tracks ->
@@ -77,11 +79,11 @@ defmodule Accord.Examples.CircuitBreaker.Protocol do
   state :down, terminal: true
 
   property :threshold_respected do
-    invariant :closed, fn _msg, tracks -> tracks.failures < 3 end
+    invariant :closed, fn _msg, tracks -> tracks.failures < const(:threshold) end
   end
 
   property :counter_sane do
-    forbidden fn tracks -> tracks.failures > 3 end
+    forbidden fn tracks -> tracks.failures > const(:threshold) end
   end
 
   property :probe_only_after_trip do

@@ -11,8 +11,11 @@ defmodule Accord.Protocol.Property do
 
   alias Accord.IR.Check
 
+  alias Accord.Protocol.Const
+
   @doc false
   defmacro invariant(func) do
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
     escaped_ast = Macro.escape(func)
     line = __CALLER__.line
 
@@ -31,6 +34,7 @@ defmodule Accord.Protocol.Property do
 
   @doc false
   defmacro invariant(state_name, func) do
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
     escaped_ast = Macro.escape(func)
     line = __CALLER__.line
 
@@ -49,6 +53,7 @@ defmodule Accord.Protocol.Property do
 
   @doc false
   defmacro action(func) do
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
     escaped_ast = Macro.escape(func)
     line = __CALLER__.line
 
@@ -118,7 +123,11 @@ defmodule Accord.Protocol.Property do
 
   @doc false
   defmacro bounded(track_name, opts) do
-    max = Keyword.fetch!(opts, :max)
+    max =
+      opts
+      |> Keyword.fetch!(:max)
+      |> Const.substitute(__CALLER__.module, __CALLER__.file, __CALLER__.line)
+
     line = __CALLER__.line
 
     quote do
@@ -208,6 +217,7 @@ defmodule Accord.Protocol.Property do
 
   @doc false
   defmacro forbidden(func) do
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
     escaped_ast = Macro.escape(func)
     line = __CALLER__.line
 

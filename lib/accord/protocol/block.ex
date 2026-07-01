@@ -3,8 +3,13 @@ defmodule Accord.Protocol.Block do
 
   # Inner macros for the `on ... do ... end` block form.
   # These accumulate into module attributes that are read after the block.
+  #
+  # User expressions pass through Const.substitute/4 before being escaped
+  # or compiled, so const(:name) references resolve to their literals in
+  # both the runtime closure and the TLA+ spec.
 
   alias Accord.IR.Branch
+  alias Accord.Protocol.Const
 
   @doc false
   defmacro reply(type_spec) do
@@ -31,7 +36,12 @@ defmodule Accord.Protocol.Block do
     line = __CALLER__.line
     pattern = Macro.to_string(type_spec)
 
-    where_fn = Keyword.get(opts, :where)
+    where_fn =
+      case Keyword.get(opts, :where) do
+        nil -> nil
+        func -> Const.substitute(func, __CALLER__.module, __CALLER__.file, line)
+      end
+
     escaped_where = if where_fn, do: Macro.escape(where_fn)
 
     quote do
@@ -70,8 +80,9 @@ defmodule Accord.Protocol.Block do
 
   @doc false
   defmacro guard(func) do
-    escaped_ast = Macro.escape(func)
     line = __CALLER__.line
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, line)
+    escaped_ast = Macro.escape(func)
 
     quote do
       Module.put_attribute(__MODULE__, :accord_on_guard, %{
@@ -84,6 +95,7 @@ defmodule Accord.Protocol.Block do
 
   @doc false
   defmacro update(func) do
+    func = Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
     escaped_ast = Macro.escape(func)
 
     quote do
@@ -96,6 +108,9 @@ defmodule Accord.Protocol.Block do
 
   @doc false
   defmacro timeout(milliseconds) do
+    milliseconds =
+      Const.substitute(milliseconds, __CALLER__.module, __CALLER__.file, __CALLER__.line)
+
     quote do
       Module.put_attribute(__MODULE__, :accord_on_timeout, unquote(milliseconds))
     end
@@ -104,7 +119,13 @@ defmodule Accord.Protocol.Block do
   @doc false
   defmacro branch(reply_spec, opts) do
     next_state = Keyword.fetch!(opts, :goto)
-    where_fn = Keyword.get(opts, :where)
+
+    where_fn =
+      case Keyword.get(opts, :where) do
+        nil -> nil
+        func -> Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
+      end
+
     reply_type = Accord.Protocol.parse_reply_spec(reply_spec)
     escaped = Macro.escape(reply_type)
     escaped_where = if where_fn, do: Macro.escape(where_fn)
