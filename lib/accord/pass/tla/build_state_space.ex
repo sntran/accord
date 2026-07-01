@@ -100,11 +100,14 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     # Build Init.
     init = build_init(variables)
 
-    # Build module name.
+    # Build module name. The full concatenated path keeps every
+    # protocol's MODULE unique — the last segment alone would name every
+    # Foo.Protocol just "Protocol", colliding in the flat artifact
+    # directory and blocking user extension modules.
     module_name =
       ir.name
       |> Module.split()
-      |> List.last()
+      |> Enum.join()
 
     # Collect model value constants needed for the cfg. Session model
     # values join them; the Sessions set itself gets its own cfg line.

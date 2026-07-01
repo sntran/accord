@@ -6,9 +6,9 @@ defmodule Accord.TLA.Files do
   (`mix accord.check`) must agree on where a protocol's `.tla` and `.cfg`
   files live. This module is the single source of that layout.
 
-  The file base name must match the TLA+ MODULE name (PascalCase), so the
-  last module segment becomes the file name and the leading segments become
-  underscored directories: `Lock.Protocol` → `lock/Protocol.tla`.
+  The file base name must match the TLA+ MODULE name, which is the full
+  concatenated module path so every protocol is unique in the flat
+  directory: `Lock.Protocol` → `_build/accord/LockProtocol.tla`.
   """
 
   @doc """
@@ -16,16 +16,21 @@ defmodule Accord.TLA.Files do
   """
   @spec paths(module()) :: {Path.t(), Path.t()}
   def paths(module_name) do
-    parts = Module.split(module_name)
-    dir_parts = parts |> Enum.slice(0..-2//1) |> Enum.map(&Macro.underscore/1)
-
-    base_dir = Path.join([Mix.Project.build_path(), "accord" | dir_parts])
-    base_name = List.last(parts)
+    base_dir = Path.join(Mix.Project.build_path(), "accord")
+    base_name = tla_module_name(module_name)
 
     {
       Path.join(base_dir, "#{base_name}.tla"),
       Path.join(base_dir, "#{base_name}.cfg")
     }
+  end
+
+  @doc """
+  The TLA+ MODULE name for a protocol module.
+  """
+  @spec tla_module_name(module()) :: String.t()
+  def tla_module_name(module_name) do
+    module_name |> Module.split() |> Enum.join()
   end
 
   @doc """

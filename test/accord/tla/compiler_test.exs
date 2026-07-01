@@ -193,7 +193,7 @@ defmodule Accord.TLA.CompilerTest do
 
     test "module name extracted from IR name" do
       {:ok, ss} = BuildStateSpace.run(lock_ir(), lock_config())
-      assert ss.module_name == "Protocol"
+      assert ss.module_name == "LockProtocol"
     end
   end
 
@@ -346,7 +346,7 @@ defmodule Accord.TLA.CompilerTest do
     test "produces valid TLA+ module structure" do
       {:ok, result} = Compiler.compile(lock_ir(), lock_config())
 
-      assert result.tla =~ "---- MODULE Protocol ----"
+      assert result.tla =~ "---- MODULE LockProtocol ----"
       assert result.tla =~ "EXTENDS Integers, Sequences, TLC"
       assert result.tla =~ "VARIABLES"
       assert result.tla =~ "TypeInvariant =="
@@ -398,7 +398,7 @@ defmodule Accord.TLA.CompilerTest do
       assert is_binary(result.cfg)
       assert length(result.actions) > 0
       assert length(result.properties) == 2
-      assert result.state_space.module_name == "Protocol"
+      assert result.state_space.module_name == "LockProtocol"
     end
 
     test "compiles minimal protocol" do
@@ -423,7 +423,7 @@ defmodule Accord.TLA.CompilerTest do
 
       {:ok, result} = Compiler.compile(ir, %ModelConfig{})
 
-      assert result.tla =~ "MODULE Protocol"
+      assert result.tla =~ "MODULE MinimalProtocol"
       assert result.tla =~ "Done"
       assert length(result.actions) == 1
       assert result.properties == []
