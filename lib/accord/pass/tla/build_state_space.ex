@@ -86,6 +86,12 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
     # Collect model value constants needed for the cfg.
     constants = collect_constants(ir, config)
 
+    terminal_states =
+      ir.states
+      |> Enum.filter(fn {_name, state} -> state.terminal end)
+      |> Enum.map(fn {name, _state} -> state_to_tla(name) end)
+      |> Enum.sort()
+
     %StateSpace{
       module_name: module_name,
       variables: variables,
@@ -95,7 +101,8 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       correspondences: correspondences,
       constants: constants,
       state_constraint: config.state_constraint,
-      symmetry_exprs: build_symmetry_exprs(config)
+      symmetry_exprs: build_symmetry_exprs(config),
+      terminal_states: terminal_states
     }
   end
 

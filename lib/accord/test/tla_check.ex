@@ -47,7 +47,9 @@ defmodule Accord.Test.TLACheck do
   - `:tmp_dir` (required) — working directory for TLA+ files and TLC state
   - `:model_config` — a `%ModelConfig{}` struct (overrides file-based config)
   - `:model_config_path` — path to a model config file
-  - `:check_deadlock` — when `true`, enables TLC deadlock checking (default: `false`)
+  - `:check_deadlock` — when `false`, disables TLC deadlock checking
+    (default: `true` — generated specs give terminal states a
+    `Terminating` self-stutter, so reported deadlocks are real)
   """
   @spec assert_passes(module(), keyword()) :: :ok
   def assert_passes(protocol_mod, opts) do
@@ -116,7 +118,7 @@ defmodule Accord.Test.TLACheck do
     File.write!(Path.join(tmp_dir, cfg_file), result.cfg)
 
     tlc_jar = find_tlc_jar() || raise "tla2tools.jar not found"
-    check_deadlock = Keyword.get(opts, :check_deadlock, false)
+    check_deadlock = Keyword.get(opts, :check_deadlock, true)
 
     args =
       ["-jar", tlc_jar, "-config", cfg_file] ++

@@ -13,11 +13,17 @@ defmodule Mix.Tasks.Accord.Check do
       mix accord.check Lock.Protocol            # check a specific protocol
       mix accord.check --workers 4              # TLC parallelism
       mix accord.check --strict                 # fail protocols with tla: :off
+      mix accord.check --no-deadlock            # disable deadlock checking
 
   Protocols whose spec generation failed at compile time (`tla: :warn`)
   always count as failures: a protocol that cannot be checked is not
   verified. Protocols compiled with `tla: :off` are skipped unless
   `--strict` is given.
+
+  Deadlock checking is on by default: generated specs give terminal
+  states an explicit `Terminating` self-stutter, so a reported deadlock
+  is a real stuck state (a non-terminal state with no enabled action —
+  often guard or `where:` exhaustion at a domain boundary).
 
   ## Requirements
 
@@ -41,10 +47,13 @@ defmodule Mix.Tasks.Accord.Check do
     Mix.Task.run("compile", [])
 
     {opts, modules, _} =
-      OptionParser.parse(args, strict: [workers: :integer, strict: :boolean])
+      OptionParser.parse(args,
+        strict: [workers: :integer, strict: :boolean, deadlock: :boolean]
+      )
 
     workers = Keyword.get(opts, :workers)
     strict? = Keyword.get(opts, :strict, false)
+    deadlock? = Keyword.get(opts, :deadlock, true)
 
     protocols =
       if modules == [] do
@@ -70,7 +79,7 @@ defmodule Mix.Tasks.Accord.Check do
 
       results =
         Enum.map(protocols, fn mod ->
-          {mod, check_protocol(mod, workers, strict?)}
+          {mod, check_protocol(mod, workers, strict?, deadlock?)}
         end)
 
       report_results(results)
@@ -102,7 +111,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   # -- Protocol Checking --
 
-  defp check_protocol(mod, workers, strict?) do
+  defp check_protocol(mod, workers, strict?, deadlock?) do
     with :ok <- ensure_loaded(mod),
          :ok <- ensure_protocol(mod),
          :ok <- ensure_tla_generated(mod, strict?),
@@ -110,7 +119,7 @@ defmodule Mix.Tasks.Accord.Check do
          :ok <- ensure_file(tla_path, :tla_not_found),
          :ok <- ensure_file(cfg_path, :cfg_not_found),
          {:ok, tlc_jar} <- require_tlc() do
-      run_tlc(mod, tla_path, cfg_path, tlc_jar, workers)
+      run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?)
     end
   end
 
@@ -165,19 +174,23 @@ defmodule Mix.Tasks.Accord.Check do
     end
   end
 
-  defp run_tlc(_mod, tla_path, cfg_path, tlc_jar, workers) do
+  defp run_tlc(_mod, tla_path, cfg_path, tlc_jar, workers, deadlock?) do
     tla_dir = Path.dirname(tla_path)
     tla_file = Path.basename(tla_path)
 
-    args = [
+    base_args = [
       "-jar",
       tlc_jar,
       "-config",
-      Path.basename(cfg_path),
-      "-deadlock",
-      tla_file
+      Path.basename(cfg_path)
     ]
 
+    # TLC's -deadlock flag DISABLES deadlock checking. Generated specs
+    # give terminal states a Terminating self-stutter, so deadlock
+    # checking stays on by default; --no-deadlock is the escape hatch.
+    disable_deadlock = if deadlock?, do: [], else: ["-deadlock"]
+
+    args = base_args ++ disable_deadlock ++ [tla_file]
     args = if workers, do: args ++ ["-workers", Integer.to_string(workers)], else: args
 
     case System.cmd("java", args, cd: tla_dir, stderr_to_stdout: true) do

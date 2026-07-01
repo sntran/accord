@@ -27,7 +27,8 @@ defmodule Accord.TLA.StateSpace do
           correspondences: [correspondence()],
           constants: [String.t()],
           state_constraint: String.t() | nil,
-          symmetry_exprs: [String.t()]
+          symmetry_exprs: [String.t()],
+          terminal_states: [String.t()]
         }
 
   @enforce_keys [:module_name, :variables, :type_invariant, :init, :states]
@@ -40,6 +41,7 @@ defmodule Accord.TLA.StateSpace do
     correspondences: [],
     constants: [],
     state_constraint: nil,
-    symmetry_exprs: []
+    symmetry_exprs: [],
+    terminal_states: []
   ]
 end

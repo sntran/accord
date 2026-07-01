@@ -489,6 +489,16 @@ defmodule Accord.TLA.ViolationReport do
     anystate_transitions = ir.anystate
 
     cond do
+      # Terminal states self-stutter via the Terminating action, so a
+      # deadlock here indicates a spec-generation bug, not a protocol bug.
+      state != nil and state.terminal ->
+        report
+        |> Report.with_note(
+          "state :#{state_atom} is terminal — terminal states should self-stutter " <>
+            "via the Terminating action; this indicates a spec generation bug"
+        )
+        |> Report.with_help("please report this as an accord bug")
+
       # State exists with no transitions and no anystate transitions.
       state != nil and state.transitions == [] and anystate_transitions == [] ->
         report

@@ -58,10 +58,21 @@ defmodule Accord.TLA.CheckTest do
   end
 
   describe "deadlock" do
-    test "deadlock detects stuck non-terminal state", %{tmp_dir: tmp_dir} do
-      assert_fails(Accord.Test.DeadlockFail.Protocol, :deadlock,
+    test "deadlock detects stuck non-terminal state by default", %{tmp_dir: tmp_dir} do
+      # No check_deadlock flag needed — deadlock checking is the default.
+      assert_fails(Accord.Test.DeadlockFail.Protocol, :deadlock, tmp_dir: tmp_dir)
+    end
+
+    test "terminal states are not deadlocks (Terminating self-stutter)", %{tmp_dir: tmp_dir} do
+      # Counter runs end in :stopped; with deadlock checking on this
+      # passes only because Terminating gives terminals a self-loop.
+      assert_passes(Accord.Test.Counter.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "--no-deadlock escape hatch still works", %{tmp_dir: tmp_dir} do
+      assert_passes(Accord.Test.DeadlockFail.Protocol,
         tmp_dir: tmp_dir,
-        check_deadlock: true
+        check_deadlock: false
       )
     end
   end

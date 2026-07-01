@@ -243,6 +243,33 @@ defmodule Accord.Pass.TLA.EmitTest do
       refute tla =~ "\\* Properties"
     end
 
+    test "terminal states get a Terminating self-stutter disjunct" do
+      ss = %{minimal_state_space() | terminal_states: ["done", "stopped"]}
+
+      {:ok, %{tla: tla}} = Emit.run(ss, [sample_action()], [])
+
+      assert tla =~
+               ~s(Terminating ==\n    /\\ state \\in {"done", "stopped"}\n    /\\ UNCHANGED vars)
+
+      assert tla =~ "\\/ Terminating"
+    end
+
+    test "no Terminating disjunct without terminal states" do
+      {:ok, %{tla: tla}} = Emit.run(minimal_state_space(), [sample_action()], [])
+
+      refute tla =~ "Terminating"
+    end
+
+    test "protocol with only terminal states gets Next == Terminating" do
+      ss = %{minimal_state_space() | terminal_states: ["done"]}
+
+      {:ok, %{tla: tla}} = Emit.run(ss, [], [])
+
+      assert tla =~ "Terminating"
+      assert tla =~ "\\/ Terminating"
+      refute tla =~ "Next == FALSE"
+    end
+
     test "symmetry expressions render in the module and the cfg" do
       ss = %{minimal_state_space() | symmetry_exprs: ["Permutations({mv1, mv2, mv3})"]}
 

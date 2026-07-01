@@ -44,7 +44,7 @@ defmodule Accord.Pass.TLA.Emit do
           render_tla_section("Type invariant", ss.type_invariant),
           render_tla_section("Init predicate", ss.init),
           render_tla_actions(actions),
-          render_tla_next(actions),
+          render_tla_next(ss, actions),
           render_tla_spec(actions, properties),
           render_tla_properties(properties),
           render_tla_state_constraint(ss),
@@ -106,17 +106,45 @@ defmodule Accord.Pass.TLA.Emit do
     Enum.join(lines, "\n") <> "\n"
   end
 
-  defp render_tla_next(actions) do
-    if actions == [] do
-      "Next == FALSE\n"
-    else
-      disjuncts = Enum.map_join(actions, "\n    \\/ ", & &1.name)
+  # Terminal states have no outgoing actions, so without an explicit
+  # self-stutter disjunct every run reaching one would be reported as a
+  # deadlock — which is why deadlock checking used to be disabled
+  # entirely. Terminating changes no variables (a stuttering step,
+  # invisible to <<Next>>_vars), so liveness semantics are unaffected
+  # while real deadlocks — stuck non-terminal states, guard exhaustion —
+  # become detectable.
+  defp render_tla_next(ss, actions) do
+    terminating =
+      case ss.terminal_states do
+        [] ->
+          nil
 
-      """
-      \\* Next state relation
-      Next ==
-          \\/ #{disjuncts}
-      """
+        terminals ->
+          set = Enum.map_join(terminals, ", ", &~s("#{&1}"))
+
+          "\\* Terminal states self-stutter so they are not deadlocks\n" <>
+            "Terminating ==\n    /\\ state \\in {#{set}}\n    /\\ UNCHANGED vars\n"
+      end
+
+    disjunct_names =
+      Enum.map(actions, & &1.name) ++ if(terminating, do: ["Terminating"], else: [])
+
+    next =
+      if disjunct_names == [] do
+        "Next == FALSE\n"
+      else
+        disjuncts = Enum.join(disjunct_names, "\n    \\/ ")
+
+        """
+        \\* Next state relation
+        Next ==
+            \\/ #{disjuncts}
+        """
+      end
+
+    case terminating do
+      nil -> next
+      block -> block <> "\n" <> next
     end
   end
 
