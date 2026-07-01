@@ -29,6 +29,9 @@ defmodule Accord.Pass.TLA.BuildActions do
 
     results =
       ir.states
+      # Sorted for deterministic action order (map key order follows
+      # atom creation order, which varies between VM runs).
+      |> Enum.sort_by(fn {state_name, _state} -> state_name end)
       |> Enum.flat_map(fn {state_name, state} ->
         # Include anystate transitions for non-terminal states.
         transitions =

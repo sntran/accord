@@ -36,7 +36,7 @@ defmodule Accord.TLA.SessionsTest do
       refute result.tla =~ "Sessions"
       refute result.cfg =~ "Sessions"
       # Scalar state variable, scalar preconditions.
-      assert result.tla =~ ~s(state \\in {"stopped", "unlocked", "locked"})
+      assert result.tla =~ ~s(state \\in {"locked", "stopped", "unlocked"})
       assert result.tla =~ ~s(/\\ state = "unlocked")
     end
   end
@@ -45,7 +45,7 @@ defmodule Accord.TLA.SessionsTest do
     test "per-session variables become functions over Sessions" do
       result = compile(2)
 
-      assert result.tla =~ "state \\in [Sessions -> {\"stopped\", \"unlocked\", \"locked\"}]"
+      assert result.tla =~ "state \\in [Sessions -> {\"locked\", \"stopped\", \"unlocked\"}]"
       assert result.tla =~ "state = [s \\in Sessions |-> \"unlocked\"]"
       # Shared tracks stay scalar.
       assert result.tla =~ "fence_token \\in 0..3"

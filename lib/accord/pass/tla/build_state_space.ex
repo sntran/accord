@@ -28,7 +28,9 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
   end
 
   defp build_state_space(%IR{} = ir, %ModelConfig{} = config) do
-    states = Map.keys(ir.states) |> Enum.map(&state_to_tla/1)
+    # Sorted: map key order follows atom creation order, which varies
+    # between VM runs — the emitted spec must be deterministic.
+    states = ir.states |> Map.keys() |> Enum.sort() |> Enum.map(&state_to_tla/1)
 
     # Build correspondence counter names first so the session context
     # knows the complete per-session variable set.
