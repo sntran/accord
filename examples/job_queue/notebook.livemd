@@ -1,0 +1,330 @@
+# Accord: a job queue contract, checked twice
+
+```elixir
+Mix.install([
+  {:accord, path: Path.join(__DIR__, "../..")}
+])
+```
+
+## The idea
+
+Accord resurrects Joe Armstrong's UBF: declare the protocol between two
+parties as a typed state machine, put a contract checker between them, and
+let it assign blame. One declaration compiles into two artifacts — a runtime
+monitor (a gen_statem proxy) and a TLA+ specification model-checked by TLC.
+
+This notebook walks the flagship example: a worker leasing jobs from a queue
+with **fencing tokens**, where the visibility timeout *arrives* as a server
+event.
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> working: checkout / {job, token} where token > fence
+    idle --> idle: checkout / empty
+    working --> working: heartbeat(token)
+    working --> idle: ack(token) / done
+    working --> idle: nack(token) / requeued
+    working --> idle: lease_expired(token) [server event]
+    idle --> stopped: stop
+    stopped --> [*]
+```
+
+## The protocol
+
+The `where:` constraint on checkout is the fencing rule. The
+`event` declares the server push. The properties are checked after every
+transition at runtime — and exhaustively by TLC.
+
+```elixir
+defmodule JobQueue.Protocol do
+  use Accord.Protocol
+
+  initial :idle
+
+  track :fence, :non_neg_integer, default: 0, domain: 0..3
+  track :holding, :non_neg_integer, default: 0, domain: 0..3
+
+  state :idle do
+    on :checkout do
+      branch({:job, token :: pos_integer()},
+        goto: :working,
+        where: fn {:job, token}, tracks -> token > tracks.fence end
+      )
+
+      branch :empty, goto: :idle
+
+      update fn _msg, reply, tracks ->
+        case reply do
+          {:job, token} -> %{tracks | fence: token, holding: token}
+          :empty -> tracks
+        end
+      end
+    end
+
+    on :stop, reply: :stopped, goto: :stopped
+  end
+
+  state :working do
+    on {:ack, token :: pos_integer()} do
+      guard fn {:ack, token}, tracks -> token == tracks.holding end
+      branch :done, goto: :idle
+      update fn _msg, _reply, tracks -> %{tracks | holding: 0} end
+    end
+
+    event {:lease_expired, token :: pos_integer()} do
+      guard fn {:lease_expired, token}, tracks -> token == tracks.holding end
+      goto :idle
+      update fn {:lease_expired, _token}, tracks -> %{tracks | holding: 0} end
+    end
+  end
+
+  state :stopped, terminal: true
+
+  property :lease_iff_working do
+    invariant :working, fn _msg, tracks -> tracks.holding > 0 end
+    invariant :idle, fn _msg, tracks -> tracks.holding == 0 end
+  end
+end
+```
+
+A correct queue, plus a buggy one that re-issues fence tokens:
+
+```elixir
+defmodule JobQueue.Server do
+  use GenServer
+
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts)
+  def attach_monitor(pid, monitor), do: GenServer.call(pid, {:attach_monitor, monitor})
+  def expire_lease(pid), do: GenServer.call(pid, :expire_lease)
+
+  @impl true
+  def init(_), do: {:ok, %{fence: 0, leased: nil, monitor: nil}}
+
+  @impl true
+  def handle_call({:attach_monitor, monitor}, _from, state),
+    do: {:reply, :ok, %{state | monitor: monitor}}
+
+  def handle_call(:expire_lease, _from, %{leased: token} = state) when token != nil do
+    if state.monitor, do: Accord.event(state.monitor, {:lease_expired, token})
+    {:reply, :expired, %{state | leased: nil}}
+  end
+
+  def handle_call(:checkout, _from, %{leased: nil} = state) do
+    token = state.fence + 1
+    {:reply, {:job, token}, %{state | fence: token, leased: token}}
+  end
+
+  def handle_call(:checkout, _from, state), do: {:reply, :empty, state}
+
+  def handle_call({:ack, token}, _from, %{leased: token} = state),
+    do: {:reply, :done, %{state | leased: nil}}
+
+  def handle_call(:stop, _from, state), do: {:reply, :stopped, state}
+end
+
+defmodule JobQueue.StaleTokenServer do
+  use GenServer
+
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(_), do: {:ok, %{}}
+
+  @impl true
+  # Always hands out token 1 — fencing is exactly what forbids this.
+  def handle_call(:checkout, _from, state), do: {:reply, {:job, 1}, state}
+  def handle_call({:ack, 1}, _from, state), do: {:reply, :done, state}
+  def handle_call(:stop, _from, state), do: {:reply, :stopped, state}
+end
+
+:ok
+```
+
+## A monitored session
+
+Every message flows through the monitor; the expiry is pushed by the queue
+*through* the monitor and forwarded to us.
+
+```elixir
+alias Accord.Monitor
+
+{:ok, queue} = JobQueue.Server.start_link()
+
+{:ok, monitor} =
+  JobQueue.Protocol.Monitor.start_link(
+    upstream: queue,
+    downstream: self(),
+    violation_policy: :reject
+  )
+
+JobQueue.Server.attach_monitor(queue, monitor)
+
+IO.inspect(Monitor.call(monitor, :checkout), label: "checkout")
+IO.inspect(Monitor.call(monitor, {:ack, 1}), label: "ack(1)")
+IO.inspect(Monitor.call(monitor, :checkout), label: "checkout")
+
+JobQueue.Server.expire_lease(queue)
+
+receive do
+  {:lease_expired, token} -> IO.puts("← the queue pushed {:lease_expired, #{token}}")
+after
+  500 -> IO.puts("no expiry received")
+end
+```
+
+## Blame
+
+Who leaked the lease? The worker acking a lease it lost is **client** blame
+on the guard; the queue re-issuing a fence token is **server** blame on the
+`where:` constraint — with a diagnostic pointing at the clause.
+
+```elixir
+{:accord_violation, violation} = Monitor.call(monitor, {:ack, 2})
+IO.puts(Accord.Violation.Report.format(violation, JobQueue.Protocol.__compiled__()))
+```
+
+```elixir
+{:ok, bad_queue} = JobQueue.StaleTokenServer.start_link()
+
+{:ok, bad_monitor} =
+  JobQueue.Protocol.Monitor.start_link(upstream: bad_queue, violation_policy: :reject)
+
+{:job, 1} = Monitor.call(bad_monitor, :checkout)
+:done = Monitor.call(bad_monitor, {:ack, 1})
+
+{:accord_violation, violation} = Monitor.call(bad_monitor, :checkout)
+IO.puts(Accord.Violation.Report.format(violation, JobQueue.Protocol.__compiled__()))
+```
+
+## The model checker finds the bug before the code exists
+
+Forget `holding: 0` in the expiry handler and the worker still believes it
+owns a job the queue will hand to someone else — double processing. TLC
+finds that interleaving in three actions. (This cell needs `tla2tools.jar`;
+set `TLA2TOOLS_JAR` or install to `~/.tla/`.)
+
+```elixir
+defmodule JobQueue.ProtocolLeakyLease do
+  # tla: :off — deliberately broken; checked explicitly below.
+  use Accord.Protocol, tla: :off
+
+  initial :idle
+
+  track :fence, :non_neg_integer, default: 0, domain: 0..3
+  track :holding, :non_neg_integer, default: 0, domain: 0..3
+
+  state :idle do
+    on :checkout do
+      branch({:job, token :: pos_integer()},
+        goto: :working,
+        where: fn {:job, token}, tracks -> token > tracks.fence end
+      )
+
+      branch :empty, goto: :idle
+
+      update fn _msg, reply, tracks ->
+        case reply do
+          {:job, token} -> %{tracks | fence: token, holding: token}
+          :empty -> tracks
+        end
+      end
+    end
+
+    on :stop, reply: :stopped, goto: :stopped
+  end
+
+  state :working do
+    on {:ack, token :: pos_integer()} do
+      guard fn {:ack, token}, tracks -> token == tracks.holding end
+      branch :done, goto: :idle
+      update fn _msg, _reply, tracks -> %{tracks | holding: 0} end
+    end
+
+    # BUG: forgets holding: 0.
+    event {:lease_expired, token :: pos_integer()} do
+      guard fn {:lease_expired, token}, tracks -> token == tracks.holding end
+      goto :idle
+      update fn {:lease_expired, _token}, tracks -> tracks end
+    end
+  end
+
+  state :stopped, terminal: true
+
+  property :lease_iff_working do
+    invariant :working, fn _msg, tracks -> tracks.holding > 0 end
+    invariant :idle, fn _msg, tracks -> tracks.holding == 0 end
+  end
+end
+
+jar =
+  System.get_env("TLA2TOOLS_JAR") ||
+    (path = Path.expand("~/.tla/tla2tools.jar")) && File.exists?(path) && path
+
+if jar do
+  tmp = Path.join(System.tmp_dir!(), "accord_notebook_#{System.unique_integer([:positive])}")
+  File.mkdir_p!(tmp)
+
+  try do
+    Accord.Test.TLACheck.assert_fails(JobQueue.ProtocolLeakyLease, :invariant, tmp_dir: tmp)
+    IO.puts("TLC found the invariant violation — the double-processing interleaving.")
+  rescue
+    e -> IO.puts(Exception.message(e))
+  end
+else
+  IO.puts("tla2tools.jar not found — skipping the TLC demonstration.")
+end
+```
+
+## Trace validation: the compiler's own oracle
+
+The newest capability: a monitor started with `trace_sink:` records what
+actually happened, and `Accord.Test.TraceCheck` requires the generated spec
+to accept the trace as a behavior. A mistranslated guard or a dropped update
+in accord's own TLA+ compiler would refuse a trace the real monitor
+produced.
+
+```elixir
+if jar do
+  {:ok, collector, sink} = Accord.Trace.collector()
+  {:ok, queue2} = JobQueue.Server.start_link()
+
+  {:ok, traced} =
+    JobQueue.Protocol.Monitor.start_link(
+      upstream: queue2,
+      downstream: self(),
+      violation_policy: :crash,
+      trace_sink: sink
+    )
+
+  JobQueue.Server.attach_monitor(queue2, traced)
+
+  {:job, 1} = Monitor.call(traced, :checkout)
+  :done = Monitor.call(traced, {:ack, 1})
+  {:job, 2} = Monitor.call(traced, :checkout)
+  JobQueue.Server.expire_lease(queue2)
+  receive do: ({:lease_expired, 2} -> :ok), after: (500 -> :ok)
+  :stopped = Monitor.call(traced, :stop)
+  _ = :sys.get_state(traced)
+
+  events = Accord.Trace.collected(collector)
+
+  tmp = Path.join(System.tmp_dir!(), "accord_trace_#{System.unique_integer([:positive])}")
+  File.mkdir_p!(tmp)
+  :ok = Accord.Test.TraceCheck.assert_replays(JobQueue.Protocol, events, tmp_dir: tmp)
+  IO.puts("TLC replayed all #{length(events)} recorded transitions as a behavior of the spec.")
+else
+  IO.puts("tla2tools.jar not found — skipping trace validation.")
+end
+```
+
+## Where to go next
+
+- `examples/` in the accord repo: circuit breaker, payment lifecycle, and
+  the GenStage demand contract, each with a seeded design bug pinned by a
+  real TLC run.
+- The multi-session distributed lock
+  (`test/support/protocols/distributed_lock.ex`): at `sessions: 2` TLC
+  proves mutual exclusion, and dropping one guard conjunct yields the
+  two-workers-both-locked counterexample — with fence tokens still
+  perfectly monotonic. Fencing alone is not a lock.

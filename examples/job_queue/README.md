@@ -48,3 +48,7 @@ two-workers-both-locked interleaving when the holder guard is dropped.
 ```
 mix run examples/job_queue/demo.exs
 ```
+
+Or open [notebook.livemd](notebook.livemd) in Livebook for the interactive
+walkthrough — protocol, blame diagnostics, the TLC counterexample, and a
+trace-validation round trip.
