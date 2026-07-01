@@ -24,7 +24,6 @@ defmodule Accord.TLA.StateSpace do
           type_invariant: String.t(),
           init: String.t(),
           states: [String.t()],
-          has_event_var: boolean(),
           correspondences: [correspondence()],
           constants: [String.t()],
           state_constraint: String.t() | nil
@@ -37,7 +36,6 @@ defmodule Accord.TLA.StateSpace do
     :type_invariant,
     :init,
     :states,
-    has_event_var: false,
     correspondences: [],
     constants: [],
     state_constraint: nil

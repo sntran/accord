@@ -214,11 +214,13 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
     test "not present without local invariants" do
       {:ok, ss} = BuildStateSpace.run(minimal_ir(), default_config())
 
-      refute ss.has_event_var
       refute Enum.any?(ss.variables, &(&1.name == "event"))
     end
 
-    test "present when IR has local invariants" do
+    test "not present even with local invariants" do
+      # No generated formula ever read the event variable; it only
+      # multiplied the distinct-state count and, by turning self-loops
+      # into variable-changing steps, could flip liveness verdicts.
       ir = %{
         minimal_ir()
         | properties: [
@@ -236,11 +238,7 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
 
       {:ok, ss} = BuildStateSpace.run(ir, default_config())
 
-      assert ss.has_event_var
-      event_var = Enum.find(ss.variables, &(&1.name == "event"))
-      assert event_var
-      assert event_var.init == ~s("none")
-      assert event_var.type == "STRING"
+      refute Enum.any?(ss.variables, &(&1.name == "event"))
     end
   end
 

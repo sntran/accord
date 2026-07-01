@@ -182,14 +182,6 @@ defmodule Accord.Pass.TLA.BuildActions do
       # Primed assignments.
       primed = %{"state" => ~s("#{target}")}
 
-      # Event variable.
-      event_primed =
-        if state_space.has_event_var do
-          %{"event" => ~s("#{tag}")}
-        else
-          %{}
-        end
-
       # Correspondence counter updates.
       correspondence_primed =
         build_correspondence_primed(tag, source, target, state_space)
@@ -197,7 +189,6 @@ defmodule Accord.Pass.TLA.BuildActions do
       all_primed =
         primed
         |> Map.merge(track_primed)
-        |> Map.merge(event_primed)
         |> Map.merge(correspondence_primed)
 
       # UNCHANGED: variables not in primed set.
@@ -243,27 +234,14 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp build_cast_action(_ir, _state_name, _transition, tag, source, state_space, all_var_names) do
-    # Casts don't change state (stay in same state).
+  defp build_cast_action(_ir, _state_name, _transition, tag, source, _state_space, all_var_names) do
+    # Casts don't change state (stay in same state). With no primed
+    # variables the action is a pure stuttering step — semantically a
+    # no-op for TLC, kept for spec readability.
     target = source
     action_name = "Cast#{camelize(tag)}From#{camelize(source)}"
 
-    primed = %{}
-
-    event_primed =
-      if state_space.has_event_var do
-        %{"event" => ~s("#{tag}")}
-      else
-        %{}
-      end
-
-    all_primed = Map.merge(primed, event_primed)
-
-    unchanged =
-      all_var_names
-      |> MapSet.difference(MapSet.new(Map.keys(all_primed)))
-      |> MapSet.to_list()
-      |> Enum.sort()
+    unchanged = all_var_names |> MapSet.to_list() |> Enum.sort()
 
     %Action{
       name: action_name,
@@ -272,7 +250,7 @@ defmodule Accord.Pass.TLA.BuildActions do
       message_tag: tag,
       preconditions: [~s(state = "#{source}")],
       existential_vars: [],
-      primed: all_primed,
+      primed: %{},
       unchanged: unchanged,
       comment: "cast #{tag} in #{source}"
     }

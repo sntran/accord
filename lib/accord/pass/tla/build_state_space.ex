@@ -4,8 +4,8 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
 
   Produces VARIABLES, TypeInvariant, and Init predicate from states,
   tracks, and roles. For two-party protocols: a single `state` variable
-  plus one variable per track. Adds an `event` variable when local
-  invariants exist (needed for conditioning on message type in TLA+).
+  plus one variable per track, plus one auxiliary counter per
+  correspondence check.
   """
 
   alias Accord.IR
@@ -24,7 +24,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
 
   defp build_state_space(%IR{} = ir, %ModelConfig{} = config) do
     states = Map.keys(ir.states) |> Enum.map(&state_to_tla/1)
-    has_local_inv = has_local_invariants?(ir)
 
     # Build variable list.
     state_var = %{
@@ -54,13 +53,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         }
       end)
 
-    event_var =
-      if has_local_inv do
-        [%{name: "event", type: ~s(STRING), init: ~s("none")}]
-      else
-        []
-      end
-
     # Build correspondence counter variables.
     correspondences = build_correspondences(ir)
 
@@ -77,7 +69,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         %{name: corr.counter_var, type: type_str, init: "0"}
       end)
 
-    variables = [state_var] ++ track_vars ++ event_var ++ correspondence_vars
+    variables = [state_var] ++ track_vars ++ correspondence_vars
 
     # Build TypeInvariant.
     type_invariant = build_type_invariant(variables)
@@ -100,7 +92,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       type_invariant: type_invariant,
       init: init,
       states: states,
-      has_event_var: has_local_inv,
       correspondences: correspondences,
       constants: constants,
       state_constraint: config.state_constraint
@@ -176,12 +167,6 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       end)
 
     "Init == \n    /\\ #{conjuncts}"
-  end
-
-  defp has_local_invariants?(%IR{properties: properties}) do
-    Enum.any?(properties, fn prop ->
-      Enum.any?(prop.checks, fn check -> check.kind == :local_invariant end)
-    end)
   end
 
   # Collects all model value constant names from resolved domains.

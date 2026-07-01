@@ -186,9 +186,8 @@ defmodule Accord.TLA.CompilerTest do
       assert ss.init =~ "holder = NULL"
     end
 
-    test "no event variable when no local invariants" do
+    test "no event variable" do
       {:ok, ss} = BuildStateSpace.run(lock_ir(), lock_config())
-      refute ss.has_event_var
       refute Enum.any?(ss.variables, &(&1.name == "event"))
     end
 
