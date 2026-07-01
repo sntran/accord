@@ -16,7 +16,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
 
   @spec run(IR.t(), ModelConfig.t()) :: {:ok, StateSpace.t()} | {:error, [Report.t()]}
   def run(%IR{} = ir, %ModelConfig{} = config) do
-    case collect_init_errors(ir, config) do
+    case collect_init_errors(ir, config) ++ collect_symmetry_errors(ir, config) do
       [] -> {:ok, build_state_space(ir, config)}
       errors -> {:error, errors}
     end
@@ -94,8 +94,49 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       states: states,
       correspondences: correspondences,
       constants: constants,
-      state_constraint: config.state_constraint
+      state_constraint: config.state_constraint,
+      symmetry_exprs: build_symmetry_exprs(config)
     }
+  end
+
+  # Symmetry reduction applies only to domains the user explicitly listed
+  # in symmetry_sets, and only to model-value domains — permuting values
+  # that also carry meaning elsewhere (integers, literals) would merge
+  # states that are not actually equivalent.
+  defp build_symmetry_exprs(%ModelConfig{} = config) do
+    for name <- config.symmetry_sets,
+        domain = Map.get(config.domains, name),
+        match?({:model_values, _}, domain) do
+      "Permutations(#{ModelConfig.domain_to_tla(domain)})"
+    end
+  end
+
+  defp collect_symmetry_errors(%IR{} = ir, %ModelConfig{} = config) do
+    Enum.flat_map(config.symmetry_sets, fn name ->
+      case Map.get(config.domains, name) do
+        {:model_values, _} ->
+          []
+
+        other ->
+          [symmetry_error(ir, name, other)]
+      end
+    end)
+  end
+
+  defp symmetry_error(ir, name, domain) do
+    found =
+      case domain do
+        nil -> "no domain is configured for it"
+        other -> "its domain is #{inspect(other)}"
+      end
+
+    Report.error("symmetry set :#{name} must resolve to a model-value domain, but #{found}")
+    |> Report.with_code("E046")
+    |> Report.with_help(
+      "declare it as a model-value domain, e.g. domains: %{#{name}: {:model_values, 3}} — " <>
+        "symmetry over ordered values (integers, literals) would merge non-equivalent states"
+    )
+    |> maybe_add_source(ir.source_file)
   end
 
   defp state_to_tla(state_name), do: Atom.to_string(state_name)

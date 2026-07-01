@@ -210,6 +210,62 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
     end
   end
 
+  describe "boolean tracks" do
+    test "domain, init, and TypeInvariant use TLA+ booleans consistently" do
+      ir = %{
+        minimal_ir()
+        | tracks: [%Track{name: :flag, type: :boolean, default: false}]
+      }
+
+      {:ok, ss} = BuildStateSpace.run(ir, default_config())
+      flag_var = Enum.find(ss.variables, &(&1.name == "flag"))
+
+      assert flag_var.type == "BOOLEAN"
+      assert flag_var.init == "FALSE"
+      assert ss.type_invariant =~ "flag \\in BOOLEAN"
+      assert ss.init =~ "flag = FALSE"
+      # The broken form: a string-set domain contradicting a boolean init.
+      refute ss.type_invariant =~ ~s("true")
+    end
+  end
+
+  describe "symmetry sets" do
+    test "model-value symmetry sets produce permutation expressions" do
+      ir = %{
+        minimal_ir()
+        | tracks: [%Track{name: :client, type: :term, default: nil}]
+      }
+
+      config = %ModelConfig{
+        domains: %{client: {:model_values, 3}},
+        symmetry_sets: [:client]
+      }
+
+      {:ok, ss} = BuildStateSpace.run(ir, config)
+
+      assert ss.symmetry_exprs == ["Permutations({mv1, mv2, mv3})"]
+    end
+
+    test "symmetry set over a non-model-value domain reports E046" do
+      config = %ModelConfig{
+        domains: %{counter: 0..3},
+        symmetry_sets: [:counter]
+      }
+
+      assert {:error, [report]} = BuildStateSpace.run(minimal_ir(), config)
+      assert report.code == "E046"
+      assert report.message =~ ":counter"
+    end
+
+    test "symmetry set with no configured domain reports E046" do
+      config = %ModelConfig{symmetry_sets: [:ghost]}
+
+      assert {:error, [report]} = BuildStateSpace.run(minimal_ir(), config)
+      assert report.code == "E046"
+      assert report.message =~ "no domain is configured"
+    end
+  end
+
   describe "event variable" do
     test "not present without local invariants" do
       {:ok, ss} = BuildStateSpace.run(minimal_ir(), default_config())

@@ -243,6 +243,22 @@ defmodule Accord.Pass.TLA.EmitTest do
       refute tla =~ "\\* Properties"
     end
 
+    test "symmetry expressions render in the module and the cfg" do
+      ss = %{minimal_state_space() | symmetry_exprs: ["Permutations({mv1, mv2, mv3})"]}
+
+      {:ok, %{tla: tla, cfg: cfg}} = Emit.run(ss, [sample_action()], [])
+
+      assert tla =~ "Symmetry == Permutations({mv1, mv2, mv3})"
+      assert cfg =~ "SYMMETRY Symmetry"
+    end
+
+    test "no symmetry lines without symmetry sets" do
+      {:ok, %{tla: tla, cfg: cfg}} = Emit.run(minimal_state_space(), [sample_action()], [])
+
+      refute tla =~ "Symmetry"
+      refute cfg =~ "SYMMETRY"
+    end
+
     test "runtime-only checks render as a visible comment block" do
       prop = %Property{
         name: "AcksOrdered",

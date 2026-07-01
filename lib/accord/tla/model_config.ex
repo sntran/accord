@@ -126,9 +126,17 @@ defmodule Accord.TLA.ModelConfig do
     "#{first}..#{last}"
   end
 
+  def domain_to_tla([true, false]), do: "BOOLEAN"
+  def domain_to_tla([false, true]), do: "BOOLEAN"
+
   def domain_to_tla(list) when is_list(list) do
     elements =
       Enum.map_join(list, ", ", fn
+        # true/false must render as TLA+ booleans — init values and guard
+        # expressions already emit TRUE/FALSE, and a {"true", "false"}
+        # string domain would contradict them.
+        true -> "TRUE"
+        false -> "FALSE"
         atom when is_atom(atom) -> ~s("#{atom}")
         int when is_integer(int) -> Integer.to_string(int)
         str when is_binary(str) -> ~s("#{str}")

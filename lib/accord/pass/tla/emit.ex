@@ -40,6 +40,7 @@ defmodule Accord.Pass.TLA.Emit do
           "",
           "vars == <<#{vars_decl}>>",
           "",
+          render_tla_symmetry(ss),
           render_tla_section("Type invariant", ss.type_invariant),
           render_tla_section("Init predicate", ss.init),
           render_tla_actions(actions),
@@ -181,6 +182,13 @@ defmodule Accord.Pass.TLA.Emit do
     "\\* State constraint for bounded model checking\nStateConstraint == #{constraint}\n"
   end
 
+  defp render_tla_symmetry(%StateSpace{symmetry_exprs: []}), do: ""
+
+  defp render_tla_symmetry(%StateSpace{symmetry_exprs: exprs}) do
+    "\\* Symmetry reduction over interchangeable model values\n" <>
+      "Symmetry == #{Enum.join(exprs, " \\union ")}\n"
+  end
+
   # -- CFG File --
 
   defp render_cfg(ss, _actions, properties) do
@@ -212,6 +220,14 @@ defmodule Accord.Pass.TLA.Emit do
         []
       end
 
+    # Symmetry reduction over model-value sets.
+    symmetry =
+      if ss.symmetry_exprs == [] do
+        []
+      else
+        ["", "SYMMETRY Symmetry"]
+      end
+
     # Add constant declarations for model values and NULL.
     constants =
       case ss.constants do
@@ -219,7 +235,7 @@ defmodule Accord.Pass.TLA.Emit do
         names -> ["" | Enum.map(names, &"CONSTANT #{&1} = #{&1}")]
       end
 
-    all_sections = sections ++ invariants ++ temporals ++ constraint ++ constants
+    all_sections = sections ++ invariants ++ temporals ++ constraint ++ symmetry ++ constants
     Enum.join(all_sections, "\n") <> "\n"
   end
 end

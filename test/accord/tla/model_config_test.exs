@@ -228,8 +228,15 @@ defmodule Accord.TLA.ModelConfigTest do
       assert ModelConfig.domain_to_tla({:model_values, [:c1, :c2]}) == "{c1, c2}"
     end
 
-    test "boolean list" do
-      assert ModelConfig.domain_to_tla([true, false]) == ~s({"true", "false"})
+    test "boolean list renders as BOOLEAN" do
+      # Init values and guards emit TRUE/FALSE; a string-set domain would
+      # contradict them and break TLC.
+      assert ModelConfig.domain_to_tla([true, false]) == "BOOLEAN"
+      assert ModelConfig.domain_to_tla([false, true]) == "BOOLEAN"
+    end
+
+    test "booleans in mixed lists render as TLA+ booleans" do
+      assert ModelConfig.domain_to_tla([true, :other]) == "{TRUE, \"other\"}"
     end
   end
 end
