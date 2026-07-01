@@ -745,6 +745,7 @@ defmodule Accord.Protocol do
 
     with {:ok, ir} <- Pass.RefineSpans.run(ir),
          {:ok, ir} <- run_pass(Pass.ValidateStructure, ir, env),
+         {:ok, ir} <- run_pass(Pass.ValidateTracks, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateTypes, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateDeterminism, ir, env),
          {:ok, ir} <- run_pass(Pass.ValidateReachability, ir, env),
