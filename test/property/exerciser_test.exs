@@ -258,7 +258,14 @@ defmodule Accord.Property.ExerciserTest do
 
       failing = Enum.find(error.steps, &(not &1.passed))
       assert failing != nil
-      assert {:accord_violation, %{blame: :server, kind: :constraint_failed}} = failing.actual
+
+      # The shrunk counterexample surfaces whichever server bug the
+      # sequence hits first: a stale token (constraint_failed) or an
+      # {:error, :already_held} reply in :unlocked (invalid_reply). Both
+      # are server blame; the deterministic constraint_failed behavior is
+      # pinned in monitor_test.
+      assert {:accord_violation, %{blame: :server, kind: kind}} = failing.actual
+      assert kind in [:constraint_failed, :invalid_reply]
     end
 
     @tag :property
@@ -292,7 +299,8 @@ defmodule Accord.Property.ExerciserTest do
 
       failing = Enum.find(error.steps, &(not &1.passed))
       assert failing != nil
-      assert {:accord_violation, %{blame: :server, kind: :constraint_failed}} = failing.actual
+      assert {:accord_violation, %{blame: :server, kind: kind}} = failing.actual
+      assert kind in [:constraint_failed, :invalid_reply]
     end
   end
 end

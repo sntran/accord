@@ -154,7 +154,69 @@ defmodule Accord.Pass.ValidateProperties do
     |> validate_precedence_state(required, "required", check, ir, state_names)
   end
 
+  defp validate_check(
+         %IR.Check{kind: :liveness} = check,
+         ir,
+         _tracks,
+         _states,
+         message_tags,
+         errors
+       ) do
+    case Map.get(check.spec, :assuming) do
+      nil ->
+        errors
+
+      tags ->
+        Enum.reduce(tags, errors, fn tag, acc ->
+          if MapSet.member?(message_tags, tag) do
+            acc
+          else
+            span = derive_arg_span(check.span, ":#{tag}")
+
+            report =
+              Report.error("liveness assuming: references unknown message tag :#{tag}")
+              |> Report.with_code("E037")
+              |> maybe_add_source(ir.source_file)
+              |> maybe_add_span_label(span, "no transition handles :#{tag}")
+              |> Report.with_help(
+                "known tags: #{Enum.map_join(Enum.sort(message_tags), ", ", &":#{&1}")}"
+              )
+
+            [report | acc]
+          end
+        end)
+    end
+  end
+
   defp validate_check(_check, _ir, _tracks, _states, _tags, errors), do: errors
+
+  @doc """
+  Non-blocking warnings for property checks, surfaced via `IO.warn`.
+
+  W005: a liveness check without `assuming:` is verified under blanket
+  `WF_vars(Next)`, which asserts only "the system does not stutter
+  forever". Under that assumption `P ~> Q` holds iff Q is inevitable
+  from every reachable P-state — any client loop (ping, retry) or
+  terminal state reachable from the trigger fails it.
+  """
+  @spec warnings(IR.t()) :: [Report.t()]
+  def warnings(%IR{} = ir) do
+    for property <- ir.properties,
+        %IR.Check{kind: :liveness} = check <- property.checks,
+        Map.get(check.spec, :assuming) == nil do
+      Report.warning(
+        "liveness :#{property.name} has no assuming: — it is checked under blanket " <>
+          "weak fairness, where any client loop or reachable terminal state fails it"
+      )
+      |> Report.with_code("W005")
+      |> maybe_add_source(ir.source_file)
+      |> maybe_add_span_label(check.span, "declared here")
+      |> Report.with_help(
+        "name the message tags that drive progress, e.g. " <>
+          "liveness in_state(:locked), leads_to: in_state(:unlocked), assuming: [:release]"
+      )
+    end
+  end
 
   defp validate_precedence_state(errors, state, role, check, ir, state_names) do
     if state in state_names do

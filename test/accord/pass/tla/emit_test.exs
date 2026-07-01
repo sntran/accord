@@ -205,6 +205,87 @@ defmodule Accord.Pass.TLA.EmitTest do
       refute cfg =~ "SPECIFICATION Spec\n"
     end
 
+    test "assuming: tags produce per-action fairness instead of WF_vars(Next)" do
+      prop = %Property{
+        name: "EventuallyDone",
+        kind: :temporal,
+        formula: ~s(EventuallyDone == state = "ready" ~> state = "done"),
+        fairness_tags: ["go"],
+        fairness_strength: :weak
+      }
+
+      {:ok, %{tla: tla, cfg: cfg}} =
+        Emit.run(minimal_state_space(), [sample_action()], [prop])
+
+      assert tla =~ "FairSpec == Spec /\\ WF_vars(GoFromReadyToDone)"
+      refute tla =~ "WF_vars(Next)"
+      assert cfg =~ "SPECIFICATION FairSpec"
+    end
+
+    test "fairness: :strong emits SF_vars" do
+      prop = %Property{
+        name: "EventuallyDone",
+        kind: :temporal,
+        formula: ~s(EventuallyDone == state = "ready" ~> state = "done"),
+        fairness_tags: ["go"],
+        fairness_strength: :strong
+      }
+
+      {:ok, %{tla: tla}} = Emit.run(minimal_state_space(), [sample_action()], [prop])
+
+      assert tla =~ "SF_vars(GoFromReadyToDone)"
+    end
+
+    test "every action for an assumed tag gets a fairness conjunct" do
+      action2 = %Action{
+        name: "GoFromReadyToReady",
+        source_state: "ready",
+        target_state: "ready",
+        message_tag: "go",
+        preconditions: [~s(state = "ready")],
+        primed: %{"state" => ~s("ready")},
+        unchanged: ["counter"],
+        comment: nil
+      }
+
+      prop = %Property{
+        name: "EventuallyDone",
+        kind: :temporal,
+        formula: ~s(EventuallyDone == state = "ready" ~> state = "done"),
+        fairness_tags: ["go"],
+        fairness_strength: :weak
+      }
+
+      {:ok, %{tla: tla}} =
+        Emit.run(minimal_state_space(), [sample_action(), action2], [prop])
+
+      assert tla =~ "WF_vars(GoFromReadyToDone)"
+      assert tla =~ "WF_vars(GoFromReadyToReady)"
+    end
+
+    test "mixed properties keep blanket WF_vars(Next) for the untagged one" do
+      tagged = %Property{
+        name: "EventuallyDone",
+        kind: :temporal,
+        formula: ~s(EventuallyDone == state = "ready" ~> state = "done"),
+        fairness_tags: ["go"],
+        fairness_strength: :weak
+      }
+
+      untagged = %Property{
+        name: "AlsoDone",
+        kind: :temporal,
+        formula: ~s(AlsoDone == state = "ready" ~> state = "done"),
+        fairness_tags: nil
+      }
+
+      {:ok, %{tla: tla}} =
+        Emit.run(minimal_state_space(), [sample_action()], [tagged, untagged])
+
+      assert tla =~ "WF_vars(Next)"
+      assert tla =~ "WF_vars(GoFromReadyToDone)"
+    end
+
     test "no FairSpec for action properties (temporal but not liveness)" do
       prop = %Property{
         name: "Monotonic",

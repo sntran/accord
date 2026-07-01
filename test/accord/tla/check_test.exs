@@ -49,6 +49,15 @@ defmodule Accord.TLA.CheckTest do
     test "liveness detects unreachable target state", %{tmp_dir: tmp_dir} do
       assert_fails(Accord.Test.LivenessFail.Protocol, :temporal, tmp_dir: tmp_dir)
     end
+
+    test "liveness with assuming: passes under per-action fairness", %{tmp_dir: tmp_dir} do
+      assert_passes(Accord.Test.LivenessFair.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "same protocol without assuming: fails via the retry-loop counterexample",
+         %{tmp_dir: tmp_dir} do
+      assert_fails(Accord.Test.LivenessUnfair.Protocol, :temporal, tmp_dir: tmp_dir)
+    end
   end
 
   describe "action property violations" do

@@ -18,7 +18,9 @@ defmodule Accord.TLA.Property do
           name: String.t(),
           kind: kind(),
           formula: String.t(),
-          comment: String.t() | nil
+          comment: String.t() | nil,
+          fairness_tags: [String.t()] | nil,
+          fairness_strength: :weak | :strong
         }
 
   @enforce_keys [:name, :kind, :formula]
@@ -26,6 +28,10 @@ defmodule Accord.TLA.Property do
     :name,
     :kind,
     :formula,
-    :comment
+    :comment,
+    # For liveness properties: message tags whose actions receive a
+    # fairness assumption. nil means blanket WF_vars(Next).
+    :fairness_tags,
+    fairness_strength: :weak
   ]
 end

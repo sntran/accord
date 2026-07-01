@@ -105,11 +105,19 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
     formula = "#{tla_name} == #{trigger} ~> #{target}"
 
+    fairness_tags =
+      case Map.get(check.spec, :assuming) do
+        nil -> nil
+        tags -> Enum.map(tags, &Atom.to_string/1)
+      end
+
     %Property{
       name: tla_name,
       kind: :temporal,
       formula: formula,
-      comment: "liveness: #{prop_name}"
+      comment: "liveness: #{prop_name}",
+      fairness_tags: fairness_tags,
+      fairness_strength: Map.get(check.spec, :fairness, :weak)
     }
   end
 

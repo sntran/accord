@@ -259,4 +259,118 @@ defmodule Accord.Pass.ValidatePropertiesTest do
     assert {:error, errors} = ValidateProperties.run(ir)
     assert length(errors) >= 2
   end
+
+  describe "liveness assuming: (E037)" do
+    test "accepts assuming tags that match transitions" do
+      ir = %{
+        base_ir()
+        | properties: [
+            %Property{
+              name: :no_starvation,
+              checks: [
+                %Check{
+                  kind: :liveness,
+                  spec: %{
+                    trigger: {:in_state, :locked},
+                    target: {:in_state, :unlocked},
+                    fairness: :weak,
+                    timeout: :infinity,
+                    assuming: [:release]
+                  }
+                }
+              ]
+            }
+          ]
+      }
+
+      assert {:ok, ^ir} = ValidateProperties.run(ir)
+    end
+
+    test "rejects assuming tags with no matching transition" do
+      ir = %{
+        base_ir()
+        | properties: [
+            %Property{
+              name: :no_starvation,
+              checks: [
+                %Check{
+                  kind: :liveness,
+                  spec: %{
+                    trigger: {:in_state, :locked},
+                    target: {:in_state, :unlocked},
+                    fairness: :weak,
+                    timeout: :infinity,
+                    assuming: [:relaese]
+                  }
+                }
+              ]
+            }
+          ]
+      }
+
+      assert {:error, [report]} = ValidateProperties.run(ir)
+      assert report.code == "E037"
+      assert report.message =~ ":relaese"
+      assert Enum.any?(report.help, &(&1 =~ ":release"))
+    end
+  end
+
+  describe "warnings/1 (W005)" do
+    test "liveness without assuming: warns" do
+      ir = %{
+        base_ir()
+        | properties: [
+            %Property{
+              name: :no_starvation,
+              checks: [
+                %Check{
+                  kind: :liveness,
+                  spec: %{
+                    trigger: {:in_state, :locked},
+                    target: {:in_state, :unlocked},
+                    fairness: :weak,
+                    timeout: :infinity,
+                    assuming: nil
+                  }
+                }
+              ]
+            }
+          ]
+      }
+
+      assert [report] = ValidateProperties.warnings(ir)
+      assert report.code == "W005"
+      assert report.message =~ "no_starvation"
+      assert Enum.any?(report.help, &(&1 =~ "assuming:"))
+    end
+
+    test "liveness with assuming: does not warn" do
+      ir = %{
+        base_ir()
+        | properties: [
+            %Property{
+              name: :no_starvation,
+              checks: [
+                %Check{
+                  kind: :liveness,
+                  spec: %{
+                    trigger: {:in_state, :locked},
+                    target: {:in_state, :unlocked},
+                    fairness: :weak,
+                    timeout: :infinity,
+                    assuming: [:release]
+                  }
+                }
+              ]
+            }
+          ]
+      }
+
+      assert [] = ValidateProperties.warnings(ir)
+    end
+
+    test "non-liveness properties produce no warnings" do
+      assert [] = ValidateProperties.warnings(base_ir())
+    end
+  end
 end

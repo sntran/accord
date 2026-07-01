@@ -148,30 +148,59 @@ defmodule Accord.Pass.TLA.Emit do
     end
   end
 
-  defp render_tla_spec(_actions, properties) do
-    fair? = has_liveness?(properties)
-
+  defp render_tla_spec(actions, properties) do
     base = """
     \\* Specification
     Spec == Init /\\ [][Next]_vars
     """
 
-    if fair? do
-      base <>
-        """
+    case fairness_conjuncts(actions, properties) do
+      [] ->
+        base
 
-        \\* Fair specification (required for liveness properties)
-        FairSpec == Spec /\\ WF_vars(Next)
-        """
-    else
-      base
+      conjuncts ->
+        base <>
+          """
+
+          \\* Fair specification (required for liveness properties)
+          FairSpec == Spec /\\ #{Enum.join(conjuncts, " /\\ ")}
+          """
     end
   end
 
-  defp has_liveness?(properties) do
-    Enum.any?(properties, fn prop ->
-      prop.kind == :temporal and String.contains?(prop.formula, "~>")
-    end)
+  # Fairness for liveness checking. Properties with `assuming:` tags get
+  # per-action fairness: every action generated for those tags receives
+  # WF_vars (or SF_vars under fairness: :strong), asserting that an
+  # enabled outcome is eventually taken. Properties without `assuming:`
+  # fall back to blanket WF_vars(Next), which only rules out infinite
+  # stuttering — see W005.
+  defp fairness_conjuncts(actions, properties) do
+    liveness_props = Enum.filter(properties, &liveness?/1)
+
+    blanket =
+      if Enum.any?(liveness_props, &(&1.fairness_tags == nil)) do
+        ["WF_vars(Next)"]
+      else
+        []
+      end
+
+    per_action =
+      liveness_props
+      |> Enum.filter(& &1.fairness_tags)
+      |> Enum.flat_map(fn prop ->
+        operator = if prop.fairness_strength == :strong, do: "SF_vars", else: "WF_vars"
+
+        actions
+        |> Enum.filter(&(&1.message_tag in prop.fairness_tags))
+        |> Enum.map(&"#{operator}(#{&1.name})")
+      end)
+      |> Enum.uniq()
+
+    blanket ++ per_action
+  end
+
+  defp liveness?(prop) do
+    prop.kind == :temporal and String.contains?(prop.formula, "~>")
   end
 
   defp render_tla_properties(properties) do
@@ -219,8 +248,8 @@ defmodule Accord.Pass.TLA.Emit do
 
   # -- CFG File --
 
-  defp render_cfg(ss, _actions, properties) do
-    spec_name = if has_liveness?(properties), do: "FairSpec", else: "Spec"
+  defp render_cfg(ss, actions, properties) do
+    spec_name = if fairness_conjuncts(actions, properties) == [], do: "Spec", else: "FairSpec"
 
     sections = [
       "SPECIFICATION #{spec_name}",

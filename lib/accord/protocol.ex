@@ -682,8 +682,12 @@ defmodule Accord.Protocol do
     # Run validation pipeline.
     {:ok, ir} = compile_ir(ir, env)
 
-    # Emit reachability warnings through the compiler.
-    for report <- Accord.Pass.ValidateReachability.warnings(ir) do
+    # Emit reachability and property warnings through the compiler.
+    warnings =
+      Accord.Pass.ValidateReachability.warnings(ir) ++
+        Accord.Pass.ValidateProperties.warnings(ir)
+
+    for report <- warnings do
       IO.warn(report.message, Macro.Env.stacktrace(env))
     end
 

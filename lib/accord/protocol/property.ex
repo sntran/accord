@@ -66,10 +66,17 @@ defmodule Accord.Protocol.Property do
   end
 
   @doc false
+  # `assuming:` names message tags whose generated actions receive a
+  # fairness assumption (WF by default, SF with `fairness: :strong`).
+  # Without it, `P ~> Q` is checked under blanket WF_vars(Next), which
+  # asserts only "the system does not stutter forever" — any client loop
+  # or reachable terminal state then fails realistic liveness properties
+  # (see W005).
   defmacro liveness(trigger, opts) do
     target = Keyword.fetch!(opts, :leads_to)
     fairness = Keyword.get(opts, :fairness, :weak)
     timeout = Keyword.get(opts, :timeout, :infinity)
+    assuming = Keyword.get(opts, :assuming)
     line = __CALLER__.line
 
     quote do
@@ -81,7 +88,8 @@ defmodule Accord.Protocol.Property do
           trigger: unquote(trigger),
           target: unquote(target),
           fairness: unquote(fairness),
-          timeout: unquote(timeout)
+          timeout: unquote(timeout),
+          assuming: unquote(assuming)
         },
         span: Pentiment.Span.search(line: unquote(line), pattern: "liveness")
       }
