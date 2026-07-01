@@ -41,14 +41,16 @@ defmodule Accord.TLA.ModelConfig do
           init: %{atom() => term()},
           symmetry_sets: [atom()],
           max_list_length: pos_integer(),
-          state_constraint: String.t() | nil
+          state_constraint: String.t() | nil,
+          sessions: pos_integer()
         }
 
   defstruct domains: %{},
             init: %{},
             symmetry_sets: [],
             max_list_length: nil,
-            state_constraint: nil
+            state_constraint: nil,
+            sessions: 1
 
   @builtin_defaults %{
     pos_integer: 1..3,
@@ -182,7 +184,8 @@ defmodule Accord.TLA.ModelConfig do
       init: Keyword.get(config, :init, %{}),
       symmetry_sets: Keyword.get(config, :symmetry_sets, []),
       max_list_length: Keyword.get(config, :max_list_length, 3),
-      state_constraint: Keyword.get(config, :state_constraint)
+      state_constraint: Keyword.get(config, :state_constraint),
+      sessions: Keyword.get(config, :sessions, 1)
     }
   end
 
@@ -194,7 +197,8 @@ defmodule Accord.TLA.ModelConfig do
       init: Map.merge(project.init, protocol.init),
       symmetry_sets: Enum.uniq(project.symmetry_sets ++ protocol.symmetry_sets),
       max_list_length: protocol.max_list_length || project.max_list_length || 3,
-      state_constraint: protocol.state_constraint || project.state_constraint
+      state_constraint: protocol.state_constraint || project.state_constraint,
+      sessions: max(protocol.sessions, project.sessions)
     }
   end
 end

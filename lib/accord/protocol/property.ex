@@ -170,6 +170,26 @@ defmodule Accord.Protocol.Property do
   end
 
   @doc false
+  # Mutual exclusion across sessions: at most one session in the state.
+  # Model-only — verified by TLC at sessions >= 2, not runtime-enforced
+  # (the monitor observes a single session; see ADR-009).
+  defmacro exclusive(state) do
+    line = __CALLER__.line
+
+    quote do
+      checks = Module.get_attribute(__MODULE__, :accord_property_checks)
+
+      check = %Check{
+        kind: :exclusive,
+        spec: %{state: unquote(state)},
+        span: Pentiment.Span.search(line: unquote(line), pattern: "exclusive")
+      }
+
+      Module.put_attribute(__MODULE__, :accord_property_checks, [check | checks])
+    end
+  end
+
+  @doc false
   defmacro reachable(target) do
     line = __CALLER__.line
 

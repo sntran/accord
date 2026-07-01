@@ -170,6 +170,7 @@ defmodule Accord.Protocol do
   """
   defmacro track(name, type, opts) do
     default = Keyword.fetch!(opts, :default)
+    shared = Keyword.get(opts, :shared, false)
     type_value = parse_track_type(type)
     escaped_type = Macro.escape(type_value)
     span = span_from_name_ast(name, __CALLER__)
@@ -182,6 +183,7 @@ defmodule Accord.Protocol do
           name: unquote(name),
           type: unquote(escaped_type),
           default: unquote(default),
+          shared: unquote(shared),
           span: unquote(span)
         }
       )
@@ -1036,6 +1038,8 @@ defmodule Accord.Protocol do
         project_root: project_root
       )
 
+    warn_single_session_ghosts(ir, config, env)
+
     case Accord.TLA.Compiler.compile(ir, config) do
       {:ok, result} ->
         # Write .tla and .cfg to _build/accord/.
@@ -1068,6 +1072,33 @@ defmodule Accord.Protocol do
           message = Exception.message(e)
           warn_tla_failure(ir, env, message, message)
       end
+  end
+
+  # W003: shared tracks and exclusive checks only mean something across
+  # sessions — with sessions: 1 the model cannot observe cross-session
+  # behavior, so the declarations are silently vacuous unless we say so.
+  defp warn_single_session_ghosts(ir, config, env) do
+    if config.sessions < 2 do
+      shared = Enum.filter(ir.tracks, & &1.shared)
+
+      exclusives =
+        for prop <- ir.properties, check <- prop.checks, check.kind == :exclusive, do: prop.name
+
+      if shared != [] or exclusives != [] do
+        declared =
+          Enum.map(shared, &"shared track :#{&1.name}") ++
+            Enum.map(exclusives, &"exclusive check in :#{&1}")
+
+        IO.warn(
+          "W003: #{inspect(ir.name)} declares #{Enum.join(declared, ", ")} but model " <>
+            "checking is single-session — cross-session behavior is not being verified; " <>
+            "set sessions: 2 (or more) in the model config",
+          Macro.Env.stacktrace(env)
+        )
+      end
+    end
+
+    :ok
   end
 
   defp warn_tla_failure(ir, env, summary, detail) do

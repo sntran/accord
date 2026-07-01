@@ -188,6 +188,23 @@ defmodule Accord.Pass.TLA.BuildProperties do
     end
   end
 
+  defp build_property(prop_name, %{kind: :exclusive} = check, _ir, _track_names) do
+    tla_name = camelize(prop_name) <> "Exclusive"
+    state = Atom.to_string(check.spec.state)
+
+    # Cross-session mutual exclusion is only expressible in a
+    # multi-session model; the sessioned emission upgrades this to a
+    # quantified invariant. Single-session models annotate it honestly.
+    %Property{
+      name: tla_name,
+      kind: :auxiliary,
+      formula:
+        "\\* exclusive: at most one session in \"#{state}\" — " <>
+          "requires multi-session checking (sessions >= 2)",
+      comment: "exclusive: #{prop_name}"
+    }
+  end
+
   defp build_property(prop_name, %{kind: :reachable} = check, _ir, _track_names) do
     tla_name = camelize(prop_name)
     target = Atom.to_string(check.spec.target)

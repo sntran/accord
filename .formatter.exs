@@ -28,6 +28,7 @@ protocol_macros = [
   ordered: 2,
   precedence: 2,
   reachable: 1,
+  exclusive: 1,
   forbidden: 1
 ]
 

@@ -155,6 +155,32 @@ defmodule Accord.Pass.ValidateProperties do
   end
 
   defp validate_check(
+         %IR.Check{kind: :exclusive} = check,
+         ir,
+         _tracks,
+         state_names,
+         _tags,
+         errors
+       ) do
+    state = check.spec[:state]
+
+    if state in state_names do
+      errors
+    else
+      span = derive_arg_span(check.span, ":#{state}")
+
+      report =
+        Report.error("exclusive check references undefined state :#{state}")
+        |> Report.with_code("E060")
+        |> maybe_add_source(ir.source_file)
+        |> maybe_add_span_label(span, "state :#{state} is not defined")
+        |> Report.with_help("defined states are: #{Enum.map_join(state_names, ", ", &":#{&1}")}")
+
+      [report | errors]
+    end
+  end
+
+  defp validate_check(
          %IR.Check{kind: :liveness} = check,
          ir,
          _tracks,

@@ -17,6 +17,8 @@ defmodule Accord.IR.Check do
   - `:precedence` — target state requires prior state.
   - `:reachable` — target state is reachable (design-time only).
   - `:forbidden` — negated invariant: `fn state, tracks -> bool`.
+  - `:exclusive` — at most one session occupies the state at a time
+    (multi-session model checking only).
   """
 
   @type kind ::
@@ -30,6 +32,7 @@ defmodule Accord.IR.Check do
           | :precedence
           | :reachable
           | :forbidden
+          | :exclusive
 
   @type t :: %__MODULE__{
           kind: kind(),
