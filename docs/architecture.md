@@ -417,6 +417,18 @@ downgrade to a warning and any stale spec is deleted.
 - E045 -- `where:` constraint not compilable to TLA+.
 - E046 -- symmetry set does not resolve to a model-value domain.
 
+**Compatibility findings (C001-C010, from `Accord.Compat`):**
+- C001 -- state or initial state missing in the new contract.
+- C002 -- state became terminal.
+- C003 -- message no longer accepted (or changed kind).
+- C004 -- argument type narrowed / arity changed (contravariance violation).
+- C005 -- new reply old clients do not understand (covariance violation).
+- C006 -- reply leads to a different state than old clients assume.
+- C007 -- new server push old clients do not handle.
+- C008 -- event payload not covariant / event target diverges.
+- C009 -- state_timeout target changed (autonomous movement).
+- C010 -- guard or where: constraint changed (advisory warning).
+
 **Warnings (W001-W005):**
 - W001 -- state unreachable from initial state.
 - W002 -- no terminal state reachable from initial state.

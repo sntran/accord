@@ -14,3 +14,4 @@ This directory contains architectural decision records (ADRs) for the accord2 pr
 | [008](008-roles-events-direction-blame.md) | Protocols are two-party with direction-derived blame; the `event` primitive validates server pushes through the monitor and models them as TLA+ actions. |
 | [009](009-multi-session-ghost-state.md) | Multi-session model checking with ghost shared state: `sessions: N` and `shared:` tracks are verified by TLC, not runtime-enforced; the asymmetry is declared loudly. |
 | [010](010-trace-validation.md) | Runtime traces replay against the generated spec via TLC — the only check that can catch accord's own TLA+ compiler mistranslating the protocol. |
+| [011](011-compat-checking.md) | Rolling-upgrade safety via static compatibility checking (`Accord.Compat`) against IR snapshots — the consumer shipped instead of a version macro. |
