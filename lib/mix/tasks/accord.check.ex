@@ -15,6 +15,11 @@ defmodule Mix.Tasks.Accord.Check do
       mix accord.check --strict                 # fail protocols with tla: :off
       mix accord.check --no-deadlock            # disable deadlock checking
       mix accord.check --dump                   # write raw TLC output on failure
+      mix accord.check --force                  # ignore the pass cache
+
+  Passing results are cached by content hash (spec, cfg, TLC jar,
+  deadlock setting) in `_build/accord/.check_cache`; unchanged protocols
+  skip TLC entirely. Failures are never cached.
 
   Protocols whose spec generation failed at compile time (`tla: :warn`)
   always count as failures: a protocol that cannot be checked is not
@@ -39,7 +44,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   use Mix.Task
 
-  alias Accord.TLA.{Files, TLCParser, ViolationReport}
+  alias Accord.TLA.{CheckCache, Files, TLCParser, ViolationReport}
 
   @shortdoc "Run TLC model checking on Accord protocols"
 
@@ -49,13 +54,20 @@ defmodule Mix.Tasks.Accord.Check do
 
     {opts, modules, _} =
       OptionParser.parse(args,
-        strict: [workers: :integer, strict: :boolean, deadlock: :boolean, dump: :boolean]
+        strict: [
+          workers: :integer,
+          strict: :boolean,
+          deadlock: :boolean,
+          dump: :boolean,
+          force: :boolean
+        ]
       )
 
     workers = Keyword.get(opts, :workers)
     strict? = Keyword.get(opts, :strict, false)
     deadlock? = Keyword.get(opts, :deadlock, true)
     dump? = Keyword.get(opts, :dump, false)
+    force? = Keyword.get(opts, :force, false)
 
     protocols =
       if modules == [] do
@@ -79,11 +91,15 @@ defmodule Mix.Tasks.Accord.Check do
     else
       Mix.shell().info("Checking #{length(protocols)} protocol(s)...\n")
 
-      results =
-        Enum.map(protocols, fn mod ->
-          {mod, check_protocol(mod, workers, strict?, deadlock?, dump?)}
+      cache = if force?, do: %{}, else: CheckCache.load()
+
+      {results, cache} =
+        Enum.map_reduce(protocols, cache, fn mod, cache ->
+          {result, cache} = check_protocol(mod, workers, strict?, deadlock?, dump?, cache)
+          {{mod, result}, cache}
         end)
 
+      CheckCache.save(cache)
       report_results(results)
     end
   end
@@ -113,7 +129,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   # -- Protocol Checking --
 
-  defp check_protocol(mod, workers, strict?, deadlock?, dump?) do
+  defp check_protocol(mod, workers, strict?, deadlock?, dump?, cache) do
     with :ok <- ensure_loaded(mod),
          :ok <- ensure_protocol(mod),
          :ok <- ensure_tla_generated(mod, strict?),
@@ -121,7 +137,19 @@ defmodule Mix.Tasks.Accord.Check do
          :ok <- ensure_file(tla_path, :tla_not_found),
          :ok <- ensure_file(cfg_path, :cfg_not_found),
          {:ok, tlc_jar} <- require_tlc() do
-      run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?)
+      module_name = Files.tla_module_name(mod)
+      key = CheckCache.key(tla_path, cfg_path, tlc_jar, deadlock?)
+
+      if CheckCache.hit?(cache, module_name, key) do
+        {{:cached, key}, cache}
+      else
+        case run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?) do
+          {:ok, _stats} = ok -> {ok, CheckCache.put(cache, module_name, key)}
+          other -> {other, cache}
+        end
+      end
+    else
+      error -> {error, cache}
     end
   end
 
@@ -229,6 +257,7 @@ defmodule Mix.Tasks.Accord.Check do
     groups =
       Enum.group_by(results, fn
         {_mod, {:ok, _}} -> :success
+        {_mod, {:cached, _}} -> :success
         {_mod, {:skip, _}} -> :skip
         _ -> :failure
       end)
@@ -244,6 +273,15 @@ defmodule Mix.Tasks.Accord.Check do
           "#{stats.distinct_states} distinct states (#{stats.states_generated} generated" <>
           if(stats.depth, do: ", depth #{stats.depth}", else: "") <>
           ")" <> format_duration(stats)
+      )
+
+      report_runtime_only_checks(mod)
+    end
+
+    for {mod, {:cached, _key}} <- successes do
+      Mix.shell().info(
+        "#{IO.ANSI.green()}✓#{IO.ANSI.reset()} #{inspect(mod)} — " <>
+          "cached (unchanged since last pass; --force to re-run)"
       )
 
       report_runtime_only_checks(mod)
