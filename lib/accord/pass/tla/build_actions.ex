@@ -13,6 +13,9 @@ defmodule Accord.Pass.TLA.BuildActions do
   alias Accord.IR.Transition
   alias Accord.Pass.TLA.Expr
   alias Accord.TLA.{Action, ModelConfig, StateSpace}
+  alias Pentiment.Report
+
+  import Accord.Pass.Helpers, only: [maybe_add_source: 2, maybe_add_span_label: 3]
 
   @spec run(IR.t(), StateSpace.t(), ModelConfig.t()) ::
           {:ok, [Action.t()]} | {:error, [Pentiment.Report.t()]}
@@ -329,11 +332,28 @@ defmodule Accord.Pass.TLA.BuildActions do
          track_names
        )
        when not is_nil(ast) do
-    # Try to extract map update key-value pairs from the AST,
-    # resolving case expressions against the branch's reply type.
-    update_pairs = extract_map_update_pairs(ast, branch)
     span = Map.get(update, :span) || transition.block_span || transition.span
 
+    # Extract map update key-value pairs from the AST, resolving case and
+    # if expressions against the branch's reply type. An update body the
+    # extractor cannot understand must be an error: rendering the track as
+    # UNCHANGED would make every invariant over it hold vacuously in TLC
+    # while failing at runtime.
+    case extract_update(ast, branch) do
+      :identity ->
+        {:ok, %{}}
+
+      {:unsupported, offending} ->
+        {:error, [unsupported_update_report(ir, offending, span)]}
+
+      {:ok, update_pairs} ->
+        compile_update_pairs(ir, update_pairs, bindings, track_names, span)
+    end
+  end
+
+  defp build_track_primed(_, _, _, _, _), do: {:ok, %{}}
+
+  defp compile_update_pairs(ir, update_pairs, bindings, track_names, span) do
     results =
       Enum.map(update_pairs, fn {key, val_ast} ->
         key_str = Atom.to_string(key)
@@ -366,37 +386,123 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp build_track_primed(_, _, _, _, _), do: {:ok, %{}}
+  defp unsupported_update_report(ir, offending, span) do
+    Report.error(
+      "cannot compile update to TLA+: #{Macro.to_string(offending)}\n" <>
+        "the affected tracks would be modeled as unchanged, making every " <>
+        "invariant over them hold vacuously"
+    )
+    |> Report.with_code("E042")
+    |> Report.with_help(
+      "write updates as %{tracks | key: value}, optionally dispatched on the " <>
+        "reply via case/if; or compile with tla: :warn to skip verification"
+    )
+    |> maybe_add_source(ir.source_file)
+    |> maybe_add_span_label(span, "in this update")
+  end
 
-  # Extract key-value pairs from map update patterns like `%{tracks | key1: val, key2: val}`.
-  # Resolves case expressions against the branch's reply type.
-  defp extract_map_update_pairs(ast, branch) do
+  # Extracts update pairs from the update fn, resolving reply dispatch
+  # against the branch's reply type.
+  #
+  # Returns `{:ok, pairs}`, `:identity` (the update returns tracks
+  # unchanged — a legitimate no-op for this branch), or
+  # `{:unsupported, ast}` when the body has a shape the extractor cannot
+  # faithfully translate.
+  defp extract_update({:fn, _, [{:->, _, [args, body]}]}, branch) do
+    ctx = %{
+      reply_var: fn_arg_var(args, 1),
+      tracks_var: fn_arg_var(args, length(args) - 1)
+    }
+
+    extract_update_body(body, branch, ctx)
+  end
+
+  defp extract_update(ast, _branch), do: {:unsupported, ast}
+
+  defp extract_update_body(ast, branch, ctx) do
     case ast do
-      # fn ... -> body end
-      {:fn, _, [{:->, _, [_args, body]}]} ->
-        extract_map_update_pairs(body, branch)
-
       # %{var | key: val, ...}
       {:%{}, _, [{:|, _, [_base | updates]}]} ->
-        pairs_from_keyword(List.flatten(updates))
+        {:ok, pairs_from_keyword(List.flatten(updates))}
+
+      # Bare tracks variable — identity update.
+      {var, _, var_ctx} when is_atom(var) and is_atom(var_ctx) ->
+        if var == ctx.tracks_var do
+          :identity
+        else
+          {:unsupported, ast}
+        end
 
       # case reply do :ok -> body1; _ -> body2 end
       # Resolve against the branch's reply type.
       {:case, _, [_expr, [do: clauses]]} ->
-        resolve_case_for_branch(clauses, branch)
+        resolve_case_for_branch(clauses, branch, ctx)
+
+      # if reply == :ok, do: ..., else: ...
+      # Resolvable when the condition compares the reply to a literal.
+      {:if, _, [cond_ast, clauses]} ->
+        case resolve_if_condition(cond_ast, branch, ctx) do
+          {:resolved, true} ->
+            extract_update_body(Keyword.get(clauses, :do), branch, ctx)
+
+          {:resolved, false} ->
+            case Keyword.get(clauses, :else) do
+              nil -> :identity
+              else_body -> extract_update_body(else_body, branch, ctx)
+            end
+
+          :unknown ->
+            {:unsupported, ast}
+        end
 
       # Block — check last expression.
       {:__block__, _, exprs} ->
-        extract_map_update_pairs(List.last(exprs), branch)
+        extract_update_body(List.last(exprs), branch, ctx)
 
       _ ->
-        []
+        {:unsupported, ast}
     end
   end
 
+  defp fn_arg_var(args, idx) do
+    case Enum.at(args, idx) do
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> name
+      _ -> nil
+    end
+  end
+
+  # Statically resolves an if condition against the branch's reply type.
+  # Only literal comparison against the reply variable is resolvable; a
+  # condition on tracks depends on runtime state the extractor cannot see.
+  defp resolve_if_condition({:==, _, [left, right]}, branch, ctx) do
+    case {reply_var?(left, ctx), reply_var?(right, ctx)} do
+      {true, false} -> literal_equals_reply_type(right, branch.reply_type)
+      {false, true} -> literal_equals_reply_type(left, branch.reply_type)
+      _ -> :unknown
+    end
+  end
+
+  defp resolve_if_condition(_, _branch, _ctx), do: :unknown
+
+  defp reply_var?({name, _, var_ctx}, %{reply_var: name}) when is_atom(var_ctx), do: true
+  defp reply_var?(_, _), do: false
+
+  defp literal_equals_reply_type(literal, {:literal, value})
+       when is_atom(literal) or is_integer(literal) do
+    {:resolved, literal == value}
+  end
+
+  defp literal_equals_reply_type(literal, {:tagged, _tag, _inner})
+       when is_atom(literal) or is_integer(literal) do
+    # A tagged-tuple reply can never equal a bare literal.
+    {:resolved, false}
+  end
+
+  defp literal_equals_reply_type(_, _), do: :unknown
+
   # Finds the matching case clause for the branch's reply type
   # and extracts map update pairs from that arm's body.
-  defp resolve_case_for_branch(clauses, branch) do
+  defp resolve_case_for_branch(clauses, branch, ctx) do
     reply_type = branch.reply_type
 
     # Find the first matching clause.
@@ -407,7 +513,7 @@ defmodule Accord.Pass.TLA.BuildActions do
 
     case matching_clause do
       {:->, _, [[_pattern], body]} ->
-        extract_map_update_pairs(body, branch)
+        extract_update_body(body, branch, ctx)
 
       nil ->
         # No match found — try wildcard clause.
@@ -418,10 +524,10 @@ defmodule Accord.Pass.TLA.BuildActions do
 
         case wildcard do
           {:->, _, [[_pattern], body]} ->
-            extract_map_update_pairs(body, branch)
+            extract_update_body(body, branch, ctx)
 
           nil ->
-            []
+            {:unsupported, {:case, [], clauses}}
         end
     end
   end

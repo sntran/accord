@@ -420,6 +420,99 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert report.message =~ "where: constraint"
     end
 
+    defp update_ir(update_ast, opts \\ []) do
+      reply_type = Keyword.get(opts, :reply_type, {:literal, :ok})
+
+      %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :balance, type: :integer, default: 0}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: {:set, :_},
+                message_types: [:pos_integer],
+                message_arg_names: ["val"],
+                kind: :call,
+                branches: [%Branch{reply_type: reply_type, next_state: :ready}],
+                update: %{fun: fn _m, _r, t -> t end, ast: update_ast}
+              }
+            ]
+          }
+        }
+      }
+    end
+
+    test "update the extractor cannot understand reports E042" do
+      ast = quote(do: fn {:set, val}, _reply, tracks -> Map.put(tracks, :balance, val) end)
+
+      assert {:error, [report]} = run_actions(update_ir(ast))
+      assert report.code == "E042"
+      assert report.message =~ "Map.put"
+      assert report.message =~ "vacuously"
+    end
+
+    test "identity update is a legitimate no-op, not an error" do
+      ast = quote(do: fn _msg, _reply, tracks -> tracks end)
+
+      assert {:ok, [action]} = run_actions(update_ir(ast))
+      refute Map.has_key?(action.primed, "balance")
+    end
+
+    test "if resolvable against the reply literal takes the matching arm" do
+      ast =
+        quote(
+          do: fn {:set, val}, reply, tracks ->
+            if reply == :ok, do: %{tracks | balance: val}, else: tracks
+          end
+        )
+
+      assert {:ok, [action]} = run_actions(update_ir(ast))
+      assert action.primed["balance"] == "msg_val"
+    end
+
+    test "if resolving to a missing else is an identity update" do
+      ast =
+        quote(
+          do: fn {:set, val}, reply, tracks ->
+            if reply == :ok, do: %{tracks | balance: val}
+          end
+        )
+
+      ir = update_ir(ast, reply_type: {:literal, :error})
+
+      assert {:ok, [action]} = run_actions(ir)
+      refute Map.has_key?(action.primed, "balance")
+    end
+
+    test "if condition on tracks reports E042" do
+      ast =
+        quote(
+          do: fn {:set, val}, _reply, tracks ->
+            if tracks.balance > 0, do: %{tracks | balance: val}, else: tracks
+          end
+        )
+
+      assert {:error, [report]} = run_actions(update_ir(ast))
+      assert report.code == "E042"
+    end
+
+    test "case with no matching arm and no wildcard reports E042" do
+      ast =
+        quote(
+          do: fn {:set, val}, reply, tracks ->
+            case reply do
+              :other -> %{tracks | balance: val}
+            end
+          end
+        )
+
+      assert {:error, [report]} = run_actions(update_ir(ast))
+      assert report.code == "E042"
+    end
+
     test "errors from multiple sites are all collected" do
       guard_ast = quote(do: fn {:bet, chips}, tracks -> Enum.max([chips, 1]) > 0 end)
       update_ast = quote(do: fn {:bet, chips}, _reply, tracks -> %{tracks | balanse: chips} end)
