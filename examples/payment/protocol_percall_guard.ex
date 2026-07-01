@@ -11,7 +11,11 @@ defmodule Accord.Examples.Payment.ProtocolPercallGuard do
 
   Verified by `test/examples/payment_test.exs` against real TLC.
   """
-  use Accord.Protocol
+  # tla: :off — deliberately broken; not part of the project's verified
+  # surface. The TLC test compiles the spec from the IR directly and
+  # asserts the counterexample, so `mix accord.check` skips it instead
+  # of failing on a demo.
+  use Accord.Protocol, tla: :off
 
   initial :created
 

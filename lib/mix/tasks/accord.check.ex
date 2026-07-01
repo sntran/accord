@@ -14,6 +14,7 @@ defmodule Mix.Tasks.Accord.Check do
       mix accord.check --workers 4              # TLC parallelism
       mix accord.check --strict                 # fail protocols with tla: :off
       mix accord.check --no-deadlock            # disable deadlock checking
+      mix accord.check --dump                   # write raw TLC output on failure
 
   Protocols whose spec generation failed at compile time (`tla: :warn`)
   always count as failures: a protocol that cannot be checked is not
@@ -48,12 +49,13 @@ defmodule Mix.Tasks.Accord.Check do
 
     {opts, modules, _} =
       OptionParser.parse(args,
-        strict: [workers: :integer, strict: :boolean, deadlock: :boolean]
+        strict: [workers: :integer, strict: :boolean, deadlock: :boolean, dump: :boolean]
       )
 
     workers = Keyword.get(opts, :workers)
     strict? = Keyword.get(opts, :strict, false)
     deadlock? = Keyword.get(opts, :deadlock, true)
+    dump? = Keyword.get(opts, :dump, false)
 
     protocols =
       if modules == [] do
@@ -79,7 +81,7 @@ defmodule Mix.Tasks.Accord.Check do
 
       results =
         Enum.map(protocols, fn mod ->
-          {mod, check_protocol(mod, workers, strict?, deadlock?)}
+          {mod, check_protocol(mod, workers, strict?, deadlock?, dump?)}
         end)
 
       report_results(results)
@@ -111,7 +113,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   # -- Protocol Checking --
 
-  defp check_protocol(mod, workers, strict?, deadlock?) do
+  defp check_protocol(mod, workers, strict?, deadlock?, dump?) do
     with :ok <- ensure_loaded(mod),
          :ok <- ensure_protocol(mod),
          :ok <- ensure_tla_generated(mod, strict?),
@@ -119,7 +121,7 @@ defmodule Mix.Tasks.Accord.Check do
          :ok <- ensure_file(tla_path, :tla_not_found),
          :ok <- ensure_file(cfg_path, :cfg_not_found),
          {:ok, tlc_jar} <- require_tlc() do
-      run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?)
+      run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?)
     end
   end
 
@@ -174,7 +176,7 @@ defmodule Mix.Tasks.Accord.Check do
     end
   end
 
-  defp run_tlc(_mod, tla_path, cfg_path, tlc_jar, workers, deadlock?) do
+  defp run_tlc(_mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?) do
     tla_dir = Path.dirname(tla_path)
     tla_file = Path.basename(tla_path)
 
@@ -195,17 +197,30 @@ defmodule Mix.Tasks.Accord.Check do
     args = base_args ++ disable_deadlock ++ ["-cleanup", tla_file]
     args = if workers, do: args ++ ["-workers", Integer.to_string(workers)], else: args
 
-    case System.cmd("java", args, cd: tla_dir, stderr_to_stdout: true) do
-      {output, 0} ->
-        TLCParser.parse(output)
+    started = System.monotonic_time(:millisecond)
+    # TLC returns non-zero on violations; both paths parse the output.
+    {output, _exit_code} = System.cmd("java", args, cd: tla_dir, stderr_to_stdout: true)
+    duration_ms = System.monotonic_time(:millisecond) - started
 
-      {output, _exit_code} ->
-        # TLC returns non-zero on violations.
-        TLCParser.parse(output)
+    case TLCParser.parse(output) do
+      {:ok, stats} ->
+        {:ok, Map.put(stats, :duration_ms, duration_ms)}
+
+      {:error, violation, stats} ->
+        if dump?, do: dump_tlc_output(tla_path, output)
+        {:error, violation, Map.put(stats, :duration_ms, duration_ms)}
     end
   rescue
     e in ErlangError ->
       {:error, :java_not_found, inspect(e)}
+  end
+
+  # Raw TLC output next to the spec, for digging past the parsed report.
+  defp dump_tlc_output(tla_path, output) do
+    log_path = Path.rootname(tla_path) <> ".tlc.log"
+    File.write!(log_path, output)
+    Mix.shell().info("#{IO.ANSI.faint()}  raw TLC output: #{log_path}#{IO.ANSI.reset()}")
+    :ok
   end
 
   # -- Result Reporting --
@@ -226,8 +241,9 @@ defmodule Mix.Tasks.Accord.Check do
     for {mod, {:ok, stats}} <- successes do
       Mix.shell().info(
         "#{IO.ANSI.green()}✓#{IO.ANSI.reset()} #{inspect(mod)} — " <>
-          "#{stats.distinct_states} states explored" <>
-          if(stats.depth, do: ", depth #{stats.depth}", else: "")
+          "#{stats.distinct_states} distinct states (#{stats.states_generated} generated" <>
+          if(stats.depth, do: ", depth #{stats.depth}", else: "") <>
+          ")" <> format_duration(stats)
       )
 
       report_runtime_only_checks(mod)
@@ -292,6 +308,9 @@ defmodule Mix.Tasks.Accord.Check do
   defp report_failure(mod, {:error, reason, detail}) do
     Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{inspect(mod)} — #{reason}: #{detail}")
   end
+
+  defp format_duration(%{duration_ms: ms}) when is_integer(ms), do: " in #{ms}ms"
+  defp format_duration(_stats), do: ""
 
   # A green check must never silently imply that runtime-only checks
   # (ordered, precedence, keyed correspondence) were model checked.
