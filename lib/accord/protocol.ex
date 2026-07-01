@@ -108,6 +108,7 @@ defmodule Accord.Protocol do
           property: 2,
           model: 1,
           const: 2,
+          state_timeout: 2,
           in_state: 1
         ]
 
@@ -217,20 +218,24 @@ defmodule Accord.Protocol do
     quote do
       Module.put_attribute(__MODULE__, :accord_current_state, unquote(name))
       Module.put_attribute(__MODULE__, :accord_current_transitions, [])
+      Module.put_attribute(__MODULE__, :accord_current_state_timeout, nil)
 
       unquote(block)
 
       transitions =
         Module.get_attribute(__MODULE__, :accord_current_transitions) |> Enum.reverse()
 
+      state_timeout = Module.get_attribute(__MODULE__, :accord_current_state_timeout)
+
       Module.put_attribute(
         __MODULE__,
         :accord_states,
-        {unquote(name), false, transitions, unquote(span)}
+        {unquote(name), false, transitions, state_timeout, unquote(span)}
       )
 
       Module.delete_attribute(__MODULE__, :accord_current_state)
       Module.delete_attribute(__MODULE__, :accord_current_transitions)
+      Module.delete_attribute(__MODULE__, :accord_current_state_timeout)
     end
   end
 
@@ -242,7 +247,7 @@ defmodule Accord.Protocol do
       Module.put_attribute(
         __MODULE__,
         :accord_states,
-        {unquote(name), unquote(terminal), [], unquote(span)}
+        {unquote(name), unquote(terminal), [], nil, unquote(span)}
       )
     end
   end
@@ -257,20 +262,77 @@ defmodule Accord.Protocol do
     quote do
       Module.put_attribute(__MODULE__, :accord_current_state, unquote(name))
       Module.put_attribute(__MODULE__, :accord_current_transitions, [])
+      Module.put_attribute(__MODULE__, :accord_current_state_timeout, nil)
 
       unquote(block)
 
       transitions =
         Module.get_attribute(__MODULE__, :accord_current_transitions) |> Enum.reverse()
 
+      state_timeout = Module.get_attribute(__MODULE__, :accord_current_state_timeout)
+
       Module.put_attribute(
         __MODULE__,
         :accord_states,
-        {unquote(name), unquote(terminal), transitions, unquote(span)}
+        {unquote(name), unquote(terminal), transitions, state_timeout, unquote(span)}
       )
 
       Module.delete_attribute(__MODULE__, :accord_current_state)
       Module.delete_attribute(__MODULE__, :accord_current_transitions)
+      Module.delete_attribute(__MODULE__, :accord_current_state_timeout)
+    end
+  end
+
+  @doc """
+  Arms a state timeout: if the session is still in this state after the
+  given number of milliseconds, the monitor transitions to the target
+  state on its own — no message exchange.
+
+      state :open do
+        state_timeout 30_000, goto: :half_open
+        on :request, reply: {:rejected, :circuit_open}, goto: :open
+      end
+
+  Entering the state (from a different state) arms the timer; leaving it
+  cancels; self-loop transitions keep it running. In the untimed TLA+
+  model the timeout is an internal action that may fire whenever the
+  state is occupied, weakly fair under liveness checking — a physical
+  timer always eventually fires, which is exactly the assumption that
+  discharges `in_state(:open) ~> in_state(:half_open)`.
+  """
+  defmacro state_timeout(milliseconds, opts) do
+    target = Keyword.fetch!(opts, :goto)
+    caller_file = __CALLER__.file
+    caller_line = __CALLER__.line
+
+    milliseconds =
+      Accord.Protocol.Const.substitute(
+        milliseconds,
+        __CALLER__.module,
+        caller_file,
+        caller_line
+      )
+
+    quote do
+      if Module.get_attribute(__MODULE__, :accord_current_state, nil) == nil do
+        raise CompileError,
+          description: "state_timeout must appear inside a state block",
+          file: unquote(caller_file),
+          line: unquote(caller_line)
+      end
+
+      if Module.get_attribute(__MODULE__, :accord_current_state_timeout) != nil do
+        raise CompileError,
+          description: "duplicate state_timeout — a state arms at most one timer",
+          file: unquote(caller_file),
+          line: unquote(caller_line)
+      end
+
+      Module.put_attribute(
+        __MODULE__,
+        :accord_current_state_timeout,
+        {unquote(milliseconds), unquote(target)}
+      )
     end
   end
 
@@ -956,8 +1018,15 @@ defmodule Accord.Protocol do
     end
 
     states =
-      for {name, terminal, transitions, span} <- states_raw, into: %{} do
-        {name, %State{name: name, terminal: terminal, transitions: transitions, span: span}}
+      for {name, terminal, transitions, state_timeout, span} <- states_raw, into: %{} do
+        {name,
+         %State{
+           name: name,
+           terminal: terminal,
+           transitions: transitions,
+           state_timeout: state_timeout,
+           span: span
+         }}
       end
 
     ir = %IR{
@@ -1001,10 +1070,16 @@ defmodule Accord.Protocol do
     {:ok, table} = Accord.Pass.Monitor.BuildTransitionTable.run(ir)
     {:ok, track_init} = Accord.Pass.Monitor.BuildTrackInit.run(ir)
 
+    state_timeouts =
+      for {name, %{state_timeout: {ms, target}}} <- ir.states, into: %{} do
+        {name, {ms, target}}
+      end
+
     %Accord.Monitor.Compiled{
       ir: ir,
       transition_table: table,
-      track_init: track_init
+      track_init: track_init,
+      state_timeouts: state_timeouts
     }
   end
 

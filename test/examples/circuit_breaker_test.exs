@@ -8,32 +8,32 @@ defmodule Accord.Examples.CircuitBreakerTest do
   alias Accord.Test.TLACheck
 
   describe "conformance" do
-    test "trip, reject, probe, recover — no violations" do
+    test "trip and reject — the cooldown then fires on its own" do
       {:ok, server} = Server.start_link()
 
       {:ok, monitor} =
         Protocol.Monitor.start_link(upstream: server, violation_policy: :crash)
 
-      Server.push_outcomes(server, [:error, :error, :error, :ok])
+      Server.push_outcomes(server, [:error, :error, :error])
 
       assert :error = Monitor.call(monitor, :request)
       assert :error = Monitor.call(monitor, :request)
       assert :tripped = Monitor.call(monitor, :request)
       assert {:rejected, :circuit_open} = Monitor.call(monitor, :request)
-      assert :probing = Monitor.call(monitor, :attempt_reset)
-      assert :ok = Monitor.call(monitor, :request)
-      assert {:closed, _} = :sys.get_state(monitor)
+      assert {:open, _} = :sys.get_state(monitor)
+      # The 30s state_timeout is armed; firing is exercised with a short
+      # timer in test/accord/monitor/state_timeout_test.exs.
     end
   end
 
   describe "blame" do
-    test "client probing a closed breaker is client blame" do
+    test "an unknown client message is client blame" do
       {:ok, server} = Server.start_link()
 
       {:ok, monitor} =
         Protocol.Monitor.start_link(upstream: server, violation_policy: :reject)
 
-      assert {:accord_violation, violation} = Monitor.call(monitor, :attempt_reset)
+      assert {:accord_violation, violation} = Monitor.call(monitor, :force_reset)
       assert violation.blame == :client
       assert violation.kind == :invalid_message
     end

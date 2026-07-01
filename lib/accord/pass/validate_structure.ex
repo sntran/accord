@@ -24,6 +24,7 @@ defmodule Accord.Pass.ValidateStructure do
       |> check_goto_targets(ir)
       |> check_terminal_no_transitions(ir)
       |> check_events_branchless(ir)
+      |> check_state_timeouts(ir)
 
     case errors do
       [] -> {:ok, ir}
@@ -111,6 +112,60 @@ defmodule Accord.Pass.ValidateStructure do
       else
         acc
       end
+    end)
+  end
+
+  # State timeouts: the target must exist (E002), differ from the state
+  # itself (firing into the same state would neither cancel nor re-arm
+  # the timer), and terminal states arm no timers (E005).
+  defp check_state_timeouts(errors, %IR{states: states} = ir) do
+    state_names = Map.keys(states)
+
+    Enum.reduce(states, errors, fn
+      {_name, %{state_timeout: nil}}, acc ->
+        acc
+
+      {name, %{state_timeout: {_ms, target}} = state}, acc ->
+        cond do
+          state.terminal ->
+            report =
+              Report.error("terminal state :#{name} cannot arm a state_timeout")
+              |> Report.with_code("E005")
+              |> maybe_add_source(ir.source_file)
+              |> maybe_add_span_label(state.span, "declared as terminal here")
+
+            [report | acc]
+
+          target == name ->
+            report =
+              Report.error("state_timeout in :#{name} must target a different state")
+              |> Report.with_code("E005")
+              |> Report.with_help(
+                "a timeout firing into the same state would neither cancel nor re-arm"
+              )
+              |> maybe_add_source(ir.source_file)
+              |> maybe_add_span_label(state.span, "state defined here")
+
+            [report | acc]
+
+          target not in state_names ->
+            report =
+              Report.error("undefined state reference :#{target}")
+              |> Report.with_code("E002")
+              |> maybe_add_source(ir.source_file)
+              |> maybe_add_span_label(
+                state.span,
+                "state_timeout target :#{target} is not defined"
+              )
+              |> Report.with_help(
+                "defined states are: #{Enum.map_join(state_names, ", ", &":#{&1}")}"
+              )
+
+            [report | acc]
+
+          true ->
+            acc
+        end
     end)
   end
 

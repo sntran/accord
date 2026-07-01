@@ -229,7 +229,8 @@ defmodule Accord.Pass.ValidateProperties do
   def warnings(%IR{} = ir) do
     for property <- ir.properties,
         %IR.Check{kind: :liveness} = check <- property.checks,
-        Map.get(check.spec, :assuming) == nil do
+        Map.get(check.spec, :assuming) == nil,
+        not timeout_discharges?(ir, check.spec.trigger) do
       Report.warning(
         "liveness :#{property.name} has no assuming: — it is checked under blanket " <>
           "weak fairness, where any client loop or reachable terminal state fails it"
@@ -243,6 +244,14 @@ defmodule Accord.Pass.ValidateProperties do
       )
     end
   end
+
+  # A state timeout on the trigger state discharges the fairness caveat:
+  # the timeout's automatic weak fairness forces the state to be left.
+  defp timeout_discharges?(ir, {:in_state, state}) do
+    match?(%{state_timeout: {_ms, _target}}, Map.get(ir.states, state))
+  end
+
+  defp timeout_discharges?(_ir, _trigger), do: false
 
   defp validate_precedence_state(errors, state, role, check, ir, state_names) do
     if state in state_names do

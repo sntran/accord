@@ -9,10 +9,13 @@ flaky downstream.
 - Reply-shape-driven branching: `:ok` / `:error` / `:tripped` pick the next
   state, refined by `where:` constraints on the failure counter.
 - A `failures` track with an inline model domain (`domain: 0..4`).
-- Local invariant (`threshold_respected`), `forbidden` (counter overshoot),
-  `precedence` (no probe without a trip), `reachable`, and liveness with
-  per-action fairness (`assuming: [:attempt_reset]` — "someone keeps
-  polling", the obligation a future state-timeout feature would discharge).
+- A protocol constant (`const :threshold, 3`) shared by the constraints
+  and the invariant — declared once, substituted at compile time.
+- A state timeout (`state_timeout 30_000, goto: :half_open`): the
+  cooldown fires on its own, and its automatic weak fairness discharges
+  the `breaker_recovers` liveness property with no `assuming:` needed.
+- Local invariant (`threshold_respected`), `forbidden` (counter
+  overshoot), `precedence` (no probe without a trip), and `reachable`.
 
 ## What TLC finds
 

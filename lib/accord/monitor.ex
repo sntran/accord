@@ -115,7 +115,7 @@ defmodule Accord.Monitor do
       visited_states: MapSet.new([compiled.ir.initial])
     }
 
-    {:ok, compiled.ir.initial, data}
+    {:ok, compiled.ir.initial, data, arm_state_timeout(data, nil, compiled.ir.initial)}
   end
 
   @impl true
@@ -132,6 +132,11 @@ defmodule Accord.Monitor do
   # Server-push event
   def handle_event(:cast, {:accord_event, message}, state, data) do
     handle_push_event(message, state, data)
+  end
+
+  # State timeout expiry: the monitor transitions on its own.
+  def handle_event(:state_timeout, {:accord_after, target}, state, data) do
+    apply_internal_transition(target, state, data)
   end
 
   # Liveness timer expiry.
@@ -294,13 +299,20 @@ defmodule Accord.Monitor do
       {:ok, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
-        timer_actions = liveness_actions(updated_data, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, prev_state, next_state)
+
         {:next_state, next_state, updated_data, [{:reply, from, reply} | timer_actions]}
 
       {:violation, violation, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
-        timer_actions = liveness_actions(updated_data, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, prev_state, next_state)
 
         handle_property_violation(
           violation,
@@ -310,6 +322,47 @@ defmodule Accord.Monitor do
           updated_data,
           timer_actions
         )
+    end
+  end
+
+  # -- State Timeouts --
+
+  # The timeout fired while still in `state`: transition to the target
+  # with no message exchange. Tracks are untouched; properties are
+  # checked with the pseudo-message :__state_timeout__ (a tag no
+  # correspondence or ordering matches).
+  defp apply_internal_transition(target, state, data) do
+    case check_properties(:__state_timeout__, state, target, data.tracks, data.tracks, data) do
+      {:ok, updated_data} ->
+        updated_data = track_visited_state(updated_data, target)
+
+        timer_actions =
+          liveness_actions(updated_data, target) ++
+            arm_state_timeout(updated_data, state, target)
+
+        {:next_state, target, updated_data, timer_actions}
+
+      {:violation, violation, updated_data} ->
+        updated_data = track_visited_state(updated_data, target)
+
+        timer_actions =
+          liveness_actions(updated_data, target) ++
+            arm_state_timeout(updated_data, state, target)
+
+        handle_event_property_violation(violation, target, updated_data, timer_actions)
+    end
+  end
+
+  # Arms the target state's timer on real entry. Self-loops keep the
+  # running timer (gen_statem only cancels a state_timeout when the
+  # state value changes, and we do not re-arm), so a busy state cannot
+  # starve its own timeout by resetting it.
+  defp arm_state_timeout(_data, prev_state, prev_state), do: []
+
+  defp arm_state_timeout(data, _prev_state, next_state) do
+    case Map.get(data.compiled.state_timeouts, next_state) do
+      nil -> []
+      {ms, target} -> [{:state_timeout, ms, {:accord_after, target}}]
     end
   end
 
@@ -399,14 +452,22 @@ defmodule Accord.Monitor do
       {:ok, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
-        timer_actions = liveness_actions(updated_data, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, state, next_state)
+
         forward_event(data.downstream, message)
         {:next_state, next_state, updated_data, timer_actions}
 
       {:violation, violation, updated_data} ->
         updated_data = %{updated_data | tracks: new_tracks}
         updated_data = track_visited_state(updated_data, next_state)
-        timer_actions = liveness_actions(updated_data, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, state, next_state)
+
         # Like all property violations, the (valid) event is still
         # forwarded — the transition succeeded.
         forward_event(data.downstream, message)

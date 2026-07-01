@@ -48,7 +48,7 @@ defmodule Accord.Examples.CircuitBreaker.ProtocolStuckCounter do
   end
 
   state :open do
-    on :attempt_reset, reply: :probing, goto: :half_open
+    state_timeout 30_000, goto: :half_open
     on :request, reply: {:rejected, :circuit_open}, goto: :open
   end
 

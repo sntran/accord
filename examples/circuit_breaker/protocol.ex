@@ -54,10 +54,10 @@ defmodule Accord.Examples.CircuitBreaker.Protocol do
   end
 
   state :open do
-    # A cooldown timer in a real breaker; a client poll until accord has
-    # state timeouts. The liveness property's assuming: encodes exactly
-    # this "someone keeps polling" obligation.
-    on :attempt_reset, reply: :probing, goto: :half_open
+    # The cooldown: after 30s in :open the breaker probes on its own —
+    # no client poll required. The timeout's automatic weak fairness is
+    # what discharges the breaker_recovers liveness property.
+    state_timeout 30_000, goto: :half_open
 
     on :request, reply: {:rejected, :circuit_open}, goto: :open
   end
@@ -91,7 +91,7 @@ defmodule Accord.Examples.CircuitBreaker.Protocol do
   end
 
   property :breaker_recovers do
-    liveness in_state(:open), leads_to: in_state(:half_open), assuming: [:attempt_reset]
+    liveness in_state(:open), leads_to: in_state(:half_open)
   end
 
   property :probe_reachable do

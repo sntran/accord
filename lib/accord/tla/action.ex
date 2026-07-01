@@ -16,6 +16,7 @@ defmodule Accord.TLA.Action do
           existential_vars: [{String.t(), String.t()}],
           primed: %{String.t() => String.t()},
           unchanged: [String.t()],
+          internal: boolean(),
           comment: String.t() | nil
         }
 
@@ -29,6 +30,9 @@ defmodule Accord.TLA.Action do
     preconditions: [],
     existential_vars: [],
     primed: %{},
-    unchanged: []
+    unchanged: [],
+    # Monitor-initiated (state timeouts): weakly fair under liveness
+    # checking, because a physical timer always eventually fires.
+    internal: false
   ]
 end

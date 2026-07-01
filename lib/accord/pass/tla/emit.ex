@@ -211,7 +211,18 @@ defmodule Accord.Pass.TLA.Emit do
       end)
       |> Enum.uniq()
 
-    blanket ++ per_action
+    # State timeouts are physical timers: whenever liveness is being
+    # checked, an occupied state's timeout eventually fires.
+    internal =
+      if liveness_props == [] do
+        []
+      else
+        actions
+        |> Enum.filter(& &1.internal)
+        |> Enum.map(&"WF_vars(#{&1.name})")
+      end
+
+    blanket ++ per_action ++ internal
   end
 
   defp liveness?(prop) do

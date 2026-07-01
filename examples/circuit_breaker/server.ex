@@ -63,10 +63,6 @@ defmodule Accord.Examples.CircuitBreaker.Server do
     end
   end
 
-  def handle_call(:attempt_reset, _from, %{state: :open} = state) do
-    {:reply, :probing, %{state | state: :half_open}}
-  end
-
   def handle_call(:shutdown, _from, state) do
     {:reply, :down, state}
   end

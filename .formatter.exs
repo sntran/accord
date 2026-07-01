@@ -13,6 +13,7 @@ protocol_macros = [
   property: 2,
   model: 1,
   const: 2,
+  state_timeout: 2,
   # Accord.Protocol.ModelBlock (inside `model ... do` blocks)
   sessions: 1,
   domain: 2,

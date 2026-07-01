@@ -74,6 +74,12 @@ defmodule Accord.Pass.ValidateReachability do
 
           branch_targets ++ event_targets
         end)
+        |> Kernel.++(
+          case state.state_timeout do
+            {_ms, target} -> [target]
+            nil -> []
+          end
+        )
         |> Enum.reject(&Map.has_key?(visited, &1))
 
       bfs(next_states ++ rest, visited, states, anystate)

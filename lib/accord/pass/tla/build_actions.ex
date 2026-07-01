@@ -41,17 +41,20 @@ defmodule Accord.Pass.TLA.BuildActions do
             state.transitions ++ ir.anystate
           end
 
-        Enum.flat_map(transitions, fn transition ->
-          build_actions_for_transition(
-            ir,
-            state_name,
-            transition,
-            state_space,
-            config,
-            all_var_names,
-            track_names
-          )
-        end)
+        transition_results =
+          Enum.flat_map(transitions, fn transition ->
+            build_actions_for_transition(
+              ir,
+              state_name,
+              transition,
+              state_space,
+              config,
+              all_var_names,
+              track_names
+            )
+          end)
+
+        transition_results ++ build_timeout_action(state_name, state, state_space, all_var_names)
       end)
 
     errors =
@@ -322,6 +325,45 @@ defmodule Accord.Pass.TLA.BuildActions do
       unchanged: unchanged,
       comment: "cast #{tag} in #{source}"
     }
+  end
+
+  # A state timeout is an internal action: in the untimed model it may
+  # fire whenever the state is occupied. Tracks are untouched.
+  defp build_timeout_action(_state_name, %{state_timeout: nil}, _ss, _vars), do: []
+
+  defp build_timeout_action(
+         state_name,
+         %{state_timeout: {_ms, target_state}},
+         state_space,
+         all_var_names
+       ) do
+    sessions = state_space.sessions
+    source = Atom.to_string(state_name)
+    target = Atom.to_string(target_state)
+
+    primed = %{"state" => Sessions.assign(sessions, "state", ~s("#{target}"))}
+
+    unchanged =
+      all_var_names
+      |> MapSet.difference(MapSet.new(Map.keys(primed)))
+      |> MapSet.to_list()
+      |> Enum.sort()
+
+    [
+      {:ok,
+       %Action{
+         name: "After#{camelize(source)}To#{camelize(target)}",
+         source_state: source,
+         target_state: target,
+         message_tag: "__state_timeout__",
+         preconditions: [~s(#{Sessions.read(sessions, "state")} = "#{source}")],
+         existential_vars: session_existentials(sessions),
+         primed: primed,
+         unchanged: unchanged,
+         internal: true,
+         comment: "state timeout: #{source} to #{target}"
+       }}
+    ]
   end
 
   # A pushed event is one more action interleaved with client calls —
