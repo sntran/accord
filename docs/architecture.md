@@ -369,10 +369,12 @@ searching the source file.
 Validation errors use a code scheme to identify the class of problem. This makes
 it possible to search for documentation or suppress specific checks.
 
-**Structure errors (E001-E003):**
+**Structure errors (E001-E005):**
 - E001 -- initial state is not defined.
-- E002 -- undefined state reference (goto target).
+- E002 -- undefined state reference (goto, event, or state_timeout target).
 - E003 -- terminal state has transitions.
+- E004 -- event transition declares replies or branches.
+- E005 -- state_timeout on a terminal state or targeting its own state.
 
 **Type errors (E010-E011):**
 - E010 -- track default does not conform to declared type.

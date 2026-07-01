@@ -8,12 +8,14 @@ Accord lets you declare a two-party protocol (states, transitions with typed rep
 
 1. Builds an intermediate representation (IR) from the DSL.
 2. Validates the IR through a pipeline of passes (errors E001–E060, warnings W001–W005).
-3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime, with blame derived from message direction (`:client` | `:server` | `:property`, labeled with declared role names).
-4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks and `exclusive`).
+3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime, with blame derived from message direction (`:client` | `:server` | `:property`, labeled with declared role names). Monitors can arm `state_timeout` transitions and capture traces (`trace_sink:`).
+4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks and `exclusive`). Captured runtime traces replay against the spec (`Accord.TLA.TraceSpec`, ADR-010).
+
+`mix accord.check` caches passes by content hash (`--force` bypasses), reports stats, dumps raw TLC output (`--dump`), and checks hand-written extension modules (`--extra`). Protocol constants (`const :name, value`) substitute at compile time into every captured expression.
 
 ## Architecture
 
-For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–009); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md), including the deferred roadmap (protocol constants, state timeouts, check caching, trace validation, version compatibility).
+For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–010); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md). The design review's deferred roadmap has since landed (trace validation, check caching, const, state timeouts, --extra); remaining future work is Accord.Compat versioning, Apalache, exerciser trace sampling, and cross-session per-track comparison checks.
 
 The IR (`Accord.IR`) is the single source of truth. Two pipelines flow from it:
 
