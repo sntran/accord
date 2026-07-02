@@ -23,7 +23,8 @@ defmodule Accord.Test.ProtocolExerciser do
 
   alias Accord.Monitor
   alias Accord.Monitor.TransitionTable
-  alias Accord.Test.{ExerciserFailure, TypeGen, ViolationCollector}
+  alias Accord.Test.{ExerciserFailure, TraceCheck, TypeGen, ViolationCollector}
+  alias Accord.Trace
 
   @type command ::
           {:valid, non_neg_integer()}
@@ -42,6 +43,15 @@ defmodule Accord.Test.ProtocolExerciser do
   - `:server_args` — args passed to `server.start_link/1`. Default `[]`.
   - `:numtests` — number of PropCheck test cases. Default `200`.
   - `:max_commands` — max commands per test case. Default `30`.
+  - `:trace_check` — options forwarded to
+    `Accord.Test.TraceCheck.assert_replays/3` (must include `:tmp_dir`).
+    When set, every run captures a trace of applied transitions and the
+    longest one is replayed against the generated TLA+ spec after the
+    property passes — one TLC run per `run/1` call, not per iteration,
+    so the JVM cost stays bounded (ADR-010). Requires `tla2tools.jar`;
+    gate the test with `@tag :tlc`. Payload and track values must be
+    renderable as TLA+ literals (integers, atoms, strings — see
+    `Accord.TLA.TraceSpec`). Default `nil` (off).
   """
   @spec run(keyword()) :: :ok | no_return()
   # PropCheck's forall macro produces an opaque :proper.outer_test() that
@@ -53,20 +63,22 @@ defmodule Accord.Test.ProtocolExerciser do
     server_args = Keyword.get(opts, :server_args, [])
     numtests = Keyword.get(opts, :numtests, 200)
     max_commands = Keyword.get(opts, :max_commands, 30)
+    trace_check = Keyword.get(opts, :trace_check)
 
     compiled = protocol.__compiled__()
 
-    # ETS table to preserve failure across shrinking runs.
+    # ETS table to preserve failure and the sampled trace across runs.
     failure_table = :ets.new(:exerciser_failure, [:set, :public])
 
     result =
       quickcheck(
         forall cmds <- gen_commands(max_commands) do
-          case execute_and_verify(compiled, server, server_args, cmds) do
-            true ->
+          case execute_and_verify(compiled, server, server_args, cmds, trace_check != nil) do
+            {true, events} ->
+              record_longest_trace(failure_table, events)
               true
 
-            {:failure, failure} ->
+            {{:failure, failure}, _events} ->
               :ets.insert(failure_table, {:last_failure, failure})
               false
           end
@@ -86,7 +98,9 @@ defmodule Accord.Test.ProtocolExerciser do
       end
     end
 
+    sampled = sampled_trace(failure_table)
     :ets.delete(failure_table)
+    check_sampled_trace(protocol, sampled, trace_check)
     :ok
   end
 
@@ -123,15 +137,18 @@ defmodule Accord.Test.ProtocolExerciser do
 
   # -- Execution --
 
-  defp execute_and_verify(compiled, server, server_args, commands) do
+  defp execute_and_verify(compiled, server, server_args, commands, capture?) do
     ViolationCollector.init()
+
+    {trace_agent, trace_sink} = start_trace_capture(capture?)
 
     {:ok, upstream} = apply(server, :start_link, [server_args])
 
     {:ok, monitor} =
       Monitor.start_link(compiled,
         upstream: upstream,
-        violation_policy: {ViolationCollector, :handle}
+        violation_policy: {ViolationCollector, :handle},
+        trace_sink: trace_sink
       )
 
     table = compiled.transition_table
@@ -140,22 +157,81 @@ defmodule Accord.Test.ProtocolExerciser do
     # Check for property violations.
     prop_violations = ViolationCollector.property_violations()
 
-    # Cleanup.
+    # Cleanup. The monitor stops before the trace agent so a straggling
+    # state timeout cannot emit into a dead sink.
     if Process.alive?(monitor), do: GenServer.stop(monitor, :normal, 100)
     if Process.alive?(upstream), do: GenServer.stop(upstream, :normal, 100)
 
+    events = collect_trace(trace_agent)
+
     failing_step = Enum.find(steps, &(not &1.passed))
 
-    if failing_step == nil and prop_violations == [] do
-      true
-    else
-      {:failure,
-       ExerciserFailure.exception(
-         steps: steps,
-         property_violations: prop_violations,
-         compiled: compiled
-       )}
+    result =
+      if failing_step == nil and prop_violations == [] do
+        true
+      else
+        {:failure,
+         ExerciserFailure.exception(
+           steps: steps,
+           property_violations: prop_violations,
+           compiled: compiled
+         )}
+      end
+
+    {result, events}
+  end
+
+  # -- Trace sampling --
+
+  # Rejected messages apply no transition and emit no event, so every
+  # captured trace is a genuine behavior of the protocol; the longest
+  # one covers the most translated guards and updates per TLC run.
+  defp start_trace_capture(false), do: {nil, nil}
+
+  defp start_trace_capture(true) do
+    {:ok, agent, sink} = Trace.collector()
+    {agent, sink}
+  end
+
+  defp collect_trace(nil), do: []
+
+  defp collect_trace(agent) do
+    events = Trace.collected(agent)
+    :ok = Agent.stop(agent)
+    events
+  end
+
+  defp record_longest_trace(_table, []), do: :ok
+
+  defp record_longest_trace(table, events) do
+    case :ets.lookup(table, :best_trace) do
+      [{:best_trace, best}] when length(best) >= length(events) ->
+        :ok
+
+      _ ->
+        :ets.insert(table, {:best_trace, events})
+        :ok
     end
+  end
+
+  defp sampled_trace(table) do
+    case :ets.lookup(table, :best_trace) do
+      [{:best_trace, events}] -> events
+      [] -> []
+    end
+  end
+
+  defp check_sampled_trace(_protocol, _events, nil), do: :ok
+
+  defp check_sampled_trace(_protocol, [], _trace_check_opts) do
+    raise ExUnit.AssertionError,
+      message:
+        "trace_check was requested but no successful run applied any " <>
+          "transition — nothing to replay, so nothing was validated"
+  end
+
+  defp check_sampled_trace(protocol, events, trace_check_opts) do
+    TraceCheck.assert_replays(protocol, events, trace_check_opts)
   end
 
   defp execute_commands([], _monitor, _table, acc), do: Enum.reverse(acc)

@@ -221,6 +221,29 @@ defmodule Accord.Property.ExerciserTest do
     end
   end
 
+  # -- Trace sampling --
+
+  describe "trace sampling" do
+    @describetag :tlc
+    @describetag :tmp_dir
+
+    @tag :property
+    test "the longest successful trace replays against the generated spec",
+         %{tmp_dir: tmp_dir} do
+      # One TLC run per exerciser call: the sampled trace of applied
+      # transitions must be a behavior of the spec, making every
+      # exerciser session double as a conformance oracle for accord's
+      # own TLA+ translation (ADR-010).
+      ProtocolExerciser.run(
+        protocol: Accord.Test.Counter.Protocol,
+        server: Accord.Test.Counter.Server,
+        numtests: 30,
+        max_commands: 15,
+        trace_check: [tmp_dir: tmp_dir]
+      )
+    end
+  end
+
   # -- Non-conforming implementation tests --
 
   describe "non-conforming implementations" do

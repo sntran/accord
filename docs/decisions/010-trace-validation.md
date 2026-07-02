@@ -44,6 +44,9 @@ fabricated stale-token checkout is refused by the `where:` fencing constraint in
 - Correspondence counters are not pinned by the replay; they evolve through `Next` unconstrained
   by the recording, which is sound (any consistent evolution suffices).
 - Wiring replay into every ProtocolExerciser iteration is deliberately not done: each TLC run
-  pays JVM startup (~0.5s), and the exerciser runs hundreds of sequences. The intended pattern
-  is one representative captured session per protocol in the `:tlc`-gated suite; sampling
-  exerciser traces is follow-on work.
+  pays JVM startup (~0.5s), and the exerciser runs hundreds of sequences. Instead the
+  exerciser samples: `trace_check:` captures a trace per run and replays only the longest
+  successful one — a single TLC run per `run/1` call. Rejected messages apply no transition
+  and emit no event, so every sampled trace is a genuine behavior; longest means the most
+  translated guards and updates covered per JVM start. A run that applied no transition at
+  all raises rather than silently validating nothing.
