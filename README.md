@@ -128,6 +128,11 @@ produces the two-sessions-both-locked counterexample — with fence tokens
 still perfectly monotonic. Fencing alone is not a lock, and now that fact is
 mechanical.
 
+Per-session tracks get the dual check: `distinct :holding, empty: 0` states
+that no two sessions ever hold the same lease. The fencing constraint makes
+it provable; without the constraint TLC hands both workers token 1 in two
+steps.
+
 Shared tracks are ghost state: verified by TLC, observed per-session at
 runtime (the server is the ground truth). The asymmetry is declared, never
 silent — see `docs/architecture.md` for the full runtime-vs-TLC table.
@@ -182,6 +187,23 @@ output.
 
 TLC requires Java and `tla2tools.jar`. Set the `TLA2TOOLS_JAR` environment
 variable, place it at `~/.tla/tla2tools.jar`, or in the project root.
+
+## Rolling upgrades
+
+Servers and clients deploy at different times; for a window, old clients
+talk to the new contract. `mix accord.compat` makes that window a CI
+property instead of a hope:
+
+```bash
+mix accord.compat --snapshot MyApp.Protocol priv/protocol-v1.ir   # on release
+mix accord.compat MyApp.Protocol --against priv/protocol-v1.ir    # on every PR
+```
+
+The check is a static simulation over both contracts: arguments may only
+widen, replies may only narrow, server pushes must stay understood, and
+autonomous movement (state timeouts) must not change (C001–C010; guard
+changes are advisories). The snapshot is the released contract — it cannot
+drift from what shipped.
 
 ## Installation
 

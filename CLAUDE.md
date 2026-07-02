@@ -7,15 +7,15 @@ Protocol contracts for Elixir in the lineage of Joe Armstrong's UBF (2002): one 
 Accord lets you declare a two-party protocol (states, transitions with typed replies, server-push events, guards, `where:` reply constraints, tracks, a property algebra) using a compile-time DSL. At compile time, it:
 
 1. Builds an intermediate representation (IR) from the DSL.
-2. Validates the IR through a pipeline of passes (errors E001–E060, warnings W001–W005).
+2. Validates the IR through a pipeline of passes (errors E001–E061, warnings W001–W005).
 3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime, with blame derived from message direction (`:client` | `:server` | `:property`, labeled with declared role names). Monitors can arm `state_timeout` transitions and capture traces (`trace_sink:`).
-4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks and `exclusive`). Captured runtime traces replay against the spec (`Accord.TLA.TraceSpec`, ADR-010).
+4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks, `exclusive`, and `distinct`). Captured runtime traces replay against the spec (`Accord.TLA.TraceSpec`, ADR-010); the exerciser samples one per run (`trace_check:`).
 
-`mix accord.check` caches passes by content hash (`--force` bypasses), reports stats, dumps raw TLC output (`--dump`), and checks hand-written extension modules (`--extra`). Protocol constants (`const :name, value`) substitute at compile time into every captured expression.
+`mix accord.check` caches passes by content hash (`--force` bypasses), reports stats, dumps raw TLC output (`--dump`), and checks hand-written extension modules (`--extra`). Protocol constants (`const :name, value`) substitute at compile time into every captured expression. `mix accord.compat` gates rolling upgrades: snapshot the released IR, then check old-client compatibility against every change (C001–C010, ADR-011).
 
 ## Architecture
 
-For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–010); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md). The design review's deferred roadmap has since landed (trace validation, check caching, const, state timeouts, --extra); remaining future work is Accord.Compat versioning, Apalache, exerciser trace sampling, and cross-session per-track comparison checks.
+For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–011); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md). The design review's deferred roadmap has since landed (trace validation with exerciser sampling, check caching, const, state timeouts, --extra, Accord.Compat versioning, cross-session `distinct`); remaining future work is an Apalache backend, correspondence-over-branches, track-predicate liveness, and behavioral refinement checking via TLC refinement mapping.
 
 The IR (`Accord.IR`) is the single source of truth. Two pipelines flow from it:
 
@@ -40,7 +40,8 @@ Coverage is deliberately asymmetric and always declared: constructs TLC cannot e
 | `Accord.TLA.Files` | Single source of `_build/accord/` artifact paths (write/delete) |
 | `Accord.TLA.TLCParser` / `ViolationReport` | TLC stdout → structured results → pentiment diagnostics |
 | `Accord.Violation` | Violation structs with direction-derived blame |
-| `Accord.Test.*` | Shipped harnesses: ProtocolExerciser (propcheck), TLACheck (real TLC assertions), FaultyServer |
+| `Accord.Compat` | Static rolling-upgrade simulation over two IRs (C001–C010) + `Snapshot` persistence |
+| `Accord.Test.*` | Shipped harnesses: ProtocolExerciser (propcheck + sampled trace replay), TLACheck (real TLC assertions), TraceCheck, FaultyServer |
 
 ### Closure lifting
 
