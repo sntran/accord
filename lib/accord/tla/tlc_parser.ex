@@ -18,7 +18,8 @@ defmodule Accord.TLA.TLCParser do
   @type stats :: %{
           states_generated: non_neg_integer(),
           distinct_states: non_neg_integer(),
-          depth: non_neg_integer() | nil
+          depth: non_neg_integer() | nil,
+          warnings: [String.t()]
         }
 
   @type violation :: %{
@@ -263,8 +264,28 @@ defmodule Accord.TLA.TLCParser do
     %{
       states_generated: generated || 0,
       distinct_states: distinct || 0,
-      depth: depth
+      depth: depth,
+      warnings: parse_warnings(lines)
     }
+  end
+
+  # TLC prints benign environmental warnings (JVM GC configuration) that
+  # say nothing about the model. Everything else it flags — above all the
+  # "dangerous" symmetry-under-liveness and constraint-under-liveness
+  # warnings, which mean a reported ✓ may be unsound — must be surfaced,
+  # never swallowed. Reject the known-benign lines; keep the rest.
+  @benign_warning_markers [
+    "throughput optimized garbage collector",
+    "UseParallelGC"
+  ]
+
+  defp parse_warnings(lines) do
+    lines
+    |> Enum.map(&String.trim/1)
+    |> Enum.filter(&String.starts_with?(&1, "Warning:"))
+    |> Enum.reject(fn line ->
+      Enum.any?(@benign_warning_markers, &String.contains?(line, &1))
+    end)
   end
 
   defp extract_stat(lines, regex) do

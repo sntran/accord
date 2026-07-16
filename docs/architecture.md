@@ -211,6 +211,19 @@ non-monotonic fence tokens across two clients passes each monitor individually
 but fails TLC. W003 warns when ghost constructs are declared without
 `sessions: 2`.
 
+### Liveness under a state constraint (bounded checking)
+
+A `correspondence` property emits its counter bound as a TLA+ `CONSTRAINT`
+(so TLC stops exploring past the bound instead of reporting a spurious
+TypeInvariant violation). TLC checks liveness only over states satisfying
+active constraints, so a protocol combining `correspondence` with `liveness`
+has its liveness verified only over behaviors that stay within the bound — a
+weaker claim than the safety analogue. TLC emits its §14.3.5 warning for this
+combination (and for symmetry declared alongside liveness). `mix accord.check`
+never swallows that warning: the run is reported with `⚠`, is not cached, and
+fails under `--strict`. A liveness verdict carrying this warning is trustworthy
+only to the extent the bound does not truncate a violating behavior.
+
 ## Closure lifting
 
 ### The problem

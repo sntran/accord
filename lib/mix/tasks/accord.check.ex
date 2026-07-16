@@ -22,6 +22,18 @@ defmodule Mix.Tasks.Accord.Check do
   deadlock setting) in `_build/accord/.check_cache`; unchanged protocols
   skip TLC entirely. Failures are never cached.
 
+  ## Unsound-verdict warnings
+
+  TLC can report "no error found" while also warning that the verdict may
+  be unsound — a state constraint or a symmetry set declared alongside a
+  liveness property lets it miss violations (TLC's own §14.3.5 caveat).
+  Such a run is reported with `⚠` and its warnings, and is **not** cached
+  (it re-runs so the warning re-surfaces). Under `--strict` it counts as a
+  failure, so CI can gate on it. A correspondence property emits a counter
+  bound as a `CONSTRAINT`, so a protocol with both correspondence and
+  liveness triggers this — its liveness is checked only over behaviors
+  within the bound.
+
   ## Hand-written extension specs
 
   `--extra` checks a user-authored TLA+ module that `EXTENDS` a
@@ -122,7 +134,7 @@ defmodule Mix.Tasks.Accord.Check do
 
       extra_results =
         Enum.map(extras, fn path ->
-          check_extra(path, protocols, workers, deadlock?, dump?)
+          check_extra(path, protocols, workers, strict?, deadlock?, dump?)
         end)
 
       CheckCache.save(cache)
@@ -137,7 +149,7 @@ defmodule Mix.Tasks.Accord.Check do
   # default) is merged with the generated module's CONSTANT/SYMMETRY/
   # CONSTRAINT lines, and violations are mapped through the extended
   # protocol's spans where possible. Extras are never cached.
-  defp check_extra(path, protocols, workers, deadlock?, dump?) do
+  defp check_extra(path, protocols, workers, strict?, deadlock?, dump?) do
     with {:ok, content} <- File.read(path),
          module_name = Path.basename(path, ".tla"),
          {:ok, protocol_mod} <- resolve_extended_protocol(content, protocols) do
@@ -152,7 +164,13 @@ defmodule Mix.Tasks.Accord.Check do
         result =
           case require_tlc() do
             {:ok, tlc_jar} ->
-              run_tlc(protocol_mod, dest_tla, dest_cfg, tlc_jar, workers, deadlock?, dump?)
+              # The merged cfg inherits SYMMETRY/CONSTRAINT from the
+              # generated module; if the user's module adds liveness, TLC
+              # warns the verdict is unsound — surface it like any other run.
+              classify_tlc_run(
+                run_tlc(protocol_mod, dest_tla, dest_cfg, tlc_jar, workers, deadlock?, dump?),
+                strict?
+              )
 
             error ->
               error
@@ -255,7 +273,12 @@ defmodule Mix.Tasks.Accord.Check do
       if CheckCache.hit?(cache, module_name, key) do
         {{:cached, key}, cache}
       else
-        case run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?) do
+        case classify_tlc_run(
+               run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?),
+               strict?
+             ) do
+          # Only a clean pass — no TLC warnings — is cached. A warned or
+          # failed verdict must re-run every time so the warning re-surfaces.
           {:ok, _stats} = ok -> {ok, CheckCache.put(cache, module_name, key)}
           other -> {other, cache}
         end
@@ -264,6 +287,22 @@ defmodule Mix.Tasks.Accord.Check do
       error -> {error, cache}
     end
   end
+
+  # TLC can report "No error found" while also printing a warning that the
+  # verdict may be unsound (symmetry or a state constraint under liveness
+  # checking). Swallowing that warning is exactly how a false ✓ ships, so a
+  # passing run that carries warnings is downgraded: a hard failure under
+  # --strict, a surfaced-but-non-fatal `:warned` otherwise. Real failures
+  # and infrastructure errors pass through untouched.
+  defp classify_tlc_run({:ok, %{warnings: [_ | _] = warnings}}, true) do
+    {:error, {:tlc_warnings, warnings}}
+  end
+
+  defp classify_tlc_run({:ok, %{warnings: [_ | _]} = stats}, false) do
+    {:warned, stats}
+  end
+
+  defp classify_tlc_run(result, _strict?), do: result
 
   defp ensure_loaded(mod) do
     if Code.ensure_loaded?(mod), do: :ok, else: {:error, :module_not_found}
@@ -371,11 +410,13 @@ defmodule Mix.Tasks.Accord.Check do
         {_mod, {:ok, _}} -> :success
         {_mod, {:cached, _}} -> :success
         {_mod, {:skip, _}} -> :skip
+        {_mod, {:warned, _}} -> :warned
         _ -> :failure
       end)
 
     successes = Map.get(groups, :success, [])
     skips = Map.get(groups, :skip, [])
+    warned = Map.get(groups, :warned, [])
     failures = Map.get(groups, :failure, [])
 
     # Report successes.
@@ -406,6 +447,12 @@ defmodule Mix.Tasks.Accord.Check do
       )
     end
 
+    # Report passes that TLC flagged as possibly unsound (exit 0, but loud;
+    # --strict turns these into failures instead).
+    for {mod, {:warned, stats}} <- warned do
+      report_warned(mod, stats)
+    end
+
     # Report failures.
     for {mod, result} <- failures do
       report_failure(mod, result)
@@ -420,10 +467,29 @@ defmodule Mix.Tasks.Accord.Check do
       System.at_exit(fn _ -> :ok end)
       exit({:shutdown, 1})
     else
+      warned_note =
+        if warned != [], do: " (#{length(warned)} with warnings — see above)", else: ""
+
       Mix.shell().info(
-        "\n#{IO.ANSI.green()}All #{length(successes)} protocol(s) passed.#{IO.ANSI.reset()}"
+        "\n#{IO.ANSI.green()}All #{length(successes)} protocol(s) passed.#{IO.ANSI.reset()}" <>
+          warned_note
       )
     end
+  end
+
+  defp report_warned(mod, stats) do
+    Mix.shell().info(
+      "#{IO.ANSI.yellow()}⚠#{IO.ANSI.reset()} #{display_name(mod)} — passed, but TLC warns the " <>
+        "verdict may be unsound (#{stats.distinct_states} states explored)"
+    )
+
+    for warning <- stats.warnings do
+      Mix.shell().info("#{IO.ANSI.yellow()}    #{warning}#{IO.ANSI.reset()}")
+    end
+
+    Mix.shell().info(
+      "#{IO.ANSI.faint()}    re-run with --strict to treat this as a failure#{IO.ANSI.reset()}"
+    )
   end
 
   defp report_failure(mod, {:error, %{kind: _, trace: _} = violation, stats}) do
@@ -449,17 +515,42 @@ defmodule Mix.Tasks.Accord.Check do
   defp report_failure(mod, {:error, reason}) do
     message =
       case reason do
-        :module_not_found -> "module not found"
-        :not_a_protocol -> "not an Accord protocol"
-        {:tla_failed, summary} -> "TLA+ spec generation failed at compile time: #{summary}"
-        :tla_off -> "TLA+ generation disabled (tla: :off) — failing under --strict"
-        :tla_not_found -> ".tla file not found (run `mix compile` first)"
-        :cfg_not_found -> ".cfg file not found (run `mix compile` first)"
-        :tlc_not_found -> "TLC not found (set TLA2TOOLS_JAR or install to ~/.tla/)"
-        :java_not_found -> "Java not found (TLC requires a JVM)"
-        :no_known_extends -> "EXTENDS no known generated protocol module"
-        {:extra_unreadable, why} -> "cannot read extra module: #{inspect(why)}"
-        other -> inspect(other)
+        :module_not_found ->
+          "module not found"
+
+        :not_a_protocol ->
+          "not an Accord protocol"
+
+        {:tla_failed, summary} ->
+          "TLA+ spec generation failed at compile time: #{summary}"
+
+        :tla_off ->
+          "TLA+ generation disabled (tla: :off) — failing under --strict"
+
+        {:tlc_warnings, warnings} ->
+          "TLC reported the verdict may be unsound — failing under --strict:\n" <>
+            Enum.map_join(warnings, "\n", &"      #{&1}")
+
+        :tla_not_found ->
+          ".tla file not found (run `mix compile` first)"
+
+        :cfg_not_found ->
+          ".cfg file not found (run `mix compile` first)"
+
+        :tlc_not_found ->
+          "TLC not found (set TLA2TOOLS_JAR or install to ~/.tla/)"
+
+        :java_not_found ->
+          "Java not found (TLC requires a JVM)"
+
+        :no_known_extends ->
+          "EXTENDS no known generated protocol module"
+
+        {:extra_unreadable, why} ->
+          "cannot read extra module: #{inspect(why)}"
+
+        other ->
+          inspect(other)
       end
 
     Mix.shell().info("#{IO.ANSI.red()}✗#{IO.ANSI.reset()} #{display_name(mod)} — #{message}")

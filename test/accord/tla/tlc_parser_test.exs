@@ -29,6 +29,53 @@ defmodule Accord.TLA.TLCParserTest do
       assert stats.distinct_states == 12
       assert stats.depth == 5
     end
+
+    test "a clean run carries no warnings" do
+      assert {:ok, stats} = TLCParser.parse(@success_output)
+      assert stats.warnings == []
+    end
+  end
+
+  # -- Warnings --
+  #
+  # TLC can report success while warning the verdict may be unsound. These
+  # must reach the caller so the ✓ is not silently trusted (findings C2/H2).
+
+  @constraint_under_liveness """
+  TLC2 Version 2.19 of 08 August 2024
+  Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+  (Use the -nowarning option to disable this warning.)
+  Warning: Declaring state or action constraints during liveness checking is dangerous: Please read section 14.3.5 on page 247 of Specifying Systems for more details.
+  Model checking completed. No error has been found.
+  11 states generated, 11 distinct states found, 0 states left on queue.
+  """
+
+  @symmetry_under_liveness """
+  TLC2 Version 2.19 of 08 August 2024
+  Warning: Declaring symmetry during liveness checking is dangerous. It might cause TLC to miss violations of the liveness properties.
+  Model checking completed. No error has been found.
+  42 states generated, 21 distinct states found, 0 states left on queue.
+  """
+
+  describe "warnings" do
+    test "surfaces a constraint-under-liveness warning on an otherwise-passing run" do
+      assert {:ok, stats} = TLCParser.parse(@constraint_under_liveness)
+      assert [warning] = stats.warnings
+      assert warning =~ "state or action constraints during liveness checking is dangerous"
+    end
+
+    test "surfaces a symmetry-under-liveness warning" do
+      assert {:ok, stats} = TLCParser.parse(@symmetry_under_liveness)
+      assert [warning] = stats.warnings
+      assert warning =~ "symmetry during liveness checking is dangerous"
+    end
+
+    test "excludes the benign JVM garbage-collector warning" do
+      # The GC warning says nothing about the model and must not be
+      # mistaken for a soundness concern.
+      assert {:ok, stats} = TLCParser.parse(@constraint_under_liveness)
+      refute Enum.any?(stats.warnings, &String.contains?(&1, "garbage collector"))
+    end
   end
 
   # -- Invariant violation --

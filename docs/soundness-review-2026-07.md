@@ -10,11 +10,14 @@ executable probes — not just argued statically. Probe scripts referenced here 
 The framing question for each decision: *when the tool says ✓ (or "compatible", or
 "replays"), is the claim true — and when it cannot be, is the asymmetry declared?*
 
-> **Status (updated 2026-07-16):** fixes have begun landing in fix-order. **H5**
-> (arity bypass) fixed in `dbcb551` — wrong-shape messages are now the `:malformed_message`
-> violation, never forwarded. **C1** (update extractor) fixed in `86780ee` — non-reply case
-> scrutinees and `when`-guarded arms are now E042, not silent mis-translations. The
-> remaining findings below are open; each carries its own status note when resolved.
+> **Status (updated 2026-07-16):** fixes are landing in fix-order. **H5** (arity bypass)
+> fixed in `dbcb551` — wrong-shape messages are now the `:malformed_message` violation,
+> never forwarded. **C1** (update extractor) fixed in `86780ee` — non-reply case scrutinees
+> and `when`-guarded arms are now E042, not silent mis-translations. **C2 + H2** (swallowed
+> TLC warnings) fixed together — `TLCParser` now captures TLC's soundness warnings and
+> `mix accord.check` surfaces them (`⚠`, never cached, failure under `--strict`), for both
+> generated specs and `--extra` modules. The remaining findings below are open; each carries
+> its own status note when resolved.
 
 ## Verdict summary
 
@@ -71,7 +74,7 @@ untranslatable (E042) rather than skipping them; add regression fixtures for bot
 Trace validation would catch these only when a sampled trace exercises the dropped arm —
 `mix accord.check` alone prints the false ✓.
 
-### C2. Liveness verified under a state constraint — TLC's own "dangerous" warning is swallowed
+### C2. Liveness verified under a state constraint — TLC's own "dangerous" warning is swallowed — FIXED (TLC-warning plumbing)
 
 Correspondence checks emit `CONSTRAINT StateConstraint` (the counter bound); nothing
 prevents or flags co-occurrence with a `liveness` property. TLC prints
@@ -92,6 +95,19 @@ know that, and says nothing.)
 property co-occurs with any `CONSTRAINT`; document that a liveness ✓ under a constraint
 covers only behaviors confined to the bound (a materially weaker claim than the safety
 analogue).
+
+**Fix landed:** `TLCParser` now parses TLC's warnings into `stats.warnings` (excluding the
+benign JVM-GC noise); `mix accord.check` reports a warned pass with `⚠` and the warning
+text, does **not** cache it (so it re-surfaces every run), and fails it under `--strict`
+(CI-gateable). This makes the swallowed warning loud and honest without silently
+restructuring the flagship, whose ✓ is in fact sound (the constraint never truncates its
+reachable graph — the counter stays ≤ 1). The compile-time W-code for `CONSTRAINT` +
+temporal was deliberately not added: it would warn on every `mix compile` of a legitimate
+correspondence-plus-liveness protocol, whereas the risk is properly surfaced at
+verification time. Deeper still (open, tracked as an M-item): the flagship, being the
+copy-me showcase, prints `⚠` on `mix accord.check` — worth deciding whether to split its
+correspondence and liveness demos so the showcase runs clean. Architecture.md gains a
+"liveness under a state constraint (bounded checking)" section.
 
 ### C3. `Compat.check` reply matching ignores the old client's first-match rule and all track evolution
 
@@ -130,7 +146,7 @@ Directly falsifies ADR-007's "every listed protocol was verified against a spec 
 from its current source." **Fix:** an unambiguous join (escape + separator, or a short
 hash suffix) plus a collision assertion at compile or check time.
 
-### H2. `--extra` cfg merging reintroduces SYMMETRY (and CONSTRAINT) under user liveness
+### H2. `--extra` cfg merging reintroduces SYMMETRY (and CONSTRAINT) under user liveness — FIXED (TLC-warning plumbing)
 
 `merged_extra_cfg` inherits the generated cfg's `SYMMETRY`/`CONSTRAINT` lines into a
 user-authored module's cfg without scanning the user's TLA+ for temporal operators — the
