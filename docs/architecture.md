@@ -423,7 +423,7 @@ it possible to search for documentation or suppress specific checks.
 - E060 -- exclusive check references undefined state.
 - E061 -- distinct check references an undefined or shared track.
 
-**TLA+ fidelity errors (E041-E046):** anything the model cannot faithfully
+**TLA+ fidelity errors (E041-E047):** anything the model cannot faithfully
 express is a loud, span-carrying diagnostic — never a silent drop. Under the
 default `tla: :strict` these abort compilation; under `tla: :warn` they
 downgrade to a warning and any stale spec is deleted.
@@ -435,6 +435,11 @@ downgrade to a warning and any stale spec is deleted.
 - E044 -- track default/init outside its model domain.
 - E045 -- `where:` constraint not compilable to TLA+.
 - E046 -- symmetry set does not resolve to a model-value domain.
+- E047 -- an atom named in a formula is not a member of an explicit enumerated
+  domain. Atoms render as concrete TLA+ strings, so a compared atom must sit in
+  a `domain: [:a, :b]` (per-track or `model` block) whose values render the same
+  way; an atom outside one would fall to the builtin symmetric model-value
+  domain, whose values are interchangeable and may not be named in a formula.
 
 **Compatibility findings (C001-C010, from `Accord.Compat`):**
 - C001 -- state or initial state missing in the new contract.

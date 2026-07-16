@@ -32,7 +32,7 @@ defmodule Accord.TLA.GuardCompiler do
   """
 
   @type unsupported :: %{message: String.t(), ast: Macro.t()}
-  @type identifier_kind :: :bare | :field
+  @type identifier_kind :: :bare | :field | :atom_literal
   @type emitted_identifier :: {String.t(), identifier_kind()}
 
   @comparison_ops [:>, :>=, :<, :<=, :==, :!=]
@@ -90,8 +90,14 @@ defmodule Accord.TLA.GuardCompiler do
   defp do_compile(false, _bindings, acc), do: {"FALSE", acc}
   defp do_compile(nil, _bindings, acc), do: {"NULL", acc}
 
+  # An atom literal renders as a TLA+ string, matching how explicit-list
+  # domains and track defaults render atoms (`{"fast", "slow"}`,
+  # `default: :slow` → `"slow"`). `inspect/1` would emit `:fast`, which is
+  # not valid TLA+. The atom is recorded so the caller can require it to be
+  # a member of a declared enumerated domain (see `Accord.Pass.TLA.Expr`) —
+  # naming an atom from a symmetric model-value domain is unsound.
   defp do_compile(atom, _bindings, acc) when is_atom(atom) do
-    {inspect(atom), acc}
+    {~s("#{atom}"), add_ident(acc, Atom.to_string(atom), :atom_literal)}
   end
 
   defp do_compile(s, _bindings, acc) when is_binary(s) do

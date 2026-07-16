@@ -25,8 +25,10 @@ The framing question for each decision: *when the tool says ✓ (or "compatible"
 > **H3** (per-property fairness) fixed — `FairSpec` is gone; each liveness property is an
 > implication `(its own fairness) => (P ~> Q)` against the plain `Spec`, proven with the
 > `FairnessLeak` TLC fixture. **M9** (action stutter) fixed — the monitor exempts
-> track-preserving transitions. The only High still open is **H4** (atom rendering, coupled
-> with symmetry-usage validation).
+> track-preserving transitions. **H4** (atom rendering) fixed — atoms render as concrete
+> strings and any atom named in a formula must be declared in an enumerated inline domain
+> (E047), which also enforces the symmetry-safety rule. **All three Criticals and all five
+> Highs are now fixed;** what remains is the lower-severity M/Low list below.
 
 ## Verdict summary
 
@@ -206,7 +208,7 @@ provable only by borrowing the other's fairness — the old pooled spec reports 
 the per-property spec reports "Temporal properties were violated". Pinned by
 `check_test.exs`.
 
-### H4. Atom rendering is incoherent across emission sites (loud, but late and misleading)
+### H4. Atom rendering is incoherent across emission sites (loud, but late and misleading) — FIXED (`E047` + string rendering)
 
 Three renderings of the same atom in one pipeline: guard literals go through `inspect/1`
 (`:fast` — a SANY parse error at check time, violating ADR-007's compile-time-diagnostic
@@ -222,6 +224,19 @@ cannot be written). Whichever consistent rendering is chosen must land together 
 validation pass that symmetry-set values do not appear asymmetrically in formulas — and
 note the raw-string `state_constraint` and `--extra` surfaces can already express such
 formulas today (H2).
+
+**Fix landed:** the guard compiler renders every atom literal as a concrete TLA+ string
+(`"fast"`), matching how explicit-list domains and track defaults already render atoms, so
+the domain, default, guard, update, and property all agree — the spurious TypeInvariant
+counterexample and the SANY parse crash both disappear. The coupling is resolved by the
+declaration itself, not a formula scan: `Expr` derives the enumerated atoms from the inline
+domains on the IR (`Track.domain` lists and `model do domain …` lists) and any atom named
+in a formula that is *not* in one is an **E047 compile-time error**. A `{:model_values, …}`
+domain is a tuple, not a list, so its values are never enumerated — naming one is E047,
+which is exactly the symmetry-safety guarantee (you cannot name a symmetric value). Cost:
+atoms you compare must be declared inline (`track :mode, :atom, domain: [:normal,
+:degraded]`), like an enum. Proven with the `EnumeratedMode` fixture — an atom track
+compared and assigned by name that TLC now checks cleanly (previously a spurious failure).
 
 ### H5. Arity-mismatch client messages bypass validation and reach the server unblamed — FIXED (`dbcb551`)
 

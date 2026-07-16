@@ -91,6 +91,8 @@ defmodule Accord.Pass.TLA.Expr do
   end
 
   defp identifier_errors(idents, bindings, track_names, ir, span, context) do
+    enumerated = enumerated_atom_strings(ir)
+
     idents
     |> Enum.uniq()
     |> Enum.flat_map(fn
@@ -103,7 +105,55 @@ defmodule Accord.Pass.TLA.Expr do
         else
           [unknown_track_report(name, track_names, ir, span, context)]
         end
+
+      {name, :atom_literal} ->
+        if MapSet.member?(enumerated, name) do
+          []
+        else
+          [atom_literal_report(name, enumerated, ir, span, context)]
+        end
     end)
+  end
+
+  # Atoms in a formula render as concrete TLA+ strings, so they must be
+  # members of an explicit enumerated domain (`[:fast, :slow]`) whose values
+  # render the same way. An atom outside such a domain would fall to the
+  # builtin `{:model_values, N}` domain — abstract, symmetric identifiers
+  # that TLC permutes and that a formula may not name (naming one breaks
+  # symmetry reduction). Reported at compile time rather than as a TLC crash.
+  defp atom_literal_report(name, enumerated, ir, span, context) do
+    Report.error("atom :#{name} in #{context} is not a declared enumerated value")
+    |> Report.with_code("E047")
+    |> Report.with_help(enumerated_help(name, enumerated))
+    |> maybe_add_source(ir.source_file)
+    |> maybe_add_span_label(span, "names :#{name}")
+  end
+
+  defp enumerated_help(name, enumerated) do
+    if MapSet.size(enumerated) == 0 do
+      "declare the domain inline, e.g. `track :mode, :atom, domain: [:#{name}, ...]`, " <>
+        "so comparing against :#{name} renders a concrete value the model can check"
+    else
+      known = enumerated |> Enum.sort() |> Enum.map_join(", ", &":#{&1}")
+
+      "add :#{name} to an enumerated domain (declared values: #{known}); atoms outside " <>
+        "one render as symmetric model values, which a formula may not name"
+    end
+  end
+
+  # Atoms that may be named in a formula: the members of every explicit-list
+  # domain declared inline — per-track (`domain: [...]`) or in the `model`
+  # block (`domain :name, [...]`). Model-value domains (tuples) are excluded
+  # on purpose; their values are symmetric and unnameable.
+  defp enumerated_atom_strings(%IR{} = ir) do
+    track_lists = for track <- ir.tracks, is_list(track.domain), do: track.domain
+    block_lists = for {:domain, {_name, spec}} <- ir.model, is_list(spec), do: spec
+
+    (track_lists ++ block_lists)
+    |> List.flatten()
+    |> Enum.filter(&(is_atom(&1) and &1 not in [true, false, nil]))
+    |> Enum.map(&Atom.to_string/1)
+    |> MapSet.new()
   end
 
   defp bare_report(name, bindings, ir, span, context) do

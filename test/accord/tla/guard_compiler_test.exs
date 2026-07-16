@@ -27,6 +27,14 @@ defmodule Accord.TLA.GuardCompilerTest do
     test "string" do
       assert {:ok, ~s("hello"), _} = GuardCompiler.compile("hello")
     end
+
+    test "atom renders as a TLA+ string and is recorded as an atom literal" do
+      # Not `inspect/1` (`:fast` is not valid TLA+); matches how explicit
+      # domains and defaults render atoms. The literal is reported so the
+      # caller can require an enumerated domain (E047).
+      assert {:ok, ~s("fast"), idents} = GuardCompiler.compile(:fast)
+      assert {"fast", :atom_literal} in idents
+    end
   end
 
   describe "variables" do

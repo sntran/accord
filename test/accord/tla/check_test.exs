@@ -21,6 +21,15 @@ defmodule Accord.TLA.CheckTest do
         model_config_path: "test/support/protocols/blackjack_model.exs"
       )
     end
+
+    test "an atom-typed track with an enumerated domain checks cleanly (H4)",
+         %{tmp_dir: tmp_dir} do
+      # Atoms compared and assigned by name render as concrete strings
+      # consistently across domain, default, guards, updates, and the
+      # invariant — so TLC no longer reports a spurious TypeInvariant
+      # violation on this correct protocol.
+      assert_passes(Accord.Test.EnumeratedMode.Protocol, tmp_dir: tmp_dir)
+    end
   end
 
   describe "invariant violations" do

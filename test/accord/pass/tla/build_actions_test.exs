@@ -427,6 +427,47 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert Enum.any?(report.help, &(&1 =~ "balance"))
     end
 
+    defp atom_guard_ir(domain, guard_ast) do
+      %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [%Track{name: :mode, type: :atom, default: :normal, domain: domain}],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: :go,
+                message_types: [],
+                kind: :call,
+                branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}],
+                guard: %{fun: fn _msg, _tracks -> true end, ast: guard_ast}
+              }
+            ]
+          }
+        }
+      }
+    end
+
+    test "an atom named in a guard without an enumerated domain reports E047" do
+      # No domain: mode falls to the builtin model-value domain, whose
+      # values are symmetric and unnameable.
+      guard = quote(do: fn _msg, tracks -> tracks.mode == :normal end)
+
+      assert {:error, [report]} = run_actions(atom_guard_ir(nil, guard))
+      assert report.code == "E047"
+      assert report.message =~ ":normal"
+      assert Enum.any?(report.help, &(&1 =~ "domain:"))
+    end
+
+    test "an atom from an explicit enumerated domain compiles" do
+      guard = quote(do: fn _msg, tracks -> tracks.mode == :normal end)
+
+      assert {:ok, [action]} = run_actions(atom_guard_ir([:normal, :degraded], guard))
+      # Rendered as a concrete string, matching the domain and default.
+      assert Enum.any?(action.preconditions, &(&1 =~ ~s(mode = "normal")))
+    end
+
     test "update writing an unknown track reports E043" do
       update_ast = quote(do: fn {:bet, chips}, _reply, tracks -> %{tracks | balanse: chips} end)
 
