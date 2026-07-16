@@ -207,8 +207,8 @@ defmodule Accord.Violation do
   action precondition — a server reply the model would never allow must
   not pass silently at runtime.
   """
-  @spec constraint_failed(atom(), term(), term(), term()) :: t()
-  def constraint_failed(state, message, reply, reply_type) do
+  @spec constraint_failed(atom(), term(), term(), term(), map()) :: t()
+  def constraint_failed(state, message, reply, reply_type, tracks \\ %{}) do
     %__MODULE__{
       blame: :server,
       kind: :constraint_failed,
@@ -216,7 +216,7 @@ defmodule Accord.Violation do
       message: message,
       reply: reply,
       expected: reply_type,
-      context: %{reply_type: reply_type}
+      context: %{reply_type: reply_type, tracks: tracks}
     }
   end
 

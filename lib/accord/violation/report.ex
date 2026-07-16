@@ -128,12 +128,16 @@ defmodule Accord.Violation.Report do
   end
 
   defp build_report(%Violation{kind: :constraint_failed} = v) do
-    Report.error("server reply violated its where: constraint")
-    |> Report.with_note("sent #{inspect(v.message)}, got #{inspect(v.reply)}")
+    Report.error("server reply #{inspect(v.reply)} is not valid in state :#{v.state}")
     |> Report.with_note(
-      "the reply matches type #{Type.to_string(v.context[:reply_type])} " <>
-        "but fails the declared refinement"
+      "sent #{inspect(v.message)} in state :#{v.state}, got #{inspect(v.reply)}"
     )
+    |> Report.with_note(
+      "#{inspect(v.reply)} matches the branch's reply type " <>
+        "#{Type.to_string(v.context[:reply_type])}, but the where: constraint below does " <>
+        "not hold for these tracks — so no branch accepts this reply"
+    )
+    |> maybe_add_tracks_note(v.context[:tracks])
   end
 
   defp build_report(%Violation{kind: :invalid_message} = v) do
@@ -209,6 +213,19 @@ defmodule Accord.Violation.Report do
     Report.error("protocol violation: #{v.kind}")
     |> Report.with_note("state: :#{v.state}, message: #{inspect(v.message)}")
   end
+
+  # The track values a `where:` constraint was evaluated against, so the
+  # reader can see why the shown constraint did not hold.
+  defp maybe_add_tracks_note(report, tracks) when is_map(tracks) and map_size(tracks) > 0 do
+    rendered =
+      tracks
+      |> Enum.sort()
+      |> Enum.map_join(", ", fn {k, val} -> "#{k} = #{inspect(val)}" end)
+
+    Report.with_note(report, "tracks when the reply arrived: #{rendered}")
+  end
+
+  defp maybe_add_tracks_note(report, _), do: report
 
   # -- Source Labels --
 

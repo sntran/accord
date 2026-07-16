@@ -235,7 +235,7 @@ defmodule Accord.Monitor do
         )
 
       {:error, {:constraint_failed, %Branch{reply_type: reply_type}}} ->
-        violation = Violation.constraint_failed(state, message, reply, reply_type)
+        violation = Violation.constraint_failed(state, message, reply, reply_type, data.tracks)
         handle_violation(violation, from, state, data)
 
       {:error, :no_type_match} ->

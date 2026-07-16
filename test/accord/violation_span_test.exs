@@ -121,8 +121,12 @@ defmodule Accord.ViolationSpanTest do
       assert violation.reply == {:ok, 5}
 
       formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
-      assert formatted =~ "violated its where: constraint"
+      assert formatted =~ "reply {:ok, 5} is not valid"
+      assert formatted =~ "where: constraint below does not hold"
       assert formatted =~ "where: constraint defined here"
+      # The track values make the shown constraint evaluable.
+      assert formatted =~ "tracks when the reply arrived:"
+      assert formatted =~ "fence_token = 10"
     end
 
     test ":invariant_violated (local) carries span of :holder_consistency" do
