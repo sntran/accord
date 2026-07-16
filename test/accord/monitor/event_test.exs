@@ -127,6 +127,21 @@ defmodule Accord.Monitor.EventTest do
       assert violation.blame == :server
     end
 
+    test "a wrong-arity event payload is :malformed_message, server blame" do
+      monitor = start_feed()
+
+      # :data is declared {:data, item}; a wider tuple is malformed and
+      # must not be forwarded downstream (shape is checked before guards,
+      # so no demand is needed to trigger this).
+      Monitor.event(monitor, {:data, :item, :extra})
+      _ = :sys.get_state(monitor)
+
+      assert [violation] = ViolationCollector.drain()
+      assert violation.kind == :malformed_message
+      assert violation.blame == :server
+      refute_receive {:data, :item, :extra}
+    end
+
     test "event guard failure blames the server" do
       monitor = start_feed()
 

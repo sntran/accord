@@ -175,6 +175,52 @@ defmodule Accord.MonitorTest do
     end
   end
 
+  describe "client blame — :malformed_message" do
+    setup do
+      compiled = compile_ir(sample_ir())
+
+      {:ok, server} =
+        EchoServer.start_link(%{
+          increment: fn {:increment, n} -> {:ok, n} end,
+          stop: :stopped,
+          ping: :pong
+        })
+
+      {:ok, monitor} = start_monitor(compiled, server)
+      %{monitor: monitor}
+    end
+
+    test "rejects a tag-matching message with extra arity", %{monitor: monitor} do
+      # :increment is declared {:increment, integer()} — arity 2. A wider
+      # tuple must not be forwarded to the server unchecked.
+      assert {:accord_violation, violation} = Monitor.call(monitor, {:increment, 1, 2})
+      assert violation.blame == :client
+      assert violation.kind == :malformed_message
+      assert violation.expected == {:increment, :_}
+    end
+
+    test "rejects an atom where a tuple message is declared", %{monitor: monitor} do
+      assert {:accord_violation, violation} = Monitor.call(monitor, :increment)
+      assert violation.blame == :client
+      assert violation.kind == :malformed_message
+    end
+
+    test "rejects a tuple where an atom message is declared", %{monitor: monitor} do
+      # :stop is a bare atom message; a tuple with the same tag is malformed.
+      assert {:accord_violation, violation} = Monitor.call(monitor, {:stop, :extra})
+      assert violation.blame == :client
+      assert violation.kind == :malformed_message
+    end
+
+    test "the malformed message never reaches the server", %{monitor: monitor} do
+      # A conforming EchoServer would crash on {:increment, 1, 2} (no
+      # matching clause); the monitor must reject it first, and the
+      # session must survive for a subsequent valid call.
+      assert {:accord_violation, _} = Monitor.call(monitor, {:increment, 1, 2})
+      assert {:ok, 5} = Monitor.call(monitor, {:increment, 5})
+    end
+  end
+
   describe "client blame — :session_ended" do
     setup do
       compiled = compile_ir(sample_ir())

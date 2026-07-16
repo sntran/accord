@@ -148,6 +148,12 @@ defmodule Accord.Violation.Report do
     |> add_valid_messages_help(v.expected)
   end
 
+  defp build_report(%Violation{kind: :malformed_message} = v) do
+    Report.error("message shape does not match its declared pattern")
+    |> Report.with_note("sent #{inspect(v.message)} in state :#{v.state}")
+    |> Report.with_help("expected the shape #{describe_pattern(v.expected)}")
+  end
+
   defp build_report(%Violation{kind: :guard_failed} = v) do
     Report.error("guard rejected message")
     |> Report.with_note("guard rejected #{inspect(v.message)} in state :#{v.state}")
@@ -350,6 +356,20 @@ defmodule Accord.Violation.Report do
   end
 
   defp add_valid_messages_help(report, _), do: report
+
+  # Renders a declared message pattern for a diagnostic: an atom tag as
+  # itself, a tuple as `{:tag, _, _}` with the wildcard args it carries.
+  defp describe_pattern(pattern) when is_atom(pattern), do: inspect(pattern)
+
+  defp describe_pattern(pattern) when is_tuple(pattern) do
+    [tag | args] = Tuple.to_list(pattern)
+    arity = length(args)
+    slots = Enum.map_join(args, ", ", fn _ -> "_" end)
+    plural = if arity == 1, do: "argument", else: "arguments"
+    "{#{inspect(tag)}#{if slots == "", do: "", else: ", " <> slots}} (#{arity} #{plural})"
+  end
+
+  defp describe_pattern(pattern), do: inspect(pattern)
 
   # -- Failure Formatting --
 

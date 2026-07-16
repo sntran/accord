@@ -39,6 +39,7 @@ defmodule Accord.Violation do
 
   @type kind ::
           :invalid_message
+          | :malformed_message
           | :argument_type
           | :guard_failed
           | :session_ended
@@ -143,6 +144,28 @@ defmodule Accord.Violation do
       state: state,
       message: message,
       expected: :none
+    }
+  end
+
+  @doc """
+  Creates a violation for a message whose shape does not match the
+  declared pattern — a wrong arity for the tag, or an atom where a
+  tuple is declared (or vice versa).
+
+  Distinct from `invalid_message` (unknown tag): here the tag is known
+  but the message is not a valid instance of it, so it is not merely
+  rejected — left unchecked it would reach the server as a malformed
+  term. Blames the sender: the client for calls/casts, the server for
+  events. `expected` carries the declared message pattern.
+  """
+  @spec malformed_message(atom(), term(), term(), blame()) :: t()
+  def malformed_message(state, message, expected_pattern, blame \\ :client) do
+    %__MODULE__{
+      blame: blame,
+      kind: :malformed_message,
+      state: state,
+      message: message,
+      expected: expected_pattern
     }
   end
 

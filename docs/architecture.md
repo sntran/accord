@@ -112,9 +112,13 @@ expectations. The monitor can detect this before forwarding to the server.
 | Kind | When it fires |
 |------|--------------|
 | `:invalid_message` | The message tag is not valid in the current state. |
+| `:malformed_message` | The tag is known but the message shape (arity) does not match its declared pattern — an atom where a tuple is declared, or a wrong-arity tuple. Rejected before forwarding, so a malformed term never reaches the server. |
 | `:argument_type` | A message argument fails its declared type constraint. |
 | `:guard_failed` | The guard function returned false for this message and tracks. |
 | `:session_ended` | The client sent a message after reaching a terminal state. |
+
+`:malformed_message` and `:argument_type` also arise with `:server` blame when a
+pushed event has the wrong shape or argument types (the sender is at fault).
 
 Decision rule: if the monitor can reject the message before contacting the
 server, the client is at fault. Client violations are caught at steps 1-2 of the

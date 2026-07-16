@@ -525,28 +525,46 @@ defmodule Accord.Monitor do
 
   # -- Message Type Checking --
 
-  defp check_message_types(_message, %{message_types: []}, _state, _blame), do: :ok
-
-  defp check_message_types(message, transition, state, blame) when is_tuple(message) do
-    args = message |> Tuple.to_list() |> tl()
-    types = transition.message_types
-
-    if length(args) != length(types) do
-      :ok
+  # The declared pattern fixes the message shape; a tag match alone is
+  # not enough. A message of the wrong arity (extra elements, or an atom
+  # where a tuple is declared) is not a valid instance of this message —
+  # left unchecked it would be forwarded to the server as a malformed
+  # term (and can crash it). Validate shape first, then argument types.
+  defp check_message_types(message, transition, state, blame) do
+    if message_shape_ok?(message, transition.message_pattern) do
+      check_message_args(message, transition, state, blame)
     else
-      args
-      |> Enum.zip(types)
-      |> Enum.with_index()
-      |> Enum.find_value(:ok, fn {{arg, type}, pos} ->
-        case Check.check(arg, type) do
-          :ok -> nil
-          {:error, _} -> {:error, Violation.argument_type(state, message, pos, type, arg, blame)}
-        end
-      end)
+      {:error, Violation.malformed_message(state, message, transition.message_pattern, blame)}
     end
   end
 
-  defp check_message_types(_message, _transition, _state, _blame), do: :ok
+  # An atom pattern admits exactly that atom; a tuple pattern admits a
+  # tuple of the same arity. Dispatch has already matched the tag.
+  defp message_shape_ok?(message, pattern) when is_atom(pattern), do: message === pattern
+
+  defp message_shape_ok?(message, pattern) when is_tuple(pattern) do
+    is_tuple(message) and tuple_size(message) == tuple_size(pattern)
+  end
+
+  defp message_shape_ok?(_message, _pattern), do: true
+
+  # Shape is validated; for a tuple the arg count now equals the type
+  # count, and an atom message carries no args to check.
+  defp check_message_args(message, transition, state, blame) when is_tuple(message) do
+    message
+    |> Tuple.to_list()
+    |> tl()
+    |> Enum.zip(transition.message_types)
+    |> Enum.with_index()
+    |> Enum.find_value(:ok, fn {{arg, type}, pos} ->
+      case Check.check(arg, type) do
+        :ok -> nil
+        {:error, _} -> {:error, Violation.argument_type(state, message, pos, type, arg, blame)}
+      end
+    end)
+  end
+
+  defp check_message_args(_message, _transition, _state, _blame), do: :ok
 
   # -- Guard Evaluation --
 
