@@ -18,8 +18,9 @@ The framing question for each decision: *when the tool says ✓ (or "compatible"
 > `mix accord.check` surfaces them (`⚠`, never cached, failure under `--strict`), for both
 > generated specs and `--extra` modules. **H1** (module-name collision) fixed — a case-folded
 > collision assertion over all discovered protocols aborts before a check can trust an
-> ambiguous artifact. The remaining findings below are open; each carries its own status
-> note when resolved.
+> ambiguous artifact. **C3** (compat reply matching) fixed — `Type.overlap?/2` makes reply
+> resolution order/value-aware, and update/track-default changes now warn (C010). The
+> remaining findings below are open; each carries its own status note when resolved.
 
 ## Verdict summary
 
@@ -111,7 +112,7 @@ copy-me showcase, prints `⚠` on `mix accord.check` — worth deciding whether 
 correspondence and liveness demos so the showcase runs clean. Architecture.md gains a
 "liveness under a state constraint (bounded checking)" section.
 
-### C3. `Compat.check` reply matching ignores the old client's first-match rule and all track evolution
+### C3. `Compat.check` reply matching ignores the old client's first-match rule and all track evolution — FIXED (`Type.overlap?/2`)
 
 Two independent holes, each yielding `compatible?: true` with zero errors for protocols
 where deployed old clients desync and then eat *client*-blamed violations:
@@ -134,6 +135,18 @@ conservative `disjoint?/2` companion to `subtype?/2`); update-AST changes (and t
 default changes) should at minimum get the C010 advisory treatment. Until then, ADR-011's
 "a clean result is trustworthy" holds only for protocols with non-overlapping,
 constraint-free branches.
+
+**Fix landed:** `Type.overlap?/2` (conservative toward `true` — a missed overlap is what
+would keep the hole open) detects when reply resolution is order-dependent. C005 (reply
+understood) runs unconditionally; for C006 (target divergence), disjoint reply sets keep
+the exact per-type comparison, while any *internal* overlap in either contract's branches
+switches to requiring identical reply routing — so a pure reorder or a narrowed overlapping
+branch is now flagged, and identity still passes. `check_guards` additionally compares the
+`update` AST and `check_tracks` compares track defaults, both as C010 advisories (track
+evolution feeds the `where:` refinements). The old positional constraint comparison that
+misfired C010 on any branch-count change is replaced by a sorted non-nil multiset. The
+approach is sound-conservative: it may over-report a genuinely-compatible overlapping
+refinement (rare), never under-report a desync. ADR-011 updated accordingly.
 
 ---
 

@@ -30,11 +30,18 @@ The rules (C001–C009 errors, C010 advisory):
 - messages old clients send must stay accepted, same kind, with argument types only *widening*
   (contravariance, via the new `Accord.IR.Type.subtype?/2` relation);
 - replies the new contract permits must all be understood by old clients (types only
-  *narrowing* — covariance) and must lead to the state the old client will assume;
+  *narrowing* — covariance) and must lead to the state the old client will assume. Old
+  clients resolve a reply by first-*value*-match over their branches in declaration order,
+  which agrees with a static first-supertype comparison only when reply types are disjoint;
+  when they overlap (the `where:` refinement idiom, detected by `Accord.IR.Type.overlap?/2`),
+  a value can match more than one branch, so the target check instead requires the reply
+  routing to stay identical — anything else is a potential desync;
 - server pushes must be events old clients handle, covariant payloads, matching targets;
 - state timeouts must not change the session's autonomous movement;
-- added or changed guards/`where:` constraints are advisories — refusal-freedom is not
-  statically decidable, so the check reports the change and defers to review.
+- changed guards/`where:` constraints, track updates, and track defaults are advisories —
+  they shift which messages are accepted or how tracks evolve (and tracks feed the `where:`
+  refinements that route replies), none statically decidable, so the check reports the change
+  and defers to review.
 
 **Versioning is a snapshot, not a macro.** `mix accord.compat --snapshot Module path.ir`
 serializes the IR into the repo; `mix accord.compat Module --against path.ir` gates changes in

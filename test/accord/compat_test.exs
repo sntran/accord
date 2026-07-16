@@ -321,6 +321,247 @@ defmodule Accord.CompatTest do
     end
   end
 
+  # Reply branches whose types overlap resolve by declaration order, so a
+  # static first-supertype comparison is unsound — these lock the
+  # order/value-aware behavior (finding C3).
+  describe "overlapping reply branches" do
+    defmodule OverlapV1 do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      state :idle do
+        on :poll do
+          branch {:ok, pos_integer()}, goto: :fast
+          branch {:ok, integer()}, goto: :slow
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :fast, do: on(:f, reply: :ok, goto: :idle)
+      state :slow, do: on(:s, reply: :ok, goto: :idle)
+      state :done, terminal: true
+    end
+
+    test "identical overlapping branches stay compatible" do
+      result = Compat.check(OverlapV1, OverlapV1)
+
+      assert result.compatible?
+      assert result.errors == []
+    end
+
+    defmodule Reordered do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      state :idle do
+        # Same branch set, reversed: {:ok, 5} first-matches integer → :slow
+        # here, but pos_integer → :fast under OverlapV1.
+        on :poll do
+          branch {:ok, integer()}, goto: :slow
+          branch {:ok, pos_integer()}, goto: :fast
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :fast, do: on(:f, reply: :ok, goto: :idle)
+      state :slow, do: on(:s, reply: :ok, goto: :idle)
+      state :done, terminal: true
+    end
+
+    test "reordering overlapping branches is a C006 desync" do
+      result = Compat.check(OverlapV1, Reordered)
+
+      refute result.compatible?
+      assert Enum.any?(result.errors, &(&1.code == "C006"))
+    end
+
+    defmodule NonNegOld do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      state :idle do
+        on :poll do
+          branch {:ok, non_neg_integer()}, goto: :a
+          branch {:ok, integer()}, goto: :b
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :a, do: on(:x, reply: :ok, goto: :idle)
+      state :b, do: on(:y, reply: :ok, goto: :idle)
+      state :done, terminal: true
+    end
+
+    defmodule PosNew do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      state :idle do
+        # Narrowed the first branch non_neg → pos: {:ok, 0} now routes to
+        # :b, but old clients route it to :a.
+        on :poll do
+          branch {:ok, pos_integer()}, goto: :a
+          branch {:ok, integer()}, goto: :b
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :a, do: on(:x, reply: :ok, goto: :idle)
+      state :b, do: on(:y, reply: :ok, goto: :idle)
+      state :done, terminal: true
+    end
+
+    test "narrowing an overlapping branch is a C006 desync" do
+      result = Compat.check(NonNegOld, PosNew)
+
+      refute result.compatible?
+      assert Enum.any?(result.errors, &(&1.code == "C006"))
+    end
+  end
+
+  # Track evolution feeds the where: refinements that route replies, so
+  # update and default changes are advisories, not silent passes (C3).
+  describe "track evolution" do
+    defmodule FenceV1 do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      track :fence, :non_neg_integer, default: 0
+
+      state :idle do
+        on :checkout do
+          branch {:job, pos_integer()}, goto: :working
+          branch :empty, goto: :idle
+
+          update fn _m, reply, tracks ->
+            case reply do
+              {:job, token} -> %{tracks | fence: token}
+              :empty -> tracks
+            end
+          end
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :working, do: on(:ack, reply: :done, goto: :idle)
+      state :done, terminal: true
+    end
+
+    defmodule FenceNoWrite do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      track :fence, :non_neg_integer, default: 0
+
+      state :idle do
+        on :checkout do
+          branch {:job, pos_integer()}, goto: :working
+          branch :empty, goto: :idle
+
+          # Dropped the fence write — the fencing idiom silently broken.
+          update fn _m, _reply, tracks -> tracks end
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :working, do: on(:ack, reply: :done, goto: :idle)
+      state :done, terminal: true
+    end
+
+    test "a changed update is an advisory C010, not a silent pass" do
+      result = Compat.check(FenceV1, FenceNoWrite)
+
+      assert result.compatible?
+      assert Enum.any?(result.warnings, &(&1.code == "C010" and &1.message =~ "update"))
+    end
+
+    defmodule FenceDefault5 do
+      use Accord.Protocol, tla: :off
+
+      initial :idle
+
+      track :fence, :non_neg_integer, default: 5
+
+      state :idle do
+        on :checkout do
+          branch {:job, pos_integer()}, goto: :working
+          branch :empty, goto: :idle
+
+          update fn _m, reply, tracks ->
+            case reply do
+              {:job, token} -> %{tracks | fence: token}
+              :empty -> tracks
+            end
+          end
+        end
+
+        on :stop, reply: :stopped, goto: :done
+      end
+
+      state :working, do: on(:ack, reply: :done, goto: :idle)
+      state :done, terminal: true
+    end
+
+    test "a changed track default is an advisory C010" do
+      result = Compat.check(FenceV1, FenceDefault5)
+
+      assert result.compatible?
+      assert Enum.any?(result.warnings, &(&1.code == "C010" and &1.message =~ "default"))
+    end
+
+    test "adding a disjoint reply branch does not misfire a constraint C010" do
+      # The added branch is a C005 (new reply old clients cannot handle),
+      # never a spurious 'constraints changed' advisory.
+      v2 = FenceV1
+
+      defmodule FenceBackoff do
+        use Accord.Protocol, tla: :off
+
+        initial :idle
+
+        track :fence, :non_neg_integer, default: 0
+
+        state :idle do
+          on :checkout do
+            branch {:job, pos_integer()}, goto: :working
+            branch :empty, goto: :idle
+            branch :backoff, goto: :idle
+
+            update fn _m, reply, tracks ->
+              case reply do
+                {:job, token} -> %{tracks | fence: token}
+                :empty -> tracks
+                :backoff -> tracks
+              end
+            end
+          end
+
+          on :stop, reply: :stopped, goto: :done
+        end
+
+        state :working, do: on(:ack, reply: :done, goto: :idle)
+        state :done, terminal: true
+      end
+
+      result = Compat.check(v2, FenceBackoff)
+
+      assert Enum.any?(result.errors, &(&1.code == "C005"))
+      refute Enum.any?(result.warnings, &(&1.code == "C010" and &1.message =~ "constraint"))
+    end
+  end
+
   describe "snapshots" do
     @describetag :tmp_dir
 

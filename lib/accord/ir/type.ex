@@ -165,6 +165,81 @@ defmodule Accord.IR.Type do
   defp subtype_inner?(_, _), do: false
 
   @doc """
+  Whether two types can share a value.
+
+  Reply-branch selection is first-match on the *value*, so two branches
+  whose types overlap resolve order-dependently. `Accord.Compat` uses
+  this to detect when a static, order-blind reply comparison would be
+  unsound.
+
+  Conservative toward `true`: it returns `false` only when the types are
+  *provably* disjoint, so an overlap is never missed (an unmissed overlap
+  is what keeps the compat check sound).
+  """
+  @spec overlap?(t(), t()) :: boolean()
+  def overlap?(type, type), do: true
+  def overlap?(:term, _), do: true
+  def overlap?(_, :term), do: true
+
+  # Literals: two literals overlap iff equal; a literal overlaps a type
+  # iff that single value inhabits the type.
+  def overlap?({:literal, a}, {:literal, b}), do: a == b
+  def overlap?({:literal, _} = lit, type), do: subtype?(lit, type)
+  def overlap?(type, {:literal, _} = lit), do: subtype?(lit, type)
+
+  # Unions overlap a type when any member does.
+  def overlap?({:union, types}, other), do: Enum.any?(types, &overlap?(&1, other))
+  def overlap?(other, {:union, types}), do: Enum.any?(types, &overlap?(other, &1))
+
+  # Tagged tuples overlap only with the same tag and overlapping payload.
+  def overlap?({:tagged, tag, left}, {:tagged, tag, right}) do
+    inner_overlap?(List.wrap(left), List.wrap(right))
+  end
+
+  def overlap?({:tagged, _, _}, {:tagged, _, _}), do: false
+
+  # Tuples overlap element-wise at equal arity.
+  def overlap?({:tuple, left}, {:tuple, right}) when length(left) == length(right) do
+    left |> Enum.zip(right) |> Enum.all?(fn {a, b} -> overlap?(a, b) end)
+  end
+
+  def overlap?({:tuple, _}, {:tuple, _}), do: false
+
+  # Any two lists share the empty list.
+  def overlap?({:list, _}, {:list, _}), do: true
+
+  # Scalar carriers: same base kind overlaps; provably-different base
+  # kinds are disjoint; anything structural (map/struct) stays
+  # conservative (`true`) rather than risk missing an overlap.
+  def overlap?(left, right) do
+    case {base_kind(left), base_kind(right)} do
+      {kind, kind} -> true
+      {left_kind, right_kind} when left_kind != nil and right_kind != nil -> false
+      _ -> true
+    end
+  end
+
+  defp inner_overlap?(left, right) when length(left) == length(right) do
+    left |> Enum.zip(right) |> Enum.all?(fn {a, b} -> overlap?(a, b) end)
+  end
+
+  defp inner_overlap?(_, _), do: false
+
+  # Provably-disjoint scalar kinds; nil means "not classified, assume it
+  # can overlap". Structs and maps deliberately fall through to nil.
+  defp base_kind(:integer), do: :number
+  defp base_kind(:pos_integer), do: :number
+  defp base_kind(:non_neg_integer), do: :number
+  defp base_kind(:atom), do: :atom
+  defp base_kind(:boolean), do: :atom
+  defp base_kind(:binary), do: :binary
+  defp base_kind(:string), do: :binary
+  defp base_kind({:list, _}), do: :list
+  defp base_kind({:tuple, _}), do: :tuple
+  defp base_kind({:tagged, _, _}), do: :tuple
+  defp base_kind(_), do: nil
+
+  @doc """
   Converts a type to a human-readable string.
   """
   @spec to_string(t()) :: String.t()
