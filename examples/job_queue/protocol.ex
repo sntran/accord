@@ -103,7 +103,12 @@ defmodule Accord.Examples.JobQueue.Protocol do
     correspondence :checkout, [:ack, :nack, :lease_expired]
   end
 
-  property :worker_finishes do
-    liveness in_state(:working), leads_to: in_state(:idle), assuming: [:ack]
-  end
+  # A liveness property (working ~> idle, assuming: [:ack]) would be true
+  # here, but correspondence emits its counter bound as a TLA+ CONSTRAINT,
+  # and TLC checks liveness only over states satisfying active constraints
+  # (its §14.3.5 caveat) — so the verdict would be *bounded* and
+  # mix accord.check would flag it with ⚠. Liveness is shown where it is
+  # cleanly discharged instead: the circuit_breaker example, whose
+  # state_timeout gives the recovery action weak fairness with no
+  # constraint in play.
 end

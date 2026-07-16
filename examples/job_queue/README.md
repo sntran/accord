@@ -15,8 +15,13 @@ server event, and Kleppmann's fencing-token critique made executable.
 - `correspondence :checkout, [:ack, :nack, :lease_expired]` — every
   lease settles, however it ends.
 - `ordered :ack, by: :token` (runtime-only — labeled in the spec),
-  paired local invariants (`lease_iff_working`), `forbidden`, an action
-  property (fence monotonic), and liveness under `assuming: [:ack]`.
+  paired local invariants (`lease_iff_working`), `forbidden`, and an
+  action property (fence monotonic).
+
+Liveness is *not* asserted here on purpose: correspondence emits its
+counter bound as a TLA+ `CONSTRAINT`, and TLC checks liveness only over
+constrained states (a bounded, `⚠`-flagged verdict). The circuit_breaker
+example shows liveness where it is cleanly discharged by a `state_timeout`.
 
 ## What TLC finds
 
