@@ -286,6 +286,10 @@ and directly weakens deployed runtime guarantees.
   monitor's action check must exempt transitions that leave the property's tracked vars
   unchanged, mirroring `_<<vars>>`; or the emission must drop the subscript to match the
   runtime (choose one semantics and pin it both directions with a fixture).
+  **FIXED:** `check_single` for `:action` now returns `{:ok, data}` when
+  `old_tracks == new_tracks` (all tracks unchanged = a stutter step), mirroring the model's
+  `_<<tracks>>` subscript; genuine track-changing violations still fire. Regression test in
+  `monitor_test.exs` pins a query as a stutter and a real decrease as a violation.
 
 ## Low
 

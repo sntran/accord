@@ -555,6 +555,62 @@ defmodule Accord.MonitorTest do
       assert violation.kind == :action_violated
       assert violation.blame == :property
     end
+
+    test "a track-preserving transition is a stutter, not an action violation" do
+      # `[][value' > value]_<<value>>` exempts steps that leave `value`
+      # unchanged; a query transition (no update) is such a step and must
+      # not blame a conforming server, even under a strict property.
+      strict_ir = %{
+        action_ir()
+        | states: %{
+            ready: %State{
+              name: :ready,
+              transitions: [
+                %Transition{
+                  message_pattern: {:set, :_, :_},
+                  message_types: [:term, :integer],
+                  kind: :call,
+                  branches: [%Branch{reply_type: {:tagged, :ok, :integer}, next_state: :ready}],
+                  update: %{fun: fn {:set, _, val}, _r, t -> %{t | value: val} end, ast: nil}
+                },
+                %Transition{
+                  message_pattern: :peek,
+                  message_types: [],
+                  kind: :call,
+                  branches: [%Branch{reply_type: {:literal, :ok}, next_state: :ready}]
+                }
+              ]
+            }
+          },
+          properties: [
+            %IR.Property{
+              name: :strictly_increasing,
+              checks: [
+                %IR.Check{
+                  kind: :action,
+                  spec: %{fun: fn old, new -> new.value > old.value end, ast: nil}
+                }
+              ]
+            }
+          ]
+      }
+
+      compiled = compile_ir(strict_ir)
+
+      {:ok, server} = EchoServer.start_link(%{peek: :ok, set: fn {:set, _, v} -> {:ok, v} end})
+      {:ok, monitor} = start_monitor(compiled, server, violation_policy: :crash)
+      Process.flag(:trap_exit, true)
+
+      # The query leaves `value` unchanged — a stutter, not a violation.
+      assert :ok = Monitor.call(monitor, :peek)
+      assert Process.alive?(monitor)
+
+      # A real decrease still violates.
+      assert {:ok, 3} = Monitor.call(monitor, {:set, :a, 3})
+      assert {:ok, 1} = Monitor.call(monitor, {:set, :a, 1})
+      assert_receive {:EXIT, ^monitor, {:protocol_violation, violation}}
+      assert violation.kind == :action_violated
+    end
   end
 
   describe "property checking — bounded" do

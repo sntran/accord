@@ -697,18 +697,29 @@ defmodule Accord.Monitor do
          new_tracks,
          data
        ) do
-    if check.spec.fun.(old_tracks, new_tracks) do
-      {:ok, data}
-    else
-      base = Violation.action_violated(next_state, property.name, old_tracks, new_tracks)
+    cond do
+      # The action property is emitted as `[][pred]_<<tracks>>`, whose
+      # subscript exempts steps that leave every track unchanged (a
+      # stuttering step). A pure-query transition is such a step, so the
+      # model never applies `pred` to it — and neither must the monitor,
+      # or it would blame a conforming server for a transition the spec
+      # certifies.
+      old_tracks == new_tracks ->
+        {:ok, data}
 
-      violation = %{
-        base
-        | span: check.span,
-          context: Map.put(base.context, :check_kind, check.kind)
-      }
+      check.spec.fun.(old_tracks, new_tracks) ->
+        {:ok, data}
 
-      {:violation, violation, data}
+      true ->
+        base = Violation.action_violated(next_state, property.name, old_tracks, new_tracks)
+
+        violation = %{
+          base
+          | span: check.span,
+            context: Map.put(base.context, :check_kind, check.kind)
+        }
+
+        {:violation, violation, data}
     end
   end
 
