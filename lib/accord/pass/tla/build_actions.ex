@@ -620,13 +620,17 @@ defmodule Accord.Pass.TLA.BuildActions do
         end
 
       # case reply do :ok -> body1; _ -> body2 end
-      # Resolve against the branch's reply type. Events have no reply
-      # (branch is nil), so a case there is not statically resolvable.
-      {:case, _, [_expr, [do: clauses]]} ->
-        if branch == nil do
-          {:unsupported, ast}
-        else
+      # Resolvable only when the scrutinee is the reply variable, so the
+      # arm can be selected by the branch's reply type. A case on the
+      # message, a track, or a nested binding (`case n do ...`) cannot be
+      # statically resolved — translating it anyway would silently drop
+      # the arms that do not appear to match, so it is an error (E042).
+      # Events have no reply (branch is nil) and are never resolvable.
+      {:case, _, [scrutinee, [do: clauses]]} ->
+        if branch != nil and reply_var?(scrutinee, ctx) do
           resolve_case_for_branch(clauses, branch, ctx)
+        else
+          {:unsupported, ast}
         end
 
       # if reply == :ok, do: ..., else: ...
@@ -698,6 +702,22 @@ defmodule Accord.Pass.TLA.BuildActions do
   defp resolve_case_for_branch(clauses, branch, ctx) do
     reply_type = branch.reply_type
 
+    # A `when` guard depends on the runtime reply value, which the
+    # extractor cannot evaluate against a static type. Selecting an arm
+    # by type alone would ignore the guard and pick the wrong body, so a
+    # case with any guarded arm is untranslatable (E042) rather than
+    # silently mistranslated.
+    if Enum.any?(clauses, &guarded_clause?/1) do
+      {:unsupported, {:case, [], clauses}}
+    else
+      resolve_unguarded_case(clauses, reply_type, branch, ctx)
+    end
+  end
+
+  defp guarded_clause?({:->, _, [[{:when, _, _}], _body]}), do: true
+  defp guarded_clause?(_), do: false
+
+  defp resolve_unguarded_case(clauses, reply_type, branch, ctx) do
     # Find the first matching clause.
     matching_clause =
       Enum.find(clauses, fn {:->, _, [[pattern], _body]} ->

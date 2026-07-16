@@ -583,6 +583,80 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert report.code == "E042"
     end
 
+    test "a case dispatching on the message (not the reply) reports E042" do
+      # Only a case on the reply can be resolved against the branch's
+      # reply type; a case on the message would silently drop arms.
+      ast =
+        quote(
+          do: fn msg, _reply, tracks ->
+            case msg do
+              {:set, 1} -> %{tracks | balance: 1}
+              _ -> tracks
+            end
+          end
+        )
+
+      assert {:error, [report]} = run_actions(update_ir(ast))
+      assert report.code == "E042"
+    end
+
+    test "a case on the reply with a when-guarded arm reports E042" do
+      # The guard depends on the runtime value; selecting an arm by type
+      # alone would ignore it and emit the wrong update.
+      ast =
+        quote(
+          do: fn {:set, _val}, reply, tracks ->
+            case reply do
+              n when n > 2 -> %{tracks | balance: 0}
+              _ -> %{tracks | balance: tracks.balance + 1}
+            end
+          end
+        )
+
+      assert {:error, [report]} = run_actions(update_ir(ast))
+      assert report.code == "E042"
+    end
+
+    test "a case nested inside a reply arm (dispatching on a binding) reports E042" do
+      ast =
+        quote(
+          do: fn {:set, _val}, reply, tracks ->
+            case reply do
+              {:ok, n} ->
+                case n do
+                  1 -> %{tracks | balance: 0}
+                  _ -> %{tracks | balance: tracks.balance + 1}
+                end
+
+              :none ->
+                tracks
+            end
+          end
+        )
+
+      ir = update_ir(ast, reply_type: {:tagged, :ok, [:pos_integer]})
+
+      assert {:error, [report]} = run_actions(ir)
+      assert report.code == "E042"
+    end
+
+    test "a well-formed case on the reply still compiles" do
+      # The fixes must not over-reject the legitimate dispatch-on-reply
+      # idiom the examples rely on.
+      ast =
+        quote(
+          do: fn {:set, val}, reply, tracks ->
+            case reply do
+              :ok -> %{tracks | balance: val}
+              _ -> tracks
+            end
+          end
+        )
+
+      assert {:ok, [action]} = run_actions(update_ir(ast))
+      assert action.primed["balance"] == "msg_val"
+    end
+
     test "errors from multiple sites are all collected" do
       guard_ast = quote(do: fn {:bet, chips}, tracks -> Enum.max([chips, 1]) > 0 end)
       update_ast = quote(do: fn {:bet, chips}, _reply, tracks -> %{tracks | balanse: chips} end)
