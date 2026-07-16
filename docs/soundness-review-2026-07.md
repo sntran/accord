@@ -10,6 +10,12 @@ executable probes — not just argued statically. Probe scripts referenced here 
 The framing question for each decision: *when the tool says ✓ (or "compatible", or
 "replays"), is the claim true — and when it cannot be, is the asymmetry declared?*
 
+> **Status (updated 2026-07-16):** fixes have begun landing in fix-order. **H5**
+> (arity bypass) fixed in `dbcb551` — wrong-shape messages are now the `:malformed_message`
+> violation, never forwarded. **C1** (update extractor) fixed in `86780ee` — non-reply case
+> scrutinees and `when`-guarded arms are now E042, not silent mis-translations. The
+> remaining findings below are open; each carries its own status note when resolved.
+
 ## Verdict summary
 
 The redesign's *fail-closed instincts held*: caching, stale-spec lifecycle, trace-replay
@@ -24,7 +30,7 @@ warnings are swallowed** (liveness under state constraints, symmetry via `--extr
 
 ## Critical — false ✓ (tool claims verified; runtime violates)
 
-### C1. Update extractor silently mis-extracts nested `case` and `when`-guarded arms
+### C1. Update extractor silently mis-extracts nested `case` and `when`-guarded arms — FIXED (`86780ee`)
 
 `Accord.Pass.TLA.BuildActions.extract_update_body/3` ignores the case *scrutinee*
 (`{:case, _, [_expr, [do: clauses]]}` — `_expr` is never checked against the reply
@@ -159,7 +165,7 @@ validation pass that symmetry-set values do not appear asymmetrically in formula
 note the raw-string `state_constraint` and `--extra` surfaces can already express such
 formulas today (H2).
 
-### H5. Arity-mismatch client messages bypass validation and reach the server unblamed
+### H5. Arity-mismatch client messages bypass validation and reach the server unblamed — FIXED (`dbcb551`)
 
 `Monitor.check_message_types/4` (`monitor.ex:534-535`) returns `:ok` — accept — whenever
 `length(args) != length(types)`. A message whose tag matches a transition but whose tuple
