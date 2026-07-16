@@ -458,6 +458,12 @@ downgrade to a warning and any stale spec is deleted.
 - W005 -- liveness check without assuming: is verified under blanket
   WF_vars(Next), where any client loop or reachable terminal fails it.
 
+Each liveness property carries its own fairness as an implication
+(`Name == (WF_vars(...)) => (P ~> Q)`) checked against the plain `Spec`, so a
+property is judged only under the assumptions it declares — never under a
+sibling's. State-timeout actions are physically fair regardless, so their
+WF_vars is added to every liveness antecedent.
+
 ### Help text
 
 Every error report includes contextual help that suggests how to fix the problem.

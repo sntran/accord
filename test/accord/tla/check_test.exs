@@ -58,6 +58,14 @@ defmodule Accord.TLA.CheckTest do
          %{tmp_dir: tmp_dir} do
       assert_fails(Accord.Test.LivenessUnfair.Protocol, :temporal, tmp_dir: tmp_dir)
     end
+
+    test "a liveness property cannot borrow a sibling's fairness assumption (H3)",
+         %{tmp_dir: tmp_dir} do
+      # finishes_when_retry_is_fair is unprovable under its own :retry
+      # fairness; it only passed when the old shared FairSpec pooled in
+      # :finish's fairness. With per-property fairness the protocol fails.
+      assert_fails(Accord.Test.FairnessLeak.Protocol, :temporal, tmp_dir: tmp_dir)
+    end
   end
 
   describe "action property violations" do

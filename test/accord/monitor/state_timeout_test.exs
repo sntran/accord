@@ -131,8 +131,11 @@ defmodule Accord.Monitor.StateTimeoutTest do
 
       assert result.tla =~ "AfterActiveToExpired =="
       assert result.tla =~ ~s(state = "active")
+      # The timer's weak fairness now lives inside the liveness property's
+      # own implication rather than a shared FairSpec (H3).
       assert result.tla =~ "WF_vars(AfterActiveToExpired)"
-      assert result.cfg =~ "SPECIFICATION FairSpec"
+      assert result.cfg =~ "SPECIFICATION Spec"
+      refute result.cfg =~ "SPECIFICATION FairSpec"
     end
 
     test "a timeout on the trigger state discharges W005" do

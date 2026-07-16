@@ -189,7 +189,7 @@ defmodule Accord.Pass.TLA.EmitTest do
   end
 
   describe "fairness" do
-    test "emits FairSpec when liveness properties exist" do
+    test "a liveness property carries its own fairness as an implication" do
       prop = %Property{
         name: "EventuallyDone",
         kind: :temporal,
@@ -200,9 +200,14 @@ defmodule Accord.Pass.TLA.EmitTest do
       {:ok, %{tla: tla, cfg: cfg}} =
         Emit.run(minimal_state_space(), [sample_action()], [prop])
 
-      assert tla =~ "FairSpec == Spec /\\ WF_vars(Next)"
-      assert cfg =~ "SPECIFICATION FairSpec"
-      refute cfg =~ "SPECIFICATION Spec\n"
+      # No blanket assumption is checked (the specification stays plain
+      # Spec); the fairness gates only this property.
+      assert tla =~
+               "EventuallyDone == (WF_vars(Next)) => (state = \"ready\" ~> state = \"done\")"
+
+      refute tla =~ "FairSpec"
+      assert cfg =~ "SPECIFICATION Spec"
+      refute cfg =~ "SPECIFICATION FairSpec"
     end
 
     test "assuming: tags produce per-action fairness instead of WF_vars(Next)" do
@@ -217,9 +222,9 @@ defmodule Accord.Pass.TLA.EmitTest do
       {:ok, %{tla: tla, cfg: cfg}} =
         Emit.run(minimal_state_space(), [sample_action()], [prop])
 
-      assert tla =~ "FairSpec == Spec /\\ WF_vars(GoFromReadyToDone)"
+      assert tla =~ "EventuallyDone == (WF_vars(GoFromReadyToDone)) => ("
       refute tla =~ "WF_vars(Next)"
-      assert cfg =~ "SPECIFICATION FairSpec"
+      assert cfg =~ "SPECIFICATION Spec"
     end
 
     test "fairness: :strong emits SF_vars" do
@@ -263,7 +268,10 @@ defmodule Accord.Pass.TLA.EmitTest do
       assert tla =~ "WF_vars(GoFromReadyToReady)"
     end
 
-    test "mixed properties keep blanket WF_vars(Next) for the untagged one" do
+    test "each liveness property is gated only by its own declared fairness (H3)" do
+      # The heart of the fix: EventuallyDone assumes only :go, AlsoDone
+      # only blanket fairness. Neither may borrow the other's assumption,
+      # so each appears in its own implication — not a shared FairSpec.
       tagged = %Property{
         name: "EventuallyDone",
         kind: :temporal,
@@ -282,11 +290,16 @@ defmodule Accord.Pass.TLA.EmitTest do
       {:ok, %{tla: tla}} =
         Emit.run(minimal_state_space(), [sample_action()], [tagged, untagged])
 
-      assert tla =~ "WF_vars(Next)"
-      assert tla =~ "WF_vars(GoFromReadyToDone)"
+      refute tla =~ "FairSpec"
+      # EventuallyDone's antecedent is exactly its :go action — it does not
+      # inherit AlsoDone's WF_vars(Next).
+      assert tla =~ "EventuallyDone == (WF_vars(GoFromReadyToDone)) => ("
+      refute tla =~ "EventuallyDone == (WF_vars(GoFromReadyToDone) /\\ WF_vars(Next))"
+      # AlsoDone's antecedent is exactly the blanket assumption.
+      assert tla =~ "AlsoDone == (WF_vars(Next)) => ("
     end
 
-    test "no FairSpec for action properties (temporal but not liveness)" do
+    test "action properties (temporal but not liveness) get no fairness wrapper" do
       prop = %Property{
         name: "Monotonic",
         kind: :temporal,
@@ -298,6 +311,8 @@ defmodule Accord.Pass.TLA.EmitTest do
         Emit.run(minimal_state_space(), [sample_action()], [prop])
 
       refute tla =~ "FairSpec"
+      refute tla =~ "=> (Monotonic"
+      assert tla =~ "Monotonic == [][counter' >= counter]_<<counter>>"
       assert cfg =~ "SPECIFICATION Spec"
     end
   end

@@ -21,6 +21,12 @@ The framing question for each decision: *when the tool says ✓ (or "compatible"
 > ambiguous artifact. **C3** (compat reply matching) fixed — `Type.overlap?/2` makes reply
 > resolution order/value-aware, and update/track-default changes now warn (C010). The
 > remaining findings below are open; each carries its own status note when resolved.
+>
+> **H3** (per-property fairness) fixed — `FairSpec` is gone; each liveness property is an
+> implication `(its own fairness) => (P ~> Q)` against the plain `Spec`, proven with the
+> `FairnessLeak` TLC fixture. **M9** (action stutter) fixed — the monitor exempts
+> track-preserving transitions. The only High still open is **H4** (atom rendering, coupled
+> with symmetry-usage validation).
 
 ## Verdict summary
 
@@ -181,7 +187,7 @@ exact combination `Emit.active_symmetry/2` suppresses for generated specs. TLC w
 extra module (or its properties) before inheriting; surface TLC warnings (same plumbing
 as C2).
 
-### H3. Per-property fairness assumptions pool into one global `FairSpec`
+### H3. Per-property fairness assumptions pool into one global `FairSpec` — FIXED
 
 `assuming:` is documented per-property, but all properties share one
 `SPECIFICATION FairSpec` containing the *union* of every property's fairness conjuncts —
@@ -189,6 +195,16 @@ plus blanket `WF_vars(Next)` if any sibling lacks `assuming:`. Each liveness pro
 therefore checked under assumptions it did not declare and can ✓ on a sibling's fairness.
 **Fix:** encode per-property fairness as an implication in the property itself
 (`PROPERTY (WF_vars(A) /\ …) => (P ~> Q)`) instead of strengthening the spec.
+
+**Fix landed:** `FairSpec` is gone. Each liveness formula is emitted as
+`Name == (its own fairness) => (P ~> Q)` and checked against the plain `Spec`, so no
+property borrows a sibling's assumption. State-timeout actions are physically fair
+regardless of which property is checked, so their `WF_vars` is added to every liveness
+antecedent (not a borrowed declaration). Proven end-to-end against real TLC with the
+`FairnessLeak` fixture: two liveness properties with different `assuming:` tags, one
+provable only by borrowing the other's fairness — the old pooled spec reports "No error",
+the per-property spec reports "Temporal properties were violated". Pinned by
+`check_test.exs`.
 
 ### H4. Atom rendering is incoherent across emission sites (loud, but late and misleading)
 
