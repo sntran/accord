@@ -27,10 +27,43 @@ defmodule Accord.TLA.Files do
 
   @doc """
   The TLA+ MODULE name for a protocol module.
+
+  The full concatenated path keeps the common case unique in the flat
+  directory (`Lock.Protocol` and `Queue.Protocol` do not both become
+  `Protocol`). It is deliberately *not* injective: two module paths can
+  concatenate to the same name (`A.BC` and `AB.C` both → `ABC`), and the
+  build directory is case-insensitive on macOS/Windows (`Foo.Bar` and
+  `Foo.BAR` collide as files). Those rare collisions are caught loudly by
+  `name_collisions/1` before any check trusts an ambiguous artifact,
+  rather than silently verifying the wrong spec.
   """
   @spec tla_module_name(module()) :: String.t()
   def tla_module_name(module_name) do
     module_name |> Module.split() |> Enum.join()
+  end
+
+  @doc """
+  Finds protocol modules whose generated artifacts would collide.
+
+  Two distinct modules collide when their `tla_module_name/1` values are
+  equal ignoring case — either an exact concatenation clash or a
+  case-only difference that a case-insensitive filesystem cannot tell
+  apart. Both would share one flat `.tla`/`.cfg` file, so the last
+  compiled wins and a check could verify a spec generated from a
+  different module. Returns one `{name, modules}` entry per collision
+  (empty when there are none); `modules` is sorted for stable reporting.
+  """
+  @spec name_collisions([module()]) :: [{String.t(), [module()]}]
+  def name_collisions(modules) do
+    modules
+    |> Enum.uniq()
+    |> Enum.group_by(fn mod -> String.downcase(tla_module_name(mod)) end)
+    |> Enum.filter(fn {_folded, mods} -> length(mods) > 1 end)
+    |> Enum.map(fn {_folded, mods} ->
+      sorted = Enum.sort(mods)
+      {tla_module_name(hd(sorted)), sorted}
+    end)
+    |> Enum.sort()
   end
 
   @doc """

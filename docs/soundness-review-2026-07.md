@@ -16,8 +16,10 @@ The framing question for each decision: *when the tool says ✓ (or "compatible"
 > and `when`-guarded arms are now E042, not silent mis-translations. **C2 + H2** (swallowed
 > TLC warnings) fixed together — `TLCParser` now captures TLC's soundness warnings and
 > `mix accord.check` surfaces them (`⚠`, never cached, failure under `--strict`), for both
-> generated specs and `--extra` modules. The remaining findings below are open; each carries
-> its own status note when resolved.
+> generated specs and `--extra` modules. **H1** (module-name collision) fixed — a case-folded
+> collision assertion over all discovered protocols aborts before a check can trust an
+> ambiguous artifact. The remaining findings below are open; each carries its own status
+> note when resolved.
 
 ## Verdict summary
 
@@ -137,7 +139,7 @@ constraint-free branches.
 
 ## High — silent wrong-✓ or unsound as declared
 
-### H1. `Files.tla_module_name/1` collides on module-path boundaries
+### H1. `Files.tla_module_name/1` collides on module-path boundaries — FIXED (`Files.name_collisions/1`)
 
 `Module.split |> Enum.join` maps `A.BC` and `AB.C` to the same `ABC` (verified), so both
 share one spec file and one cache entry; each is ✓-reported against whichever compiled
@@ -145,6 +147,17 @@ last. Case-insensitive filesystems (macOS default) add a `Foo.BAR`/`Foo.Bar` var
 Directly falsifies ADR-007's "every listed protocol was verified against a spec generated
 from its current source." **Fix:** an unambiguous join (escape + separator, or a short
 hash suffix) plus a collision assertion at compile or check time.
+
+**Fix landed:** a collision *assertion* rather than a renaming. `Files.name_collisions/1`
+groups protocols by their case-folded artifact name and returns any that clash;
+`mix accord.check` runs it over **all** discovered protocols (not just the requested
+subset — a single requested module can collide with a sibling that compiled later) and
+aborts with the offending modules named. Concatenation is kept deliberately: it has
+*fewer* collision cases than an underscore-join (which would newly clash `Foo_Bar` with
+`Foo.Bar`), a rename would break every hand-written `--extra` module's `EXTENDS`, and the
+case-insensitive-filesystem clash needs the fold-aware assertion regardless. The silent
+wrong-✓ becomes a loud, actionable error; the astronomically-rare collision is the only
+case that must rename.
 
 ### H2. `--extra` cfg merging reintroduces SYMMETRY (and CONSTRAINT) under user liveness — FIXED (TLC-warning plumbing)
 

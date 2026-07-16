@@ -102,6 +102,12 @@ defmodule Mix.Tasks.Accord.Check do
     force? = Keyword.get(opts, :force, false)
     extras = Keyword.get_values(opts, :extra)
 
+    # Collisions are detected across every protocol in the app, not just
+    # the requested subset: a single requested module can share its flat
+    # artifact with a sibling that compiled later, so the on-disk spec
+    # might belong to the other module. Guard before trusting any check.
+    assert_no_name_collisions(discover_protocols())
+
     protocols =
       if modules == [] do
         discover_protocols()
@@ -235,6 +241,28 @@ defmodule Mix.Tasks.Accord.Check do
   end
 
   # -- Protocol Discovery --
+
+  # A name collision means two protocols share one flat .tla/.cfg, so a
+  # ✓ could describe a spec generated from a different module. That must
+  # never pass silently — abort with the offending modules named.
+  defp assert_no_name_collisions(protocols) do
+    case Files.name_collisions(protocols) do
+      [] ->
+        :ok
+
+      collisions ->
+        detail =
+          Enum.map_join(collisions, "\n", fn {name, mods} ->
+            "  #{name}: #{Enum.map_join(mods, ", ", &inspect/1)}"
+          end)
+
+        Mix.raise(
+          "Protocol modules map to the same TLA+ artifact name (they would " <>
+            "overwrite each other in _build/accord/, and a check could verify " <>
+            "the wrong spec). Rename one of each colliding pair:\n" <> detail
+        )
+    end
+  end
 
   defp discover_protocols do
     Mix.Project.compile_path()
