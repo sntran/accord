@@ -48,6 +48,17 @@ than the `UNCHANGED`-vacuity E042 warns about — it is a *wrong* update, silent
 (`case` on the *message* is usually rejected only by luck: its arm patterns happen not to
 type-match the reply; add a wildcard arm and it silently resolves for every branch.)
 
+The sharpest witness — a **`forbidden` invariant that TLC proves and the runtime
+violates** (verified end-to-end): reply type is the bare carrier `integer()`, and the
+update is `case reply do n when n > 2 -> %{tracks | big: true}; _ -> tracks end` with
+`forbidden fn tracks -> tracks.big end`. The `when`-arm that *sets* `big` is invisible to
+`resolve_case_for_branch/3`, and the `_ -> tracks` identity arm wins, so the emitted
+action drops `big` from its primed map entirely (`RollFromSToS` primes only `state`). The
+model never assigns `big`, `~(big)` holds vacuously, TLC ✓. At runtime, server reply `3`
+sets `big = true` and `never_big` fires `:invariant_violated`. Same root cause as the
+`when`-arm hole above, in the *setter*-dropped direction — and it shows the false ✓ reaches
+`forbidden`, not just `invariant`.
+
 **Fix:** `extract_update_body` must verify the case scrutinee is the reply variable
 (anything else → E042); `resolve_case_for_branch` must treat `when`-guarded arms as
 untranslatable (E042) rather than skipping them; add regression fixtures for both shapes.
@@ -148,6 +159,25 @@ validation pass that symmetry-set values do not appear asymmetrically in formula
 note the raw-string `state_constraint` and `--extra` surfaces can already express such
 formulas today (H2).
 
+### H5. Arity-mismatch client messages bypass validation and reach the server unblamed
+
+`Monitor.check_message_types/4` (`monitor.ex:534-535`) returns `:ok` — accept — whenever
+`length(args) != length(types)`. A message whose tag matches a transition but whose tuple
+arity does not is therefore forwarded to the upstream server **with no type check and no
+`:client` blame**. Verified end-to-end: against `on {:put, n :: integer()}`, the call
+`{:put, :not_an_int, :extra, :more}` returns the server's normal reply, the server
+receives the malformed term, and `ViolationCollector` drains *zero* violations. Catching
+malformed client messages and assigning blame is the monitor's entire job, so this is a
+runtime-enforcement hole, not a modeling asymmetry: the contract's "malformed client
+message ⇒ `:client` blame" guarantee is silently false for any wrong-arity message.
+(`{:put, :nan}` — correct arity, wrong element type — is still correctly blamed; only
+arity mismatch escapes.) The comment-free `:ok` branch reads as "not this transition", but
+there is no other transition to fall to, so accept is the wrong default. **Fix:** an arity
+mismatch on a tag-matched transition is an `invalid_message` (or dedicated arity)
+violation with `:client` blame; add a regression fixture. This is a monitor bug
+independent of the TLA+ pipeline — worth fixing before the criticals since it is one line
+and directly weakens deployed runtime guarantees.
+
 ---
 
 ## Medium
@@ -196,6 +226,18 @@ formulas today (H2).
   the `subtype?/2` "property test" is a fixed whitelist of six pairs with canonical-value
   generators (no floats, binaries, improper lists, unions, or random type pairs — none of
   M3's witnesses are generatable), overstating ADR-011's "property-tested" claim.
+- **M9. Action properties ignore the model's stuttering exemption — conforming servers
+  get blamed** (verified). `build_property` for `:action` emits `[][pred]_<<tracks>>`,
+  whose `_<<tracks>>` subscript exempts steps that leave all tracks unchanged; the monitor
+  (`check_single` for `:action`) applies `pred` to *every* transition. So a pure-query
+  transition that changes no track — e.g. a `:peek` under `action fn o, n -> n.level >
+  o.level end` — is a legal stutter in the model (TLC ✓) but fires `:action_violated`
+  (`:property` blame) at runtime. Runtime is *stricter* than the model: it blames a server
+  the spec certifies. This bites any protocol pairing an action property with query-like
+  transitions (the payment example's money-monotonicity is the shape at risk). **Fix:** the
+  monitor's action check must exempt transitions that leave the property's tracked vars
+  unchanged, mirroring `_<<vars>>`; or the emission must drop the subscript to match the
+  runtime (choose one semantics and pin it both directions with a fixture).
 
 ## Low
 
@@ -275,17 +317,21 @@ formulas today (H2).
 | ADR-010 "trace validation is a conformance oracle for the compiler" | Overclaimed — narrow to *strict-direction action-translation oracle* (M1, M2) |
 | ADR-011 "a clean compat result is trustworthy" | Broken by C3 until branch matching is value-aware and updates are at least advisory |
 | "✓ is never stale, never vacuous" (check workflow) | Held except H1 (name collision) and the swallowed-TLC-warning channel (C2/H2) |
+| ADR-003 "malformed messages ⇒ correct runtime blame" | Broken by H5 (wrong-arity messages forwarded unblamed) and M9 (conforming servers blamed for stutters) |
 
 ## Recommended fix order
 
-1. **C1** — extractor scrutinee + `when` handling (small, surgical, removes the worst
+1. **H5** — one-line monitor fix (arity mismatch ⇒ `:client` blame, not accept); directly
+   restores a deployed runtime guarantee. Do first: smallest, highest deployed impact.
+2. **C1** — extractor scrutinee + `when` handling (small, surgical, removes the worst
    false-✓ class) with regression fixtures.
-2. **C2 + H2 shared plumbing** — surface TLC warnings in `TLCParser`; W-code for
+3. **C2 + H2 shared plumbing** — surface TLC warnings in `TLCParser`; W-code for
    `CONSTRAINT`+temporal and for `--extra` SYMMETRY/CONSTRAINT inheritance.
-3. **H1** — module-name disambiguation + collision assertion.
-4. **C3** — `disjoint?/2`, order-aware reply matching, update-change advisory; demote
+4. **H1** — module-name disambiguation + collision assertion.
+5. **C3** — `disjoint?/2`, order-aware reply matching, update-change advisory; demote
    ADR-011's claim until landed.
-5. **H4** — one consistent atom rendering (+ symmetry-usage validation, per the coupling
+6. **H4** — one consistent atom rendering (+ symmetry-usage validation, per the coupling
    note) and E044 coverage for model-value domains.
-6. **H3** — fairness-as-implication encoding.
-7. The mediums, then the lows, mostly docs/diagnostics.
+7. **H3** — fairness-as-implication encoding.
+8. **M9** — action-property stuttering exemption (pin both directions with a fixture).
+9. The remaining mediums, then the lows, mostly docs/diagnostics.
