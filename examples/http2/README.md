@@ -27,49 +27,60 @@ with real TLC (`assert_passes`).
 
 ## Live divergence detection
 
-The headline: `stream.ex`'s monitor, placed between a client and Bandit, catches
-the RFC 9113 §8.1 trailers divergence in a running server.
+The headline: accord's monitors, placed between a client and Bandit, catch two
+real RFC 9113 divergences in a running server and — the key point — blame the
+**server** for each.
 
 ```
 raw HTTP/2 client ── frames ──▶ [ TapProxy ] ── frames ──▶ Bandit
                                      │ (bytes forwarded verbatim)
-                                     ▼
-                          per-stream Stream.Protocol monitor
-                                     │
-                     flags a bare trailing HEADERS (no END_STREAM) in :open
+                                     ├─▶ per-stream  Stream.Protocol monitor
+                                     └─▶ connection  StreamIdMonitor.Protocol monitor
 ```
 
 `TapProxy` (`tap_proxy.ex`) relays TCP bytes unchanged while parsing the HTTP/2
 frame layer — just the 9-byte frame headers (type + END_STREAM flag + stream id),
-no HPACK, which is exactly what the stream machine dispatches on. Each stream
-frame is fed to a per-stream monitor as a `cast` (client → server) or server-push
-`event` (server → client). Because it monitors live traffic, `stream.ex` models
-every frame a conformant server legitimately sends (including server
-WINDOW_UPDATE), so a well-formed request raises nothing — that faithfulness is the
-first thing the test asserts.
+no HPACK, which is exactly what the state machines dispatch on. Each stream frame
+is fed to a per-stream monitor as a `cast` (client → server) or server-push
+`event` (server → client); stream opens and connection-level frames feed one
+connection-wide monitor. Because it watches live traffic, the specs model every
+frame a conformant server legitimately sends (including server WINDOW_UPDATE), so
+a well-formed request raises nothing — that faithfulness is the first thing the
+test asserts.
 
-Then the client sends a trailing HEADERS frame **without** END_STREAM and more
-DATA after it. Bandit accepts the malformed trailers and folds the trailing DATA
-into the request body (`"OKMORE"`); accord flags the frame, because the only
-HEADERS legal after the request headers is a trailer that bears END_STREAM
-(`:headers_es`) — a bare `:headers` has no transition in `:open`. A compliant
-server would reset the stream with a PROTOCOL_ERROR (§8.1).
+**§8.1 — trailers without END_STREAM (server must reset).** The client ends the
+body with a trailing HEADERS frame lacking END_STREAM, then more DATA. That frame
+is a protocol error, so `stream.ex` routes the stream to `:reset_expected`, where
+the only legal server frame is RST_STREAM. Bandit instead answers 200 and folds
+the trailing DATA into the body (`"OKMORE"`) — so its response frames are
+**server-blame** violations (expected `:s_rst_stream`).
+
+**§5.1.1 — a lower stream id (server must GOAWAY).** A HEADERS on a stream id at
+or below the high-water mark is a connection error. `stream_id_monitor.ex` uses a
+`where:`-guarded **cast branch** to route that open to `:goaway_expected`, where
+the server owes a connection GOAWAY. Bandit silently drops the frame and keeps
+serving. Because that mishandling is *inaction*, the client provokes it with a
+PING; Bandit's PING ACK arriving in `:goaway_expected` (instead of a GOAWAY) is
+the **server-blame** violation. Catching a silent-drop bug this way — provoke,
+then check the server is going away — is a general technique the passive-monitor
+limit forces.
 
 ```bash
 mix run examples/http2/demo.exs
 ```
 
 ```
-== well-formed request ==
-Bandit response body: "OK"
-accord: no violations — the traffic conformed to the spec.
-
 == trailers without END_STREAM (RFC 9113 §8.1) ==
 Bandit response body: "OKMORE"
-accord flagged 1 violation(s):
-error: message not valid in state :open
-    note: sent :headers in state :open
-    help: valid messages: :data, :data_es, :headers_es, :rst_stream, …
+error: server pushed an event not valid in state :reset_expected
+    note: pushed :s_headers in state :reset_expected
+    help: valid messages: :s_rst_stream
+
+== lower stream id (RFC 9113 §5.1.1) ==
+Bandit dropped the lower-id HEADERS and kept serving (it ACKed the PING).
+error: server pushed an event not valid in state :goaway_expected
+    note: pushed :ping_ack in state :goaway_expected
+    help: valid messages: :goaway
 ```
 
 ## Files
@@ -77,10 +88,11 @@ error: message not valid in state :open
 | File | Purpose |
 |------|---------|
 | `stream.ex`, `stream_id.ex`, `flow_control.ex`, `connection.ex` | the four conformant specs |
-| `tap_proxy.ex` | the frame-parsing TCP proxy that taps frames into per-stream monitors |
+| `stream_id_monitor.ex` | connection-level runtime monitor for §5.1.1 (uses a cast branch) |
+| `tap_proxy.ex` | the frame-parsing TCP proxy that taps frames into the monitors |
 | `raw_client.ex` | a minimal raw-frame h2c client (can send the malformed sequences) |
 | `echo_server.ex` | a cleartext HTTP/2 Bandit echo server for the demo/test |
-| `demo.exs` | runs a well-formed and a divergent request through the proxy |
+| `demo.exs` | runs a well-formed and two divergent exchanges through the proxy |
 | `bandit_repro/` | reference probes that confirm the same bugs in Bandit's own test harness |
 
 ## Running it

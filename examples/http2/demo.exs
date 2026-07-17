@@ -14,7 +14,7 @@
 # accord, expecting a RST_STREAM, blames the SERVER for the response frames it
 # sends. accord catches Bandit's mishandling directly, not by inspecting the body.
 
-alias Accord.Examples.Http2.{EchoServer, RawClient, TapProxy}
+alias Accord.Examples.Http2.{EchoServer, RawClient, StreamIdMonitor, TapProxy}
 alias Accord.Examples.Http2.Stream.Protocol
 alias Accord.Test.ViolationCollector
 
@@ -62,6 +62,31 @@ run.("trailers without END_STREAM (RFC 9113 §8.1)", [
   fn c, _ -> RawClient.data(c, 1, true, "MORE") end
 ])
 
-IO.puts("The well-formed request raised nothing. On the malformed trailers, accord")
-IO.puts("expected Bandit to reset the stream and blamed the server for answering 200")
-IO.puts("with body \"OKMORE\" instead — the §8.1 divergence, caught live as server blame.")
+# A lower stream id (§5.1.1) is a connection-level rule, watched by a separate
+# connection monitor. Bandit's mishandling here is silent (it drops the frame),
+# so we provoke it with a PING: a going-away server would not answer normally.
+ViolationCollector.init()
+{:ok, proxy} = TapProxy.start_link(bandit_port)
+port = TapProxy.port(proxy)
+
+conn = RawClient.connect(port)
+conn = conn |> RawClient.post_echo(3, false, port) |> RawClient.data(3, true, "x")
+_ = RawClient.read_body(conn)
+# HEADERS on the lower stream 1 — a §5.1.1 protocol error — then a PING probe.
+conn = conn |> RawClient.post_echo(1, false, port) |> RawClient.ping()
+:ok = RawClient.await_ping_ack(conn)
+
+IO.puts("== lower stream id (RFC 9113 §5.1.1) ==")
+IO.puts("Bandit dropped the lower-id HEADERS and kept serving (it ACKed the PING).")
+
+for v <- TapProxy.violations(proxy) do
+  IO.puts(Accord.Violation.Report.format(v, StreamIdMonitor.Protocol.__compiled__()))
+end
+
+IO.puts("""
+
+The well-formed request raised nothing. In both divergent cases accord blamed the
+SERVER, live: on the §8.1 trailers Bandit answered 200 (body "OKMORE") where it
+owed a reset; on the §5.1.1 lower id it kept serving where it owed a GOAWAY. The
+latter is a silent mishandling, so the PING provokes an observable response.\
+""")

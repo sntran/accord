@@ -58,6 +58,30 @@ defmodule Accord.Examples.Http2.RawClient do
     conn
   end
 
+  @doc "Send a connection-level PING (used to provoke a response from the server)."
+  @spec ping(conn()) :: conn()
+  def ping({sock, _} = conn) do
+    frame(sock, 0x6, 0x00, 0, <<0, 0, 0, 0, 0, 0, 0, 0>>)
+    conn
+  end
+
+  @doc "Read one frame, discarding its payload; returns `{type, flags, stream_id}`."
+  @spec recv_frame(conn()) :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+  def recv_frame({sock, _}) do
+    {:ok, <<len::24, type::8, flags::8, _r::1, sid::31>>} = :gen_tcp.recv(sock, 9, 2000)
+    if len > 0, do: {:ok, _} = :gen_tcp.recv(sock, len, 2000)
+    {type, flags, sid}
+  end
+
+  @doc "Read frames until a PING ACK arrives (the server answered our PING)."
+  @spec await_ping_ack(conn()) :: :ok
+  def await_ping_ack(conn) do
+    case recv_frame(conn) do
+      {0x6, flags, _sid} when (Bitwise.band(flags, 0x01)) == 0x01 -> :ok
+      _other -> await_ping_ack(conn)
+    end
+  end
+
   @doc "Read response DATA frames until END_STREAM, returning the assembled body."
   @spec read_body(conn()) :: binary()
   def read_body({sock, _}), do: read_body(sock, "")

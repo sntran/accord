@@ -113,6 +113,30 @@ defmodule Accord.Examples.Http2Test do
       assert Enum.any?(violations, &(&1.blame == :server and &1.kind == :invalid_event))
       refute Enum.any?(violations, &(&1.blame == :client))
     end
+
+    test "a lower stream id: Bandit fails to go away and accord blames the server (§5.1.1)",
+         %{proxy: proxy, port: port} do
+      conn = RawClient.connect(port)
+
+      # Open and complete stream 3 — the connection's high-water mark.
+      conn = RawClient.post_echo(conn, 3, false, port)
+      conn = RawClient.data(conn, 3, true, "x")
+      assert RawClient.read_body(conn) == "x"
+
+      # A HEADERS on the lower stream 1 is a §5.1.1 protocol error. The
+      # connection monitor's branching cast routes it to :goaway_expected, where
+      # the server owes a GOAWAY. Bandit silently drops the frame instead.
+      conn = RawClient.post_echo(conn, 1, false, port)
+
+      # The drop is inaction, so we provoke: a compliant server would be going
+      # away, but Bandit ACKs the PING — carrying on where it should have closed.
+      conn = RawClient.ping(conn)
+      assert :ok = RawClient.await_ping_ack(conn)
+
+      # The PING ACK arriving in :goaway_expected is a server-blame violation.
+      violations = TapProxy.violations(proxy)
+      assert Enum.any?(violations, &(&1.blame == :server and &1.kind == :invalid_event))
+    end
   end
 
   describe "model checking" do
@@ -125,6 +149,10 @@ defmodule Accord.Examples.Http2Test do
 
     test "the stream-id fence verifies (§5.1.1)", %{tmp_dir: tmp_dir} do
       TLACheck.assert_passes(Http2.StreamId.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "the connection stream-id monitor verifies (§5.1.1)", %{tmp_dir: tmp_dir} do
+      TLACheck.assert_passes(Http2.StreamIdMonitor.Protocol, tmp_dir: tmp_dir)
     end
 
     test "the send-window overflow guard verifies (§6.9.1)", %{tmp_dir: tmp_dir} do

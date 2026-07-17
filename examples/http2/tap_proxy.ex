@@ -36,6 +36,7 @@ defmodule Accord.Examples.Http2.TapProxy do
   import Bitwise
 
   alias Accord.Examples.Http2.Stream.Protocol
+  alias Accord.Examples.Http2.StreamIdMonitor
   alias Accord.Monitor
   alias Accord.Test.ViolationCollector
 
@@ -64,6 +65,16 @@ defmodule Accord.Examples.Http2.TapProxy do
 
     {:ok, port} = :inet.port(lsock)
     sink = spawn_link(&drain/0)
+
+    # One connection-level monitor for the whole connection (stream-id
+    # monotonicity, §5.1.1), alongside the per-stream monitors created lazily.
+    {:ok, conn_monitor} =
+      StreamIdMonitor.Protocol.Monitor.start_link(
+        upstream: sink,
+        downstream: sink,
+        violation_policy: {ViolationCollector, :handle}
+      )
+
     parent = self()
     _acceptor = spawn_link(fn -> accept_loop(lsock, parent) end)
 
@@ -73,6 +84,7 @@ defmodule Accord.Examples.Http2.TapProxy do
        port: port,
        bandit_port: bandit_port,
        sink: sink,
+       conn_monitor: conn_monitor,
        client: nil,
        server: nil,
        cbuf: "",
@@ -87,6 +99,7 @@ defmodule Accord.Examples.Http2.TapProxy do
 
   def handle_call(:violations, _from, state) do
     # Sync each monitor so casts/events already sent are handled before draining.
+    :sys.get_state(state.conn_monitor)
     for {_sid, mon} <- state.monitors, do: :sys.get_state(mon)
     {:reply, ViolationCollector.drain(), state}
   end
@@ -157,11 +170,30 @@ defmodule Accord.Examples.Http2.TapProxy do
 
   defp extract_frames(buffer, acc), do: {Enum.reverse(acc), buffer}
 
-  # Connection-level frames (stream id 0) are relayed but not part of the
-  # per-stream machine.
+  # Connection-level frames the stream-id monitor watches (stream id 0).
+  defp tap_frame({0x7, _flags, 0}, :server, state) do
+    # GOAWAY: the server is going away.
+    feed(state.conn_monitor, :event, :goaway)
+    state
+  end
+
+  defp tap_frame({0x6, flags, 0}, :server, state) do
+    # PING with the ACK flag set: the connection is still serving.
+    if band(flags, 0x01) == 0x01, do: feed(state.conn_monitor, :event, :ping_ack)
+    state
+  end
+
+  # Other connection-level frames (SETTINGS, the connection WINDOW_UPDATE, client
+  # PINGs) are relayed but not part of any monitored contract.
   defp tap_frame({_type, _flags, 0}, _dir, state), do: state
 
   defp tap_frame({type, flags, sid}, dir, state) do
+    # A client HEADERS on a not-yet-seen stream opens it: tell the connection's
+    # stream-id monitor before the per-stream monitor is created.
+    if type == 0x1 and dir == :client and not Map.has_key?(state.monitors, sid) do
+      feed(state.conn_monitor, :cast, {:open_stream, sid})
+    end
+
     case frame_message(type, flags, dir) do
       :ignore ->
         state
