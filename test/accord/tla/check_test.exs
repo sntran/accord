@@ -123,6 +123,20 @@ defmodule Accord.TLA.CheckTest do
     end
   end
 
+  describe "flow-control send window (HTTP/2 §6.9.1)" do
+    test "the overflow guard keeps the send window within its ceiling", %{tmp_dir: tmp_dir} do
+      # WINDOW_UPDATE (cast) grows the window, DATA (event) shrinks it; the
+      # guard `send_window + inc <= max` proves it never overflows.
+      assert_passes(Accord.Test.SendWindow.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "without the overflow guard, a WINDOW_UPDATE overshoots the ceiling",
+         %{tmp_dir: tmp_dir} do
+      # Two-state counterexample: send_window 1 -> 4 past a ceiling of 3.
+      assert_fails(Accord.Test.SendWindowUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
+    end
+  end
+
   describe "distinct leases across sessions" do
     test "the fencing constraint makes leases unique — TLC proves distinct",
          %{tmp_dir: tmp_dir} do

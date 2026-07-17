@@ -175,3 +175,153 @@ Four expressiveness walls, in the order they bit:
    `sessions: 2` with domain `0..3` (a stream grabs the max ID; the next starves).
    HTTP/2's 2³¹ ID space is unrepresentable; flow-control's window arithmetic —
    where the genuinely dangerous bugs live — is out of reach entirely.
+
+---
+
+# Round 2: flow control and SETTINGS error codes
+
+A second pass, after `cast`, `abstract:`/bounded domains, and the connection/stream
+composition pattern landed (walls 1 and 4 above are now partly retired). This pass
+moved from the stream state machine into frame validation — WINDOW_UPDATE, DATA,
+and SETTINGS — and produced two more runtime-confirmed divergences, plus the first
+flow-control property accord model-checks for real.
+
+## Two more divergences: the wrong error code for a valid-but-illegal value
+
+Both are `MUST` violations where Bandit returns a plausible-but-wrong error code,
+and both are pinned by Bandit's own deserialization tests (so they are intended
+behavior, not a slip). In each case a *sibling* check a few lines away uses the
+correct code, which is what makes them stand out.
+
+**A. Zero-increment WINDOW_UPDATE → `FLOW_CONTROL_ERROR`, should be
+`PROTOCOL_ERROR` (RFC 9113 §6.9).**
+
+`Bandit.HTTP2.Frame.WindowUpdate.deserialize/3` rejects a zero size increment with
+`Bandit.HTTP2.Errors.flow_control_error()` (`0x3`). RFC 9113 §6.9, verbatim:
+
+> A receiver MUST treat the receipt of a WINDOW_UPDATE frame with a flow-control
+> window increment of 0 as a stream error (Section 5.4.2) of type PROTOCOL_ERROR;
+> errors on the connection flow-control window MUST be treated as a connection
+> error (Section 5.4.1).
+
+So the required code is `PROTOCOL_ERROR` (`0x1`), not `FLOW_CONTROL_ERROR`. The
+adjacent overflow check (`update_send_window`, §6.9.1) correctly uses
+`FLOW_CONTROL_ERROR` — §6.9.1 overflow and §6.9 zero-increment are two different
+rules with two different codes, and Bandit applies the overflow code to both.
+
+There is a second, subtler half: §6.9 says the *stream*-scoped case is a **stream
+error** (RST_STREAM on that stream), and only the connection-flow-control-window
+case is a connection error. Bandit routes all frame-deserialization failures
+through `handle_frame` as connection errors (`frame.ex` notes it considers this
+within its rights for size errors), so a zero-increment WINDOW_UPDATE on one
+stream tears down the **whole connection** — every concurrent request on it — where
+the RFC calls for resetting just that one stream. That escalation is the more
+material half; the wrong code is the clear-cut half.
+
+Pinned by `test/bandit/http2/frame_deserialization_test.exs` ("rejects frames when
+there is a 0 size increment" and "… on a stream"), both asserting
+`Errors.flow_control_error()`.
+
+**B. Out-of-range MAX_FRAME_SIZE → `FRAME_SIZE_ERROR`, should be `PROTOCOL_ERROR`
+(RFC 9113 §6.5.2).**
+
+`Bandit.HTTP2.Frame.Settings.deserialize/3` rejects a `SETTINGS_MAX_FRAME_SIZE`
+value below 2¹⁴ or above 2²⁴−1 with `frame_size_error()` (`0x6`). RFC 9113 §6.5.2,
+verbatim:
+
+> Values outside this range MUST be treated as a connection error (Section 5.4.1)
+> of type PROTOCOL_ERROR.
+
+So the required code is `PROTOCOL_ERROR` (`0x1`). The name `FRAME_SIZE_ERROR` is
+tempting because the setting is *about* frame size, but the frame here is
+well-formed — it is the advertised *value* that is illegal, which the RFC classes
+as a protocol error. The two sibling checks in the same function get it right:
+`ENABLE_PUSH` (not 0/1) → `PROTOCOL_ERROR`, `INITIAL_WINDOW_SIZE` (> 2³¹−1) →
+`FLOW_CONTROL_ERROR`. Only `MAX_FRAME_SIZE` is miscoded.
+
+Pinned by `test/bandit/http2/frame_deserialization_test.exs` ("rejects non-ack
+frames with invalid large/small max_frame_size value"), asserting
+`Errors.frame_size_error()`.
+
+**Impact (both).** Low. A conformant peer never sends these, and a misbehaving one
+still receives an error and a teardown — only the code differs, and few clients
+branch on it. A conformance suite (h2spec) would flag both. Finding A's stream →
+connection escalation is the one place a real client is measurably worse off. Worth
+raising with the maintainer as "intended?", not a security issue.
+
+**Fix.** Change the three returns to `protocol_error()` (WINDOW_UPDATE zero
+increment; both MAX_FRAME_SIZE bounds) and update the pinning tests. For finding
+A's escalation, route a zero-increment WINDOW_UPDATE carrying a non-zero stream ID
+to a stream reset rather than a connection error — a larger change, since it means
+distinguishing stream-scoped from connection-scoped deserialization failures.
+
+## How accord fits: blame is coarser than the RFC's error taxonomy
+
+The pattern in both findings is the same, and it is exactly what an accord spec
+makes visible. A zero-increment WINDOW_UPDATE and an out-of-range MAX_FRAME_SIZE
+are both **client** (peer) protocol violations — accord's blame trichotomy
+classifies them identically as "the peer sent a message the contract forbids."
+What accord's blame does *not* carry is *which* of RFC 9113 §7's fourteen error
+codes the server must emit in response. That taxonomy lives one level below blame.
+
+So the accord discipline puts the two questions side by side — "who is at fault?"
+(the guard/`where:` that fails → the peer) and "what does the server answer?" (the
+error code) — and writing the second column explicitly is what exposes that Bandit
+answers with the field's *namesake* code (`FLOW_CONTROL_ERROR` for a window field,
+`FRAME_SIZE_ERROR` for a frame-size field) where the RFC mandates `PROTOCOL_ERROR`.
+`when value > @max`-style guards scattered across a deserializer hide that column;
+a contract that names an outcome per rejection surfaces it. This is the same
+"forcing function, not auto-finder" lesson as Round 1, sharpened: the gap accord
+exposes is between *blame* (coarse, who) and *error code* (fine, what).
+
+## The part accord checks automatically: the §6.9.1 overflow guard
+
+Unlike the error codes — frame-validation facts outside the state machine — the
+send-window overflow rule *is* a state-machine property, and with the new
+expressiveness accord model-checks it. The spec (`/tmp/h2_flow.exs`, correct and
+seeded-buggy variants) models the server's per-stream send window as a bounded
+track, the peer's WINDOW_UPDATE as a one-way `cast`, and the server's DATA as a
+one-way server-push `event`, with the ceiling as a `const`:
+
+```elixir
+const :max, 3
+track :send_window, :non_neg_integer, default: 1, domain: 0..6
+
+state :open do
+  # Peer grants quota. §6.9.1: the increment must not push us past the ceiling.
+  cast {:window_update, inc :: pos_integer()} do
+    guard fn {:window_update, inc}, tracks -> tracks.send_window + inc <= const(:max) end
+    update fn {:window_update, inc}, tracks -> %{tracks | send_window: tracks.send_window + inc} end
+  end
+
+  # Server pushes DATA, never more than the window allows.
+  event {:send_data, n :: pos_integer()} do
+    goto :open
+    guard fn {:send_data, n}, tracks -> n <= tracks.send_window end
+    update fn {:send_data, n}, tracks -> %{tracks | send_window: tracks.send_window - n} end
+  end
+end
+
+property :window_never_overflows do
+  invariant fn tracks -> tracks.send_window <= const(:max) end
+end
+```
+
+This is the same `guard` accord's runtime monitor would enforce and TLC exhausts.
+TLC proves `window_never_overflows` for the guarded version. Dropping the guard —
+the seeded bug, mirroring a deserializer that forgets the §6.9.1
+`current + increment > max` check — yields a two-state counterexample:
+`send_window = 1` → (one WINDOW_UPDATE, `inc = 3`) → `send_window = 4`, overshooting
+the ceiling of 3. This is the first HTTP/2 flow-control fact accord checks for real
+rather than narrates: Round 1's wall 4 ("window arithmetic is out of reach") is
+retired for the *relational* overflow guard by bounded domains, though the literal
+2³¹ ceiling still needs Tier-B symbolic checking (Apalache).
+
+Three expressiveness pieces made this spec possible that Round 1 lacked: `cast` for
+the one-way peer WINDOW_UPDATE, `event` for the one-way server DATA (over-delivery
+would be server blame at runtime), and `const` + a bounded head-room domain for the
+ceiling. The remaining wall is unchanged: the zero-increment rule itself is *not*
+model-checkable here, because accord types the increment `pos_integer`, so `0` is
+excluded from the state space by construction — confirming from the other direction
+that the zero-increment error code is a frame-parsing concern below the protocol's
+typed domain, not a state-machine one.
