@@ -17,7 +17,17 @@ state, `exclusive` mutual exclusion — see the `DistributedLock` fixture at
 `sessions: 2` and produces the two-sessions-both-locked counterexample when
 the holder guard is dropped.
 
-The four above are pedagogical. For a real, high-profile protocol, see
+For a BEAM-native protocol, see [phoenix_channels](phoenix_channels/): a
+conformant accord model of the Phoenix Channels lifecycle (the transport under
+Channels *and* LiveView, which has no conformance tooling), plugged into a real
+Phoenix endpoint via a one-line wrapping serializer. It catches a double-reply bug
+in a channel as **server** blame, a push-before-join as **client** blame, and
+surfaces a stale `join_ref` that Phoenix drops silently — the class of protocol
+bugs the framework structurally cannot catch for you. Phoenix is a dev/test
+dependency.
+
+The next example is a real, high-profile protocol that — unlike Phoenix Channels —
+*does* have an external oracle. See
 [http2](http2/): four **conformant** specs from Bandit's HTTP/2 implementation
 (the stream state machine, stream-id monotonicity, send-window flow control, and
 GOAWAY gating), model-checked by TLC — plus a live tap proxy that places the

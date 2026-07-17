@@ -60,7 +60,9 @@ mix run examples/job_queue/demo.exs   # run an example demo
 
 ## Examples
 
-`examples/` compiles in dev and test (never :prod), so protocol compilation — full validation plus strict TLA+ emission — runs on every example in CI. Each example ships a correct server, a seeded design bug pinned by a real TLC run in `test/examples/`, and a demo script. Pedagogical order: circuit_breaker → payment → job_queue (flagship) → genstage_demand. The multi-session showcase is `test/support/protocols/distributed_lock.ex`.
+`examples/` compiles in dev and test (never :prod), so protocol compilation — full validation plus strict TLA+ emission — runs on every example in CI. Each pedagogical example ships a correct server, a seeded design bug pinned by a real TLC run in `test/examples/`, and a demo script. Pedagogical order: circuit_breaker → payment → job_queue (flagship) → genstage_demand. The multi-session showcase is `test/support/protocols/distributed_lock.ex`.
+
+Two examples run the monitor against **real third-party servers** (as dev/test deps): `http2` wires the stream monitor between a raw client and a live Bandit to catch RFC 9113 divergences (see `docs/case-study-http2-bandit.md`), and `phoenix_channels` model-checks the Phoenix Channels lifecycle and taps a real Phoenix endpoint via a one-line wrapping serializer to catch channel-protocol bugs Phoenix leaves unenforced (see `docs/case-study-phoenix-channels.md`).
 
 ## Testing conventions
 

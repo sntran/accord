@@ -56,7 +56,12 @@ defmodule Accord.MixProject do
       # The HTTP/2 example wires the accord monitor between a client and a live
       # Bandit server to detect real spec divergences. Bandit (and its transitive
       # hpax/thousand_island) is only needed there, so it stays out of :prod.
-      {:bandit, "~> 1.12", only: [:dev, :test]}
+      {:bandit, "~> 1.12", only: [:dev, :test]},
+      # The Phoenix Channels example runs a real Phoenix endpoint and taps its
+      # channel protocol via a wrapping serializer. Phoenix (and phoenix_pubsub)
+      # are only needed there, so they stay out of :prod.
+      {:phoenix, "~> 1.7", only: [:dev, :test]},
+      {:phoenix_pubsub, "~> 2.1", only: [:dev, :test]}
     ]
   end
 
