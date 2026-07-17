@@ -52,7 +52,11 @@ defmodule Accord.MixProject do
       {:assert_boundary, "~> 0.1.0", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:ex_doc, "~> 0.35", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.35", only: :dev, runtime: false},
+      # The HTTP/2 example wires the accord monitor between a client and a live
+      # Bandit server to detect real spec divergences. Bandit (and its transitive
+      # hpax/thousand_island) is only needed there, so it stays out of :prod.
+      {:bandit, "~> 1.12", only: [:dev, :test]}
     ]
   end
 

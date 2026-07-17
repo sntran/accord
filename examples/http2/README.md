@@ -1,81 +1,115 @@
 # HTTP/2 (RFC 9113)
 
-Four accord specs drawn from a real protocol: the HTTP/2 machinery as implemented
-by [Bandit](https://github.com/mtrudel/bandit). Unlike the other examples, this
-one is not a single tidy protocol — it is a set of related contracts that together
+Four **conformant** accord specs drawn from a real protocol — the HTTP/2 machinery
+as implemented by [Bandit](https://github.com/mtrudel/bandit) — plus a live tap
+proxy that wires the stream spec's runtime monitor between a real client and a
+running Bandit server to **catch a real divergence in real time**.
+
+This example is not a single tidy protocol. It is a set of related contracts that
 exercise the parts of accord added for wire protocols (`cast`/`event` one-way
-messages, `abstract: :monotonic` domains, `shared:` tracks, `const`). Each spec
-model-checks clean, and each ships a seeded-bug variant that mirrors a
-runtime-confirmed divergence in Bandit 1.12.0. The full investigation is
+messages, `abstract: :monotonic` domains, `shared:` tracks, `const`), and it uses
+accord two ways: TLC proves each spec is sound, and the runtime monitor — the same
+IR, flowing downward — is placed in a live connection to detect where Bandit
+departs from the spec. The full investigation is
 [`docs/case-study-http2-bandit.md`](../../docs/case-study-http2-bandit.md).
 
-## The four specs
+## The four specs (all conformant)
 
-| File | Models | RFC | Seeded bug → Bandit finding |
-|------|--------|-----|------------------------------|
-| `stream.ex` | single-stream state machine | §5.1 | trailers without END_STREAM absorbed into the body (§8.1) |
-| `stream_id.ex` | stream-ID monotonicity fence | §5.1.1 | two streams sharing an ID (guard dropped) |
-| `flow_control.ex` | send-window accounting | §6.9.1 | window overflows its ceiling (guard dropped) |
-| `connection.ex` | GOAWAY gating new streams | §6.8 | a stream opens after GOAWAY (gate dropped) |
+| File | Models | RFC | TLC proves |
+|------|--------|-----|------------|
+| `stream.ex` | single-stream state machine | §5.1 | the frame FSM is reachable and deadlock-free |
+| `stream_id.ex` | stream-ID monotonicity fence | §5.1.1 | no two streams share an ID |
+| `flow_control.ex` | send-window accounting | §6.9.1 | the window never overflows its ceiling |
+| `connection.ex` | GOAWAY gating new streams | §6.8 | no stream opens after GOAWAY |
 
-## What the specs declare
+None contains a seeded bug. `test/examples/http2_test.exs` model-checks all four
+with real TLC (`assert_passes`).
 
-- **`stream.ex`** — the stream FSM (idle → open → half-closed → closed). Frames are
-  one-way in both directions, so peer frames are `cast`s and the server's frames
-  are server-push `event`s. Each state lists exactly the frames legal in it; a
-  frame with no listed transition is an `:invalid_message` protocol error. Two
-  ghost booleans state the trailers-integrity property.
-- **`stream_id.ex`** — two streams as `sessions: 2` sharing the connection's
-  `last_id`. Each claims an ID strictly greater than `last_id`; `distinct :my_id`
-  asserts uniqueness. `last_id` is `abstract: :monotonic` so the small model
-  domain does not deadlock once the id space is "used up".
-- **`flow_control.ex`** — the server's send window as a bounded track. The peer's
-  WINDOW_UPDATE (`cast`) grows it under a `const :max` ceiling; the server's DATA
-  (`event`) shrinks it. The invariant is that it never overflows.
-- **`connection.ex`** — a connection-level `shared:` state gates per-session
-  streams. A `cast :goaway` flips it; the open guard reads it. This is
-  connection/stream composition with no dedicated two-level construct.
+## Live divergence detection
 
-## The seeded bugs
+The headline: `stream.ex`'s monitor, placed between a client and Bandit, catches
+the RFC 9113 §8.1 trailers divergence in a running server.
 
-Each `*.ex` file defines a correct `Protocol` and a bug variant (`TrailersBug`,
-`Unguarded`) using `tla: :off` so `mix accord.check` stays green. The bug variants
-are pinned by real TLC runs in `test/examples/http2_test.exs`:
+```
+raw HTTP/2 client ── frames ──▶ [ TapProxy ] ── frames ──▶ Bandit
+                                     │ (bytes forwarded verbatim)
+                                     ▼
+                          per-stream Stream.Protocol monitor
+                                     │
+                     flags a bare trailing HEADERS (no END_STREAM) in :open
+```
 
-- **`Stream.TrailersBug`** adds the one transition the correct table omits — a bare
-  trailing `cast :headers` (no END_STREAM) in `:open` that does not terminate the
-  stream. Then DATA follows the trailers and `data_after_trailers` becomes true.
-  This is exactly what Bandit accepts; a compliant server sends a PROTOCOL_ERROR.
-- **`StreamId.Unguarded`** drops the `id > last_id` guard; TLC finds two streams
-  claiming the same ID.
-- **`FlowControl.Unguarded`** drops the `send_window + inc <= max` guard; TLC finds
-  the window past its ceiling in two states.
-- **`Connection.Unguarded`** drops the `conn_state == :active` check; TLC finds a
-  stream opening after GOAWAY.
+`TapProxy` (`tap_proxy.ex`) relays TCP bytes unchanged while parsing the HTTP/2
+frame layer — just the 9-byte frame headers (type + END_STREAM flag + stream id),
+no HPACK, which is exactly what the stream machine dispatches on. Each stream
+frame is fed to a per-stream monitor as a `cast` (client → server) or server-push
+`event` (server → client). Because it monitors live traffic, `stream.ex` models
+every frame a conformant server legitimately sends (including server
+WINDOW_UPDATE), so a well-formed request raises nothing — that faithfulness is the
+first thing the test asserts.
+
+Then the client sends a trailing HEADERS frame **without** END_STREAM and more
+DATA after it. Bandit accepts the malformed trailers and folds the trailing DATA
+into the request body (`"OKMORE"`); accord flags the frame, because the only
+HEADERS legal after the request headers is a trailer that bears END_STREAM
+(`:headers_es`) — a bare `:headers` has no transition in `:open`. A compliant
+server would reset the stream with a PROTOCOL_ERROR (§8.1).
+
+```bash
+mix run examples/http2/demo.exs
+```
+
+```
+== well-formed request ==
+Bandit response body: "OK"
+accord: no violations — the traffic conformed to the spec.
+
+== trailers without END_STREAM (RFC 9113 §8.1) ==
+Bandit response body: "OKMORE"
+accord flagged 1 violation(s):
+error: message not valid in state :open
+    note: sent :headers in state :open
+    help: valid messages: :data, :data_es, :headers_es, :rst_stream, …
+```
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `stream.ex`, `stream_id.ex`, `flow_control.ex`, `connection.ex` | the four conformant specs |
+| `tap_proxy.ex` | the frame-parsing TCP proxy that taps frames into per-stream monitors |
+| `raw_client.ex` | a minimal raw-frame h2c client (can send the malformed sequences) |
+| `echo_server.ex` | a cleartext HTTP/2 Bandit echo server for the demo/test |
+| `demo.exs` | runs a well-formed and a divergent request through the proxy |
+| `bandit_repro/` | reference probes that confirm the same bugs in Bandit's own test harness |
 
 ## Running it
 
 ```bash
-# Model-check every spec and its seeded bug (needs tla2tools.jar):
+# Model-check every spec (needs tla2tools.jar):
 mix test test/examples/http2_test.exs --only tlc
 
-# Runtime: the monitor validating a live stream FSM, with blame:
+# Live detection against a real Bandit (Bandit is a dev/test dependency):
+mix test test/examples/http2_test.exs
 mix run examples/http2/demo.exs
 ```
 
-## Reproducing the Bandit bugs
+## Two other divergences
 
-The two divergences that were confirmed against a running Bandit — the lower
-stream-ID drop (§5.1.1) and the trailers-without-END_STREAM absorption (§8.1) —
-have standalone reference probes in [`bandit_repro/`](bandit_repro/). They are not
-wired into this project (accord takes no dependency on Bandit); the README there
-explains how to drop them into a Bandit checkout and run them.
+Two more runtime-confirmed Bandit divergences are wrong error codes, not state
+transitions, so they live below the monitor and are documented in the case study
+rather than caught by the proxy: a zero-increment WINDOW_UPDATE returns
+FLOW_CONTROL_ERROR where §6.9 requires PROTOCOL_ERROR, and an out-of-range
+MAX_FRAME_SIZE returns FRAME_SIZE_ERROR where §6.5.2 requires PROTOCOL_ERROR. The
+§5.1.1 lower-stream-id drop and the §8.1 trailers absorption also have standalone
+reference probes in [`bandit_repro/`](bandit_repro/) that confirm them directly in
+Bandit's own test harness.
 
 ## What accord did and did not do
 
-accord did not find these bugs automatically. Its value here was as a forcing
-function: writing the exact legal-frame-per-state table made the stream FSM's
-missing and extra transitions legible on a read (findings §5.1.1 and §8.1), and
-writing an error-per-rejection column surfaced two wrong error codes (§6.9, §6.5.2,
-covered in the case study). The overflow, id-uniqueness, and GOAWAY-gating
-properties it does check mechanically — the seeded-bug tests prove that.
+accord did not find these bugs automatically. Its value is the discipline of
+writing the exact contract — the legal-frame-per-state table — and then *enforcing*
+it live. The trailers divergence is a frame the spec's `:open` state does not
+admit; feeding real traffic through the monitor surfaces the moment Bandit accepts
+it anyway. The wrong-error-code divergences sit below that table (frame-value
+validation), which is why the case study, not the proxy, carries them.

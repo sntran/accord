@@ -1,67 +1,64 @@
 # Run with: mix run examples/http2/demo.exs
 #
-# The HTTP/2 stream state machine, driven through the accord monitor. Frames are
-# one-way messages (`cast` from the peer, server-push `event` from the server), so
-# the monitor validates each frame against the current state and assigns blame —
-# the same monitor that fronts request/reply protocols, now applied to a frame
-# protocol. This demo runs a legal frame sequence, then one illegal frame the
-# monitor rejects with client blame.
+# accord as a live conformance monitor. A tap proxy sits between a raw HTTP/2
+# client and a real, running Bandit server, forwarding bytes verbatim while
+# feeding each frame into the accord stream-state-machine monitor. When a frame
+# does not fit the RFC state machine, accord records a violation — catching a real
+# divergence in the server, in real time.
+#
+# Two requests are sent through the proxy: a well-formed one (which must produce
+# no violations, proving the monitor is faithful to real traffic), and one that
+# ends the body with a trailing HEADERS frame lacking END_STREAM (RFC 9113 §8.1).
+# Bandit accepts the malformed trailers and folds the following DATA into the
+# body; accord flags the frame.
 
+alias Accord.Examples.Http2.{EchoServer, RawClient, TapProxy}
 alias Accord.Examples.Http2.Stream.Protocol
-alias Accord.Monitor
 alias Accord.Test.ViolationCollector
 
-defmodule DemoUpstream do
-  @moduledoc "A no-op upstream: forwarded frames are simply accepted."
-  use GenServer
+{:ok, _server, bandit_port} = EchoServer.start_link()
+IO.puts("Bandit (h2c echo) listening on port #{bandit_port}\n")
 
-  def start_link, do: GenServer.start_link(__MODULE__, nil)
-  def init(state), do: {:ok, state}
-  def handle_cast(_message, state), do: {:noreply, state}
-  def handle_call(_message, _from, state), do: {:reply, :ok, state}
+run = fn label, frames ->
+  ViolationCollector.init()
+  {:ok, proxy} = TapProxy.start_link(bandit_port)
+  port = TapProxy.port(proxy)
+
+  conn = RawClient.connect(port)
+  conn = Enum.reduce(frames, conn, fn f, c -> f.(c, port) end)
+  body = RawClient.read_body(conn)
+  violations = TapProxy.violations(proxy)
+
+  IO.puts("== #{label} ==")
+  IO.puts("Bandit response body: #{inspect(body)}")
+
+  case violations do
+    [] ->
+      IO.puts("accord: no violations — the traffic conformed to the spec.\n")
+
+    list ->
+      IO.puts("accord flagged #{length(list)} violation(s):")
+
+      for v <- list do
+        IO.puts(Accord.Violation.Report.format(v, Protocol.__compiled__()))
+      end
+
+      IO.puts("")
+  end
 end
 
-ViolationCollector.init()
-{:ok, server} = DemoUpstream.start_link()
+run.("well-formed request", [
+  fn c, port -> RawClient.post_echo(c, 1, false, port) end,
+  fn c, _ -> RawClient.data(c, 1, true, "OK") end
+])
 
-{:ok, monitor} =
-  Protocol.Monitor.start_link(
-    upstream: server,
-    downstream: self(),
-    violation_policy: {ViolationCollector, :handle}
-  )
+run.("trailers without END_STREAM (RFC 9113 §8.1)", [
+  fn c, port -> RawClient.post_echo(c, 1, false, port) end,
+  fn c, _ -> RawClient.data(c, 1, false, "OK") end,
+  # The divergent frame: a trailing HEADERS with no END_STREAM.
+  fn c, _ -> RawClient.headers(c, 1, false, [{"x-trailer", "t"}]) end,
+  fn c, _ -> RawClient.data(c, 1, true, "MORE") end
+])
 
-IO.puts("== a legal frame sequence advances the stream ==")
-IO.puts("HEADERS opens the stream, DATA streams the body, DATA+END_STREAM half-closes it.")
-
-Monitor.cast(monitor, :headers)
-{state, _} = :sys.get_state(monitor)
-IO.inspect(state, label: "after HEADERS")
-
-Monitor.cast(monitor, :data)
-{state, _} = :sys.get_state(monitor)
-IO.inspect(state, label: "after DATA")
-
-Monitor.cast(monitor, :data_es)
-{state, _} = :sys.get_state(monitor)
-IO.inspect(state, label: "after DATA+END_STREAM")
-
-IO.puts("\n== an illegal frame is caught with client blame ==")
-IO.puts("A fresh stream is :idle. DATA before HEADERS has no transition — the peer's fault.")
-
-ViolationCollector.init()
-{:ok, server2} = DemoUpstream.start_link()
-
-{:ok, monitor2} =
-  Protocol.Monitor.start_link(
-    upstream: server2,
-    downstream: self(),
-    violation_policy: {ViolationCollector, :handle}
-  )
-
-Monitor.cast(monitor2, :data)
-# Synchronize with the monitor so the violation is recorded before we drain.
-:sys.get_state(monitor2)
-
-[violation] = ViolationCollector.drain()
-IO.puts(Accord.Violation.Report.format(violation, Protocol.__compiled__()))
+IO.puts("The well-formed request raised nothing; the malformed trailers were caught")
+IO.puts("live, while Bandit answered 200 with body \"OKMORE\" — the §8.1 divergence.")

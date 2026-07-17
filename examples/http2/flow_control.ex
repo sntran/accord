@@ -9,10 +9,6 @@ defmodule Accord.Examples.Http2.FlowControl.Protocol do
   that a WINDOW_UPDATE not push the window past 2^31-1; the `const :max` ceiling
   stands in for that bound, with a bounded head-room domain so an overflow is
   representable. TLC proves the window never overflows.
-
-  `Unguarded` drops the overflow guard — mirroring a deserializer that forgets the
-  §6.9.1 `current + increment > max` check — and TLC finds the overflow in two
-  states.
   """
   use Accord.Protocol
 
@@ -37,44 +33,6 @@ defmodule Accord.Examples.Http2.FlowControl.Protocol do
     end
 
     # Server pushes DATA, never more than the window allows.
-    event {:send_data, n :: pos_integer()} do
-      goto :open
-      guard fn {:send_data, n}, tracks -> n <= tracks.send_window end
-      update fn {:send_data, n}, tracks -> %{tracks | send_window: tracks.send_window - n} end
-    end
-  end
-
-  property :window_never_overflows do
-    invariant fn tracks -> tracks.send_window <= const(:max) end
-  end
-end
-
-defmodule Accord.Examples.Http2.FlowControl.Unguarded do
-  @moduledoc """
-  Seeded bug: the send window without the §6.9.1 overflow guard on WINDOW_UPDATE.
-  TLC finds the window exceeding the ceiling in two states (send_window 1 -> 4 past
-  a ceiling of 3).
-  """
-  use Accord.Protocol, tla: :off
-
-  initial :open
-
-  const :max, 3
-
-  track :send_window, :non_neg_integer, default: 1, domain: 0..6
-
-  model do
-    domain :pos_integer, 1..3
-  end
-
-  state :open do
-    # BUG: no `send_window + inc <= max` guard.
-    cast {:window_update, inc :: pos_integer()} do
-      update fn {:window_update, inc}, tracks ->
-        %{tracks | send_window: tracks.send_window + inc}
-      end
-    end
-
     event {:send_data, n :: pos_integer()} do
       goto :open
       guard fn {:send_data, n}, tracks -> n <= tracks.send_window end
