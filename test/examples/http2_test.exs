@@ -90,7 +90,7 @@ defmodule Accord.Examples.Http2Test do
       assert TapProxy.violations(proxy) == []
     end
 
-    test "trailers without END_STREAM are flagged, though Bandit accepts them (§8.1)",
+    test "trailers without END_STREAM: Bandit fails to reset and accord blames the server (§8.1)",
          %{proxy: proxy, port: port} do
       conn = RawClient.connect(port)
       conn = RawClient.post_echo(conn, 1, false, port)
@@ -99,15 +99,19 @@ defmodule Accord.Examples.Http2Test do
       conn = RawClient.headers(conn, 1, false, [{"x-trailer", "t"}])
       conn = RawClient.data(conn, 1, true, "MORE")
 
-      # Bandit absorbs the post-trailer DATA into the request body — the
-      # divergence. A compliant server would have reset the stream.
+      # Bandit answers 200 and folds the post-trailer DATA into the body, where
+      # §8.1 requires it to reset the stream.
       assert RawClient.read_body(conn) == "OKMORE"
 
-      # accord, tapping the same frames, flagged the trailing HEADERS as invalid
-      # in :open (the only legal HEADERS after the request bears END_STREAM).
-      assert [violation] = TapProxy.violations(proxy)
-      assert violation.kind == :invalid_message
-      assert violation.blame == :client
+      # accord catches that directly: the malformed trailers put the stream in
+      # :reset_expected, where the server owes a RST_STREAM — so Bandit's response
+      # frames are server-blame violations. This is accord judging the server, not
+      # inferring the bug from the body assertion above.
+      # A server-push frame with no transition is an :invalid_event (blame
+      # :server); accord expected :s_rst_stream and got a normal response.
+      violations = TapProxy.violations(proxy)
+      assert Enum.any?(violations, &(&1.blame == :server and &1.kind == :invalid_event))
+      refute Enum.any?(violations, &(&1.blame == :client))
     end
   end
 

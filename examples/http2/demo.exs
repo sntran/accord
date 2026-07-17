@@ -9,8 +9,10 @@
 # Two requests are sent through the proxy: a well-formed one (which must produce
 # no violations, proving the monitor is faithful to real traffic), and one that
 # ends the body with a trailing HEADERS frame lacking END_STREAM (RFC 9113 §8.1).
-# Bandit accepts the malformed trailers and folds the following DATA into the
-# body; accord flags the frame.
+# That frame is a protocol error; §8.1 requires the server to reset the stream.
+# Bandit instead answers 200 and folds the following DATA into the body — so
+# accord, expecting a RST_STREAM, blames the SERVER for the response frames it
+# sends. accord catches Bandit's mishandling directly, not by inspecting the body.
 
 alias Accord.Examples.Http2.{EchoServer, RawClient, TapProxy}
 alias Accord.Examples.Http2.Stream.Protocol
@@ -60,5 +62,6 @@ run.("trailers without END_STREAM (RFC 9113 §8.1)", [
   fn c, _ -> RawClient.data(c, 1, true, "MORE") end
 ])
 
-IO.puts("The well-formed request raised nothing; the malformed trailers were caught")
-IO.puts("live, while Bandit answered 200 with body \"OKMORE\" — the §8.1 divergence.")
+IO.puts("The well-formed request raised nothing. On the malformed trailers, accord")
+IO.puts("expected Bandit to reset the stream and blamed the server for answering 200")
+IO.puts("with body \"OKMORE\" instead — the §8.1 divergence, caught live as server blame.")
