@@ -45,10 +45,26 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         init: ~s("#{ir.initial}")
       })
 
-    track_vars =
-      Enum.map(ir.tracks, fn track ->
+    {track_vars, abstract_bounds} =
+      ir.tracks
+      |> Enum.map(fn track ->
         domain = ModelConfig.resolve_domain(config, track.name, track.type)
-        type_str = ModelConfig.domain_to_tla(domain)
+
+        # An `abstract: :monotonic` track is a growing quantity (e.g. a
+        # fence/stream-id) whose real space is effectively unbounded. Its
+        # TypeInvariant domain is extended by one so a boundary-crossing
+        # successor is well-typed, and its declared max becomes a state
+        # constraint — so exploration stops at the bound (bounded checking)
+        # instead of reporting a spurious deadlock when the counter is
+        # "exhausted" in the tiny model. See docs/design-expressiveness-roadmap.md.
+        {type_domain, abstract_bound} =
+          if track.abstract == :monotonic do
+            {extend_domain(domain), abstract_track_bound(sessions, track.name, domain)}
+          else
+            {domain, nil}
+          end
+
+        type_str = ModelConfig.domain_to_tla(type_domain)
         init_value = ModelConfig.resolve_init(config, track.name, track.default)
 
         # Include NULL in the type set when the track can be nil.
@@ -59,12 +75,18 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
             type_str
           end
 
-        sessioned_var(sessions, %{
-          name: Atom.to_string(track.name),
-          type: type_str,
-          init: value_to_tla(init_value)
-        })
+        var =
+          sessioned_var(sessions, %{
+            name: Atom.to_string(track.name),
+            type: type_str,
+            init: value_to_tla(init_value)
+          })
+
+        {var, abstract_bound}
       end)
+      |> Enum.unzip()
+
+    abstract_bounds = Enum.reject(abstract_bounds, &is_nil/1)
 
     {correspondence_vars, counter_bounds} =
       correspondences
@@ -133,7 +155,8 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
       states: states,
       correspondences: correspondences,
       constants: constants,
-      state_constraint: compose_state_constraint(config.state_constraint, counter_bounds),
+      state_constraint:
+        compose_state_constraint(config.state_constraint, counter_bounds ++ abstract_bounds),
       symmetry_exprs: symmetry_exprs,
       terminal_states: terminal_states,
       sessions: sessions
@@ -161,6 +184,17 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
   end
 
   defp counter_bound(_sessions, _counter_var, _domain), do: nil
+
+  # `abstract: :monotonic` only makes sense for an integer range: extend it by
+  # one for the TypeInvariant so the pruned boundary successor is well-typed.
+  defp extend_domain(%Range{first: lo, last: hi}), do: lo..(hi + 1)
+  defp extend_domain(domain), do: domain
+
+  defp abstract_track_bound(sessions, track_name, %Range{last: hi}) do
+    Sessions.forall(sessions, "#{Sessions.read(sessions, track_name)} =< #{hi}")
+  end
+
+  defp abstract_track_bound(_sessions, _track_name, _domain), do: nil
 
   defp compose_state_constraint(config_constraint, counter_bounds) do
     parts = List.wrap(config_constraint) ++ counter_bounds

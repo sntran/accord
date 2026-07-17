@@ -179,6 +179,7 @@ defmodule Accord.Protocol do
     shared = Keyword.get(opts, :shared, false)
     domain = Keyword.get(opts, :domain)
     model_init = Keyword.get(opts, :model_init)
+    abstract = Keyword.get(opts, :abstract)
     type_value = parse_track_type(type)
     escaped_type = Macro.escape(type_value)
     span = span_from_name_ast(name, __CALLER__)
@@ -194,6 +195,7 @@ defmodule Accord.Protocol do
           shared: unquote(shared),
           domain: unquote(domain),
           model_init: unquote(model_init),
+          abstract: unquote(abstract),
           span: unquote(span)
         }
       )

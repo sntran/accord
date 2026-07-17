@@ -26,9 +26,19 @@ defmodule Accord.IR.Track do
           shared: boolean(),
           domain: Accord.TLA.ModelConfig.domain() | nil,
           model_init: term(),
+          abstract: nil | :monotonic,
           span: Pentiment.Span.t() | nil
         }
 
   @enforce_keys [:name, :type, :default]
-  defstruct [:name, :type, :default, :span, shared: false, domain: nil, model_init: nil]
+  defstruct [
+    :name,
+    :type,
+    :default,
+    :span,
+    shared: false,
+    domain: nil,
+    model_init: nil,
+    abstract: nil
+  ]
 end

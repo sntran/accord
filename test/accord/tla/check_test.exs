@@ -30,6 +30,15 @@ defmodule Accord.TLA.CheckTest do
       # violation on this correct protocol.
       assert_passes(Accord.Test.EnumeratedMode.Protocol, tmp_dir: tmp_dir)
     end
+
+    test "an abstract: :monotonic id track does not spuriously deadlock",
+         %{tmp_dir: tmp_dir} do
+      # Deadlock checking is on. Without abstract: :monotonic a session
+      # starves once the tiny id domain is exhausted (a false deadlock);
+      # the modifier lets exploration stop at the bound instead, and the
+      # distinct property is proven.
+      assert_passes(Accord.Test.MonotonicId.Protocol, tmp_dir: tmp_dir)
+    end
   end
 
   describe "invariant violations" do

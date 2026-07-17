@@ -247,6 +247,28 @@ defmodule Accord.Pass.TLA.BuildStateSpaceTest do
       assert ss.state_constraint =~ "/\\"
     end
 
+    test "an abstract: :monotonic track is type-extended by one and state-constrained" do
+      ir = %{
+        minimal_ir()
+        | tracks: [
+            %Track{
+              name: :last_id,
+              type: :non_neg_integer,
+              default: 0,
+              domain: 0..3,
+              abstract: :monotonic
+            }
+          ]
+      }
+
+      {:ok, ss} = BuildStateSpace.run(ir, default_config())
+
+      # Type extended by one so the pruned boundary successor is well-typed.
+      assert ss.type_invariant =~ "last_id \\in 0..4"
+      # Declared max becomes the exploration bound.
+      assert ss.state_constraint =~ "last_id =< 3"
+    end
+
     test "identical correspondence checks share one counter" do
       ir =
         corr_ir([
