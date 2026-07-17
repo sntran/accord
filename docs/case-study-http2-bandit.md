@@ -325,3 +325,128 @@ model-checkable here, because accord types the increment `pos_integer`, so `0` i
 excluded from the state space by construction — confirming from the other direction
 that the zero-increment error code is a frame-parsing concern below the protocol's
 typed domain, not a state-machine one.
+
+---
+
+# Round 3: trailers without END_STREAM (a runtime-confirmed integrity bug)
+
+The strongest find of the three passes, and the one closest to accord's core: a
+*state-machine* divergence, runtime-confirmed, that the Round 1 stream-FSM spec
+already forbids on its face.
+
+## The bug
+
+**Bandit silently accepts a trailing HEADERS frame that lacks END_STREAM, keeps
+the stream open, and folds any subsequent DATA into the request body.**
+
+An HTTP/2 request is `HEADERS · DATA* · (trailer HEADERS)?`, and the trailer
+HEADERS — the only HEADERS allowed after the request headers — terminates the
+stream: it must carry END_STREAM (RFC 9113 §8.1). A second HEADERS without
+END_STREAM is malformed; h2spec's standard §8.1 test ("sends a second HEADERS
+frame without the END_STREAM flag") expects a `PROTOCOL_ERROR`, and Bandit already
+answers *other* malformed trailers (pseudo-header fields) with a stream
+`PROTOCOL_ERROR` (RST_STREAM, code 1) — see its own test "rejects HEADER frames
+sent as trailers that contain pseudo headers". The no-END_STREAM case slips
+through.
+
+In `Bandit.HTTP2.Stream.do_recv_end_stream/2`, a trailing HEADERS with
+`end_stream: false` returns the stream unchanged — still `:open`:
+
+```elixir
+defp do_recv_end_stream(stream, false), do: stream
+```
+
+Back in `do_read_data`, the trailers are logged ("Ignoring trailers") and the loop
+continues reading the body from an still-open stream. So DATA sent *after* the
+trailers is appended to the body as if the trailers had never happened.
+
+## Runtime confirmation
+
+A probe in Bandit's own test harness (`SimpleH2Client`, against the `/echo` Plug,
+which reads and echoes the body):
+
+```elixir
+{:ok, ctx} = SimpleH2Client.send_simple_headers(socket, 1, :post, "/echo", port)
+SimpleH2Client.send_body(socket, 1, false, "OK")           # DATA, no END_STREAM
+SimpleH2Client.send_headers(socket, 1, false, [{"x-trailer", "t"}], ctx)  # trailers, NO END_STREAM
+SimpleH2Client.send_body(socket, 1, true, "MORE")          # DATA, END_STREAM
+```
+
+Observed response: a normal `200` (HEADERS with END_HEADERS) followed by a DATA
+frame with END_STREAM whose body is **`"OKMORE"`**. The post-trailer `"MORE"` was
+absorbed into the request body; no RST_STREAM, no GOAWAY. A compliant server sends
+RST_STREAM `PROTOCOL_ERROR` at the malformed trailers.
+
+## Impact
+
+Higher than the Rounds 1–2 finds. This is a request-*integrity* divergence: bytes
+placed after the logical end-of-message boundary are silently merged into the
+message body. It is request-smuggling-adjacent in flavor — the endpoint and any
+on-path element that respects the trailers boundary would disagree with Bandit
+about where the body ends — though it is confined to a single stream rather than
+crossing requests. It is also an internal inconsistency: Bandit rejects
+pseudo-header trailers but not unterminated ones, so the fix is aligning one
+missing case with handling that already exists.
+
+## The fix
+
+In the stream's receive loop, a trailing HEADERS (a HEADERS in `:open`/
+`:local_closed`, i.e. after the request headers) that does not carry END_STREAM is
+malformed: raise a stream `PROTOCOL_ERROR` instead of ignoring it. Concretely,
+guard the trailers branch of `do_recv` on `end_stream: true`, and treat
+`end_stream: false` the same way pseudo-header trailers are already treated —
+`stream_error!(…, protocol_error())`.
+
+## What this says about accord
+
+This is the pass where accord's spec is not just a forcing function but an actual
+*oracle* — because it is a state-machine fact. The Round 1 stream FSM enumerates,
+per state, exactly which frames are legal. Its `:open` row (already written, and
+model-checked clean) is:
+
+```elixir
+state :open do
+  on :headers_es, reply: :ok, goto: :remote_closed   # trailers, END_STREAM set → stream half-closes
+  on :data,       reply: :ok, goto: :open
+  on :data_es,    reply: :ok, goto: :remote_closed
+  # ... window_update, rst_stream, server-push events
+  # NOTE: there is no `on :headers` — a bare trailing HEADERS is not a legal
+  # transition out of :open.
+end
+```
+
+The END_STREAM-flag-to-tag split (Round 1's wall 2, `:headers` vs `:headers_es`)
+turns out to be exactly what makes this bug visible: the table admits
+`:headers_es` from `:open` (trailers that terminate the stream) but has *no*
+`:headers` transition, so a bare trailing HEADERS is an undeclared message — an
+`:invalid_message` protocol error under the monitor, and an unreachable
+transition under TLC. Bandit's `do_recv_end_stream(stream, false)` implements
+precisely that missing transition as a silent self-loop. Reading the
+implementation against the spec's `:open` row is what surfaces it: the model
+forbids the transition; the code allows it.
+
+This is the mirror image of Round 1's §5.1.1 find. There, the spec's table made a
+*missing* case visible (a lower stream ID Bandit dropped). Here, the same table
+makes an *extra* case visible (a transition Bandit permits that the table omits).
+Both are the same mechanism — an explicit legal-frame-per-state table read against
+the code — and it is the mechanism, not any automatic search, that finds the bugs.
+Round 2's error-code finds sat below that mechanism (frame-value validation, not
+transitions); this one sits squarely inside it.
+
+## Tally
+
+Four runtime-confirmed divergences from three passes over Bandit 1.12.0:
+
+| # | Divergence | RFC | Kind | Confirmed |
+|---|------------|-----|------|-----------|
+| 1 | Lower stream ID silently dropped | §5.1.1 | missing transition | runtime (Round 1) |
+| 2 | Zero-increment WINDOW_UPDATE → FLOW_CONTROL_ERROR | §6.9 | wrong error code | tests + RFC |
+| 3 | Out-of-range MAX_FRAME_SIZE → FRAME_SIZE_ERROR | §6.5.2 | wrong error code | tests + RFC |
+| 4 | Trailers without END_STREAM absorbed into body | §8.1 | extra transition | runtime probe |
+
+All four are lenient-leaning (no crash, no leak) and none is a security
+vulnerability on its own, but #4 is a genuine message-integrity bug worth
+reporting. In every case accord's contribution is the same: not an automatic
+finder, but the discipline of writing the exact contract — the legal-frame-per-
+state table for transitions, the error-per-rejection column for frame values —
+which is what makes each divergence legible on a read.
