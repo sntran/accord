@@ -27,9 +27,11 @@ defmodule Accord.Examples.Http2.TapProxy do
 
   Connection-level frames (stream id 0: SETTINGS, PING, GOAWAY, the connection
   WINDOW_UPDATE) are not part of the per-stream machine and are relayed but not
-  tapped. Frame types the stream machine does not model (PRIORITY, CONTINUATION,
-  PUSH_PROMISE) are likewise relayed untapped rather than reported as spurious
-  violations.
+  tapped. A header block split across HEADERS + CONTINUATION frames (§6.10) is
+  assembled: the stream message is emitted only when END_HEADERS completes the
+  block, so a split-header request is not a false positive. PRIORITY and
+  PUSH_PROMISE are still relayed untapped (the stream machine does not model
+  them).
   """
   use GenServer
 
@@ -90,6 +92,7 @@ defmodule Accord.Examples.Http2.TapProxy do
        cbuf: "",
        sbuf: "",
        preface_done: false,
+       pending_headers: %{client: nil, server: nil},
        monitors: %{}
      }}
   end
@@ -187,13 +190,42 @@ defmodule Accord.Examples.Http2.TapProxy do
   # PINGs) are relayed but not part of any monitored contract.
   defp tap_frame({_type, _flags, 0}, _dir, state), do: state
 
-  defp tap_frame({type, flags, sid}, dir, state) do
-    # A client HEADERS on a not-yet-seen stream opens it: tell the connection's
-    # stream-id monitor before the per-stream monitor is created.
-    if type == 0x1 and dir == :client and not Map.has_key?(state.monitors, sid) do
+  # HEADERS (sid > 0): a header block may span CONTINUATION frames (§6.10). Emit
+  # the stream message only when the block completes (END_HEADERS), carrying the
+  # END_STREAM flag meanwhile. This is why the tap does not simply ignore
+  # CONTINUATION — it assembles the block.
+  defp tap_frame({0x1, flags, sid}, dir, state) do
+    if dir == :client and not Map.has_key?(state.monitors, sid) do
       feed(state.conn_monitor, :cast, {:open_stream, sid})
     end
 
+    es = band(flags, 0x01) == 0x01
+
+    if band(flags, 0x04) == 0x04 do
+      emit_headers(sid, es, dir, state)
+    else
+      put_in(state.pending_headers[dir], {sid, es})
+    end
+  end
+
+  # CONTINUATION completes (or continues) the pending header block for its
+  # direction. An unexpected CONTINUATION is left to the server to reject (§6.10).
+  defp tap_frame({0x9, flags, sid}, dir, state) do
+    case state.pending_headers[dir] do
+      {^sid, es} ->
+        if band(flags, 0x04) == 0x04 do
+          state = put_in(state.pending_headers[dir], nil)
+          emit_headers(sid, es, dir, state)
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp tap_frame({type, flags, sid}, dir, state) do
     case frame_message(type, flags, dir) do
       :ignore ->
         state
@@ -203,6 +235,18 @@ defmodule Accord.Examples.Http2.TapProxy do
         feed(mon, kind, message)
         state
     end
+  end
+
+  defp emit_headers(sid, es, dir, state) do
+    {kind, message} =
+      case dir do
+        :client -> {:cast, if(es, do: :headers_es, else: :headers)}
+        :server -> {:event, if(es, do: :s_headers_es, else: :s_headers)}
+      end
+
+    {mon, state} = monitor_for(sid, state)
+    feed(mon, kind, message)
+    state
   end
 
   defp feed(mon, :cast, message), do: Monitor.cast(mon, message)
@@ -225,14 +269,13 @@ defmodule Accord.Examples.Http2.TapProxy do
     end
   end
 
-  # Frame type + END_STREAM flag -> stream-machine message, by direction. Types
-  # the machine does not model are ignored (relayed, not tapped).
+  # Frame type + END_STREAM flag -> stream-machine message, by direction, for the
+  # non-HEADERS frames (HEADERS/CONTINUATION are assembled separately above).
+  # Types the machine does not model are ignored (relayed, not tapped).
   defp frame_message(type, flags, :client) do
     es = band(flags, 0x01) == 0x01
 
     case type do
-      # HEADERS
-      0x1 -> {:cast, if(es, do: :headers_es, else: :headers)}
       # DATA
       0x0 -> {:cast, if(es, do: :data_es, else: :data)}
       # WINDOW_UPDATE (stream)
@@ -247,7 +290,6 @@ defmodule Accord.Examples.Http2.TapProxy do
     es = band(flags, 0x01) == 0x01
 
     case type do
-      0x1 -> {:event, if(es, do: :s_headers_es, else: :s_headers)}
       0x0 -> {:event, if(es, do: :s_data_es, else: :s_data)}
       0x8 -> {:event, :s_window_update}
       0x3 -> {:event, :s_rst_stream}

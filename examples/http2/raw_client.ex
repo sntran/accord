@@ -51,6 +51,32 @@ defmodule Accord.Examples.Http2.RawClient do
     ])
   end
 
+  @doc """
+  Send `POST /echo` request headers split across a HEADERS + CONTINUATION frame
+  (RFC 9113 §6.10). Used to check the tap assembles the block rather than treating
+  the incomplete HEADERS as a message.
+  """
+  @spec post_echo_split(conn(), pos_integer(), :inet.port_number()) :: conn()
+  def post_echo_split({sock, ctx}, stream_id, port) do
+    header_list = [
+      {":method", "POST"},
+      {":path", "/echo"},
+      {":scheme", "http"},
+      {":authority", "localhost:#{port}"}
+    ]
+
+    {block, ctx} = header_list |> Enum.map(fn {k, v} -> {:store, k, v} end) |> HPAX.encode(ctx)
+    block = IO.iodata_to_binary(block)
+    half = div(byte_size(block), 2)
+    <<first::binary-size(half), second::binary>> = block
+
+    # HEADERS with neither END_STREAM nor END_HEADERS (flags 0x00), then a
+    # CONTINUATION that closes the block with END_HEADERS (flags 0x04).
+    frame(sock, 0x1, 0x00, stream_id, first)
+    frame(sock, 0x9, 0x04, stream_id, second)
+    {sock, ctx}
+  end
+
   @doc "Send a DATA frame."
   @spec data(conn(), pos_integer(), boolean(), iodata()) :: conn()
   def data({sock, _} = conn, stream_id, end_stream, body) do

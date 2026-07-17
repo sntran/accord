@@ -44,9 +44,10 @@ no HPACK, which is exactly what the state machines dispatch on. Each stream fram
 is fed to a per-stream monitor as a `cast` (client → server) or server-push
 `event` (server → client); stream opens and connection-level frames feed one
 connection-wide monitor. Because it watches live traffic, the specs model every
-frame a conformant server legitimately sends (including server WINDOW_UPDATE), so
-a well-formed request raises nothing — that faithfulness is the first thing the
-test asserts.
+frame a conformant server legitimately sends (including server WINDOW_UPDATE), and
+a header block split across HEADERS + CONTINUATION (§6.10) is assembled rather than
+ignored — so a well-formed request, split headers and all, raises nothing. That
+faithfulness is the first thing the tests assert.
 
 **§8.1 — trailers without END_STREAM (server must reset).** The client ends the
 body with a trailing HEADERS frame lacking END_STREAM, then more DATA. That frame

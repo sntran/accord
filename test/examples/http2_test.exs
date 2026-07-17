@@ -90,6 +90,20 @@ defmodule Accord.Examples.Http2Test do
       assert TapProxy.violations(proxy) == []
     end
 
+    test "a header block split across HEADERS + CONTINUATION is assembled, not flagged",
+         %{proxy: proxy, port: port} do
+      # §6.10: the request headers arrive as HEADERS (no END_HEADERS) + a
+      # CONTINUATION. The tap assembles the block and emits one :headers message
+      # only when END_HEADERS completes it — so this well-formed split request
+      # raises nothing (faithfulness is earned, not had by ignoring CONTINUATION).
+      conn = RawClient.connect(port)
+      conn = RawClient.post_echo_split(conn, 1, port)
+      conn = RawClient.data(conn, 1, true, "OK")
+
+      assert RawClient.read_body(conn) == "OK"
+      assert TapProxy.violations(proxy) == []
+    end
+
     test "trailers without END_STREAM: Bandit fails to reset and accord blames the server (§8.1)",
          %{proxy: proxy, port: port} do
       conn = RawClient.connect(port)
