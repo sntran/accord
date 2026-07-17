@@ -81,7 +81,12 @@ defmodule Accord.Pass.TLA.BuildActions do
     tag = message_tag(transition.message_pattern)
     source = Atom.to_string(state_name)
 
-    if transition.kind == :event do
+    # An event, or a cast that changes state (declares goto/guard/update),
+    # is a one-way message with a state transition, guard, and update — the
+    # same shape in TLA regardless of direction (the client/server
+    # distinction is a runtime-blame concept). A plain cast falls through to
+    # the branch builder, which emits it as a stuttering no-op.
+    if transition.kind == :event or (transition.kind == :cast and transition.to != nil) do
       [
         build_event_action(
           ir,
@@ -384,7 +389,8 @@ defmodule Accord.Pass.TLA.BuildActions do
     target_state = resolve_next_state(transition.to, state_name)
     target = Atom.to_string(target_state)
     sessions = state_space.sessions
-    action_name = "Event#{camelize(tag)}From#{camelize(source)}To#{camelize(target)}"
+    prefix = if transition.kind == :cast, do: "Cast", else: "Event"
+    action_name = "#{prefix}#{camelize(tag)}From#{camelize(source)}To#{camelize(target)}"
 
     {msg_existentials, param_bindings} = build_existentials(transition, config)
     existential_vars = session_existentials(sessions) ++ msg_existentials
@@ -442,7 +448,8 @@ defmodule Accord.Pass.TLA.BuildActions do
          existential_vars: existential_vars,
          primed: all_primed,
          unchanged: unchanged,
-         comment: "server event #{tag} from #{source} to #{target}"
+         comment:
+           "#{if transition.kind == :cast, do: "client cast", else: "server event"} #{tag} from #{source} to #{target}"
        }}
     end
   end

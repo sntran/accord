@@ -51,6 +51,22 @@ defmodule Accord.Pass.ValidateStructureTest do
     assert report.message =~ "undefined state reference :nowhere"
   end
 
+  test "rejects a cast goto to an undefined state" do
+    ir =
+      put_in(valid_ir().states[:ready].transitions, [
+        %Transition{
+          message_pattern: :go,
+          message_types: [],
+          kind: :cast,
+          to: :nowhere,
+          branches: []
+        }
+      ])
+
+    assert {:error, [report]} = ValidateStructure.run(ir)
+    assert report.message =~ "undefined state reference :nowhere"
+  end
+
   test "rejects terminal state with transitions" do
     ir =
       put_in(valid_ir().states[:stopped], %State{

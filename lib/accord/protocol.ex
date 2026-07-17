@@ -103,6 +103,7 @@ defmodule Accord.Protocol do
           anystate: 1,
           on: 2,
           cast: 1,
+          cast: 2,
           event: 1,
           event: 2,
           property: 2,
@@ -576,7 +577,31 @@ defmodule Accord.Protocol do
   end
 
   @doc """
-  Defines a cast (async fire-and-forget, no reply).
+  Defines a cast: a one-way client → server message, no reply.
+
+  A bare cast is fire-and-forget and does not change state:
+
+      cast :heartbeat
+
+  A cast may also change state (`goto:`), the client-side mirror of an
+  `event`, for protocols where the client sends one-way messages that
+  advance the state machine (e.g. HTTP/2 frames). Blame for a bad cast is
+  the client's, since the client is the sender.
+
+      state :open do
+        cast :data, goto: :open
+        cast :data_end, goto: :remote_closed
+
+        cast :window_update do
+          guard fn {:window_update, n}, tracks -> n > 0 end
+          goto :open
+          update fn {:window_update, n}, tracks -> %{tracks | window: tracks.window + n} end
+        end
+      end
+
+  Cast updates take `fn message, tracks` (there is no reply). Casts cannot
+  declare replies or branches. State-changing casts are checked at runtime
+  (guard, update, properties) and forwarded upstream.
   """
   defmacro cast(message_spec) do
     {message_pattern, message_types, _message_arg_names, _message_arg_spans} =
@@ -602,6 +627,173 @@ defmodule Accord.Protocol do
         current = Module.get_attribute(__MODULE__, :accord_current_transitions)
         Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
       end
+    end
+  end
+
+  # The `do:` clause must precede the keyword clause: `cast :x do ... end`
+  # parses as `cast(:x, [do: block])`, and `[do: block]` is a list, so the
+  # `when is_list(opts)` clause would otherwise capture it and drop the block.
+  defmacro cast(message_spec, do: block) do
+    {message_pattern, message_types, message_arg_names, message_arg_spans} =
+      parse_message_spec(message_spec)
+
+    escaped_types = Macro.escape(message_types)
+    escaped_arg_names = Macro.escape(message_arg_names)
+    escaped_arg_spans = Macro.escape(message_arg_spans)
+    span = message_span_ast(message_spec, __CALLER__)
+
+    caller_file = __CALLER__.file
+    caller_line = __CALLER__.line
+    block_end_line = find_block_end_line(caller_file, caller_line)
+
+    block_span =
+      quote do
+        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+      end
+
+    quote do
+      import Accord.Protocol.Block
+
+      Module.put_attribute(__MODULE__, :accord_on_reply_type, nil)
+      Module.put_attribute(__MODULE__, :accord_on_reply_constraint, nil)
+      Module.put_attribute(__MODULE__, :accord_on_reply_span, nil)
+      Module.put_attribute(__MODULE__, :accord_on_goto, nil)
+      Module.put_attribute(__MODULE__, :accord_on_goto_span, nil)
+      Module.put_attribute(__MODULE__, :accord_on_guard, nil)
+      Module.put_attribute(__MODULE__, :accord_on_update, nil)
+      Module.put_attribute(__MODULE__, :accord_on_timeout, nil)
+      Module.put_attribute(__MODULE__, :accord_on_branches, [])
+
+      unquote(block)
+
+      goto_state = Module.get_attribute(__MODULE__, :accord_on_goto)
+      guard_pair = Module.get_attribute(__MODULE__, :accord_on_guard)
+      update_pair = Module.get_attribute(__MODULE__, :accord_on_update)
+
+      Accord.Protocol.__validate_event_block__(
+        __MODULE__,
+        unquote(caller_file),
+        unquote(caller_line)
+      )
+
+      in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
+
+      to =
+        Accord.Protocol.__cast_target__(
+          goto_state,
+          guard_pair,
+          update_pair,
+          in_anystate,
+          unquote(caller_file),
+          unquote(caller_line)
+        )
+
+      transition = %Transition{
+        message_pattern: unquote(message_pattern),
+        message_types: unquote(escaped_types),
+        message_arg_names: unquote(escaped_arg_names),
+        message_arg_spans: unquote(escaped_arg_spans),
+        kind: :cast,
+        branches: [],
+        to: to,
+        guard: guard_pair,
+        update: update_pair,
+        span: unquote(span),
+        block_span: unquote(block_span)
+      }
+
+      if in_anystate do
+        Module.put_attribute(__MODULE__, :accord_anystate, transition)
+      else
+        current = Module.get_attribute(__MODULE__, :accord_current_transitions)
+        Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
+      end
+
+      Module.delete_attribute(__MODULE__, :accord_on_reply_type)
+      Module.delete_attribute(__MODULE__, :accord_on_reply_constraint)
+      Module.delete_attribute(__MODULE__, :accord_on_reply_span)
+      Module.delete_attribute(__MODULE__, :accord_on_goto)
+      Module.delete_attribute(__MODULE__, :accord_on_goto_span)
+      Module.delete_attribute(__MODULE__, :accord_on_guard)
+      Module.delete_attribute(__MODULE__, :accord_on_update)
+      Module.delete_attribute(__MODULE__, :accord_on_timeout)
+      Module.delete_attribute(__MODULE__, :accord_on_branches)
+
+      import Accord.Protocol.Block, only: []
+    end
+  end
+
+  defmacro cast(message_spec, opts) when is_list(opts) do
+    build_cast_keyword(message_spec, opts, __CALLER__)
+  end
+
+  defp build_cast_keyword(message_spec, opts, caller) do
+    goto_state = Keyword.get(opts, :goto)
+
+    {message_pattern, message_types, message_arg_names, message_arg_spans} =
+      parse_message_spec(message_spec)
+
+    escaped_types = Macro.escape(message_types)
+    escaped_arg_names = Macro.escape(message_arg_names)
+    escaped_arg_spans = Macro.escape(message_arg_spans)
+    span = message_span_ast(message_spec, caller)
+    caller_file = caller.file
+    caller_line = caller.line
+
+    quote do
+      in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
+
+      to =
+        Accord.Protocol.__cast_target__(
+          unquote(goto_state),
+          nil,
+          nil,
+          in_anystate,
+          unquote(caller_file),
+          unquote(caller_line)
+        )
+
+      transition = %Transition{
+        message_pattern: unquote(message_pattern),
+        message_types: unquote(escaped_types),
+        message_arg_names: unquote(escaped_arg_names),
+        message_arg_spans: unquote(escaped_arg_spans),
+        kind: :cast,
+        branches: [],
+        to: to,
+        span: unquote(span)
+      }
+
+      if in_anystate do
+        Module.put_attribute(__MODULE__, :accord_anystate, transition)
+      else
+        current = Module.get_attribute(__MODULE__, :accord_current_transitions)
+        Module.put_attribute(__MODULE__, :accord_current_transitions, [transition | current])
+      end
+    end
+  end
+
+  @doc false
+  # A cast's target: an explicit goto, or `:__same__` when it declares a
+  # guard/update but no goto (so the state-changing pipeline runs and the
+  # stream stays put), or nil for a plain fire-and-forget cast. Anystate
+  # casts, like anystate events, may not goto.
+  def __cast_target__(goto_state, guard_pair, update_pair, in_anystate, file, line) do
+    cond do
+      in_anystate and goto_state != nil ->
+        raise CompileError,
+          description: "anystate casts cannot specify goto:",
+          file: file,
+          line: line
+
+      goto_state != nil ->
+        goto_state
+
+      guard_pair != nil or update_pair != nil ->
+        :__same__
+
+      true ->
+        nil
     end
   end
 
@@ -967,11 +1159,16 @@ defmodule Accord.Protocol do
     quote do
       unquote_splicing(fn_defs)
 
-      # :safe mode cannot be used here because the IR contains lifted
-      # function references (EXPORT_EXT) that require atom creation.
-      # These binaries are generated at compile time, never from untrusted sources.
-      def __ir__, do: :erlang.binary_to_term(@accord_ir_bin)
-      def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin)
+      # Decode in `:safe` mode: these binaries are embedded at compile time and
+      # never come from an untrusted source, but decoding safely anyway is free
+      # defense in depth (and keeps static analysers from flagging the call). It
+      # is sound because both functions are members of *this* module — to call
+      # them the module must be loaded, so every atom the IR names (states, tags,
+      # tracks, types, and the lifted `&__accord_fn_N__/arity` captures) already
+      # exists in the atom table. (`Accord.Compat.Snapshot` decodes *foreign*,
+      # possibly older IRs, so it must stay in unsafe mode.)
+      def __ir__, do: :erlang.binary_to_term(@accord_ir_bin, [:safe])
+      def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin, [:safe])
       def __tla_domains__, do: unquote(Macro.escape(domains_map))
       def __tla_status__, do: unquote(Macro.escape(tla_status))
 

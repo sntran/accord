@@ -139,6 +139,78 @@ defmodule Accord.MonitorTest do
     end
   end
 
+  # A cast may change state (the client-side mirror of an event) for
+  # one-way message protocols like HTTP/2 frames.
+  defmodule OneWay do
+    use Accord.Protocol, tla: :off
+
+    initial :idle
+    track :count, :non_neg_integer, default: 0
+
+    state :idle do
+      cast :open, goto: :active
+    end
+
+    state :active do
+      cast :tick do
+        goto :active
+        guard fn :tick, tracks -> tracks.count < 3 end
+        update fn :tick, tracks -> %{tracks | count: tracks.count + 1} end
+      end
+
+      cast :done, goto: :closed
+    end
+
+    state :closed, terminal: true
+  end
+
+  describe "state-changing casts" do
+    setup do
+      ViolationCollector.init()
+      {:ok, server} = EchoServer.start_link()
+
+      {:ok, monitor} =
+        start_monitor(OneWay.__compiled__(), server,
+          violation_policy: {ViolationCollector, :handle}
+        )
+
+      %{monitor: monitor}
+    end
+
+    test "a cast advances the state and applies its update", %{monitor: monitor} do
+      Monitor.cast(monitor, :open)
+      Monitor.cast(monitor, :tick)
+      Monitor.cast(monitor, :tick)
+      {state, data} = :sys.get_state(monitor)
+
+      assert state == :active
+      assert data.tracks.count == 2
+    end
+
+    test "a cast invalid in the current state is client blame", %{monitor: monitor} do
+      Monitor.cast(monitor, :open)
+      # :open is not accepted in :active.
+      Monitor.cast(monitor, :open)
+      :sys.get_state(monitor)
+
+      assert [violation] = ViolationCollector.drain()
+      assert violation.kind == :invalid_message
+      assert violation.blame == :client
+    end
+
+    test "a cast whose guard fails is client blame", %{monitor: monitor} do
+      Monitor.cast(monitor, :open)
+      for _ <- 1..3, do: Monitor.cast(monitor, :tick)
+      # count is now 3; the guard `count < 3` fails.
+      Monitor.cast(monitor, :tick)
+      :sys.get_state(monitor)
+
+      assert Enum.any?(ViolationCollector.drain(), fn v ->
+               v.kind == :guard_failed and v.blame == :client
+             end)
+    end
+  end
+
   describe "client blame — :invalid_message" do
     setup do
       compiled = compile_ir(sample_ir())

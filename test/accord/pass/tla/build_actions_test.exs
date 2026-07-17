@@ -108,6 +108,36 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
 
       assert cast.name =~ "Cast"
     end
+
+    test "a cast with a goto target emits a state-changing action" do
+      ir = %{
+        minimal_ir()
+        | states: %{
+            ready: %State{
+              name: :ready,
+              transitions: [
+                %Transition{
+                  message_pattern: :go,
+                  message_types: [],
+                  kind: :cast,
+                  to: :done,
+                  branches: []
+                }
+              ]
+            },
+            done: %State{name: :done, terminal: true}
+          }
+      }
+
+      {_ss, actions} = build(ir)
+      cast = Enum.find(actions, &(&1.message_tag == "go"))
+
+      # Not a stuttering no-op: the state variable is primed to the target.
+      assert cast.source_state == "ready"
+      assert cast.target_state == "done"
+      assert cast.primed["state"] == ~s("done")
+      refute "state" in cast.unchanged
+    end
   end
 
   describe "existential variables" do

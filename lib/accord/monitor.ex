@@ -406,11 +406,15 @@ defmodule Accord.Monitor do
 
       true ->
         case TransitionTable.lookup(table, state, message) do
+          {:ok, %{kind: :cast, to: to} = transition} when to != nil ->
+            # A state-changing cast: run the full pipeline (types, guard,
+            # update, properties) and forward upstream, blaming the client.
+            process_cast_transition(transition, message, state, data)
+
           {:ok, transition} when transition.kind == :cast ->
-            # Type-check message arguments.
+            # A plain fire-and-forget cast: type-check and forward.
             case check_message_types(message, transition, state, :client) do
               :ok ->
-                # Forward to upstream.
                 GenServer.cast(data.upstream, message)
                 {:keep_state, data}
 
@@ -501,6 +505,59 @@ defmodule Accord.Monitor do
         # Like all property violations, the (valid) event is still
         # forwarded — the transition succeeded.
         forward_event(data.downstream, message)
+        handle_event_property_violation(violation, next_state, updated_data, timer_actions)
+    end
+  end
+
+  # -- Cast Pipeline (client → server, state-changing) --
+
+  # The client-side mirror of the event pipeline: same checks, but blame is
+  # the client's (it is the sender) and the message is forwarded upstream.
+  defp process_cast_transition(transition, message, state, data) do
+    case check_message_types(message, transition, state, :client) do
+      :ok ->
+        case evaluate_guard(transition.guard, message, data.tracks) do
+          :ok ->
+            apply_cast_transition(transition, message, state, data)
+
+          {:error, :guard_failed} ->
+            violation = Violation.guard_failed(state, message, :client)
+            handle_cast_violation(violation, state, data)
+        end
+
+      {:error, violation} ->
+        handle_cast_violation(violation, state, data)
+    end
+  end
+
+  defp apply_cast_transition(transition, message, state, data) do
+    next_state = if transition.to == :__same__, do: state, else: transition.to
+    old_tracks = data.tracks
+    new_tracks = apply_event_update(transition.update, message, old_tracks)
+
+    case check_properties(message, state, next_state, old_tracks, new_tracks, data) do
+      {:ok, updated_data} ->
+        updated_data = %{updated_data | tracks: new_tracks}
+        updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, state, message, nil, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, state, next_state)
+
+        GenServer.cast(data.upstream, message)
+        {:next_state, next_state, updated_data, timer_actions}
+
+      {:violation, violation, updated_data} ->
+        updated_data = %{updated_data | tracks: new_tracks}
+        updated_data = track_visited_state(updated_data, next_state)
+        updated_data = emit_trace(updated_data, state, message, nil, next_state)
+
+        timer_actions =
+          liveness_actions(updated_data, next_state) ++
+            arm_state_timeout(updated_data, state, next_state)
+
+        GenServer.cast(data.upstream, message)
         handle_event_property_violation(violation, next_state, updated_data, timer_actions)
     end
   end

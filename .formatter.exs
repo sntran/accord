@@ -8,6 +8,7 @@ protocol_macros = [
   anystate: 1,
   on: 2,
   cast: 1,
+  cast: 2,
   event: 1,
   event: 2,
   property: 2,
