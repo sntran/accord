@@ -1161,16 +1161,18 @@ defmodule Accord.Protocol do
     quote do
       unquote_splicing(fn_defs)
 
-      # Decode in `:safe` mode: these binaries are embedded at compile time and
-      # never come from an untrusted source, but decoding safely anyway is free
-      # defense in depth (and keeps static analysers from flagging the call). It
-      # is sound because both functions are members of *this* module — to call
-      # them the module must be loaded, so every atom the IR names (states, tags,
-      # tracks, types, and the lifted `&__accord_fn_N__/arity` captures) already
-      # exists in the atom table. (`Accord.Compat.Snapshot` decodes *foreign*,
-      # possibly older IRs, so it must stay in unsafe mode.)
-      def __ir__, do: :erlang.binary_to_term(@accord_ir_bin, [:safe])
-      def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin, [:safe])
+      # These binaries are embedded at compile time from *this* module's own
+      # source, so they are fully trusted — decoding is not reading foreign input.
+      # `:safe` cannot be used here: a term stored as a module-attribute binary is
+      # opaque bytes, so loading the module does NOT intern the atoms the term
+      # names. Any atom present only inside the IR (a property name, a type atom, a
+      # span field) is therefore absent from the atom table, and `:safe` decoding
+      # raises on it — which is exactly what `mix accord.check`'s runtime-only
+      # checks hit for a protocol with a runtime-only property. Plain decoding
+      # interns those atoms from the trusted binary. (`Accord.Compat.Snapshot`
+      # decodes *foreign*, possibly older IRs from disk, so it must stay `:safe`.)
+      def __ir__, do: :erlang.binary_to_term(@accord_ir_bin)
+      def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin)
       def __tla_domains__, do: unquote(Macro.escape(domains_map))
       def __tla_status__, do: unquote(Macro.escape(tla_status))
 
