@@ -111,6 +111,18 @@ defmodule Accord.TLA.CheckTest do
     end
   end
 
+  describe "connection/stream composition" do
+    test "a connection gate blocks stream opens after GOAWAY", %{tmp_dir: tmp_dir} do
+      # Connection state (shared) gates per-session streams; TLC proves no
+      # stream opens once the connection is going away.
+      assert_passes(Accord.Test.ConnGate.Protocol, tmp_dir: tmp_dir)
+    end
+
+    test "without the connection guard, a stream opens after GOAWAY", %{tmp_dir: tmp_dir} do
+      assert_fails(Accord.Test.ConnGateUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
+    end
+  end
+
   describe "distinct leases across sessions" do
     test "the fencing constraint makes leases unique — TLC proves distinct",
          %{tmp_dir: tmp_dir} do

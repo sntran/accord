@@ -355,6 +355,43 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert data.primed["state"] == ~s("subscribed")
     end
 
+    test "a boolean update from a comparison is parenthesized" do
+      # `flag' = mode = "b"` is a TLA `=` precedence conflict; the value
+      # must be wrapped: `flag' = (mode = "b")`.
+      ir = %IR{
+        name: Test.Protocol,
+        initial: :ready,
+        tracks: [
+          %Track{name: :flag, type: :boolean, default: false},
+          %Track{name: :mode, type: :atom, default: :a, domain: [:a, :b]}
+        ],
+        states: %{
+          ready: %State{
+            name: :ready,
+            transitions: [
+              %Transition{
+                message_pattern: :go,
+                message_types: [],
+                kind: :cast,
+                to: :ready,
+                branches: [],
+                update: %{
+                  fun: fn _m, t -> t end,
+                  ast: quote(do: fn _m, tracks -> %{tracks | flag: tracks.mode == :b} end)
+                }
+              }
+            ]
+          }
+        }
+      }
+
+      {:ok, ss} = BuildStateSpace.run(ir, %ModelConfig{})
+      {:ok, actions} = BuildActions.run(ir, ss, %ModelConfig{})
+      cast = Enum.find(actions, &(&1.message_tag == "go"))
+
+      assert cast.primed["flag"] == "(mode = \"b\")"
+    end
+
     test "anystate events produce a self-loop action per non-terminal state" do
       ir = Accord.Test.Feed.Protocol.__ir__()
       config = %ModelConfig{domains: %{demand: 0..3, pos_integer: 1..3}}

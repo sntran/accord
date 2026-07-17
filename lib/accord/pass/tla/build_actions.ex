@@ -542,6 +542,35 @@ defmodule Accord.Pass.TLA.BuildActions do
 
   defp build_track_primed(_, _, _, _, _, _), do: {:ok, %{}}
 
+  @tla_binops ~w(= < > =< >= /= \\/ /\\ => ~>)
+
+  # A primed assignment `x' = value` conflicts with the assignment's own `=`
+  # when the value is itself a top-level comparison or boolean expression
+  # (e.g. a boolean track set from `tracks.mode == :fast`). Wrap those; leave
+  # simple values (a var, a literal, an already-parenthesized arithmetic
+  # expression) untouched.
+  defp parenthesize_value(value) do
+    if top_level_binop?(value), do: "(#{value})", else: value
+  end
+
+  defp top_level_binop?(value) do
+    value
+    |> String.split(" ")
+    |> Enum.reduce_while(0, fn token, depth ->
+      cond do
+        depth == 0 and token in @tla_binops -> {:halt, :found}
+        true -> {:cont, depth + paren_delta(token)}
+      end
+    end)
+    |> Kernel.==(:found)
+  end
+
+  defp paren_delta(token) do
+    opens = token |> String.graphemes() |> Enum.count(&(&1 == "("))
+    closes = token |> String.graphemes() |> Enum.count(&(&1 == ")"))
+    opens - closes
+  end
+
   defp compile_update_pairs(ir, update_pairs, bindings, track_names, span, sessions) do
     results =
       Enum.map(update_pairs, fn {key, val_ast} ->
@@ -556,8 +585,11 @@ defmodule Accord.Pass.TLA.BuildActions do
                  span: span,
                  render_field: Sessions.render_field(sessions)
                ) do
-            {:ok, tla_val} -> {:ok, {key_str, Sessions.assign(sessions, key_str, tla_val)}}
-            {:error, reports} -> {:error, reports}
+            {:ok, tla_val} ->
+              {:ok, {key_str, Sessions.assign(sessions, key_str, parenthesize_value(tla_val))}}
+
+            {:error, reports} ->
+              {:error, reports}
           end
         else
           {:error, [Expr.unknown_track_report(key_str, track_names, ir, span, "update")]}
