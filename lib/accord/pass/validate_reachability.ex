@@ -53,7 +53,8 @@ defmodule Accord.Pass.ValidateReachability do
       state = Map.get(states, current, %IR.State{name: current})
 
       # Collect next states from this state's transitions and anystate.
-      # Branch targets cover calls; event targets live in transition.to.
+      # Branch targets cover calls; event and state-changing cast targets live in
+      # transition.to.
       next_states =
         (state.transitions ++ anystate)
         |> Enum.flat_map(fn transition ->
@@ -65,14 +66,14 @@ defmodule Accord.Pass.ValidateReachability do
               end
             end)
 
-          event_targets =
+          to_targets =
             case transition do
-              %{kind: :event, to: :__same__} -> [current]
-              %{kind: :event, to: target} when target != nil -> [target]
+              %{kind: kind, to: :__same__} when kind in [:event, :cast] -> [current]
+              %{kind: kind, to: target} when kind in [:event, :cast] and target != nil -> [target]
               _ -> []
             end
 
-          branch_targets ++ event_targets
+          branch_targets ++ to_targets
         end)
         |> Kernel.++(
           case state.state_timeout do

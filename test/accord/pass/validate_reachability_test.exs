@@ -130,6 +130,33 @@ defmodule Accord.Pass.ValidateReachabilityTest do
     assert ValidateReachability.warnings(ir) == []
   end
 
+  test "follows cast and event goto targets for reachability" do
+    # State-changing casts and server-push events carry their target in
+    # transition.to (no branches). A frame protocol built from them must not
+    # report its states as unreachable.
+    ir = %IR{
+      name: Test,
+      initial: :idle,
+      states: %{
+        idle: %State{
+          name: :idle,
+          transitions: [
+            %Transition{message_pattern: :headers, message_types: [], kind: :cast, to: :open}
+          ]
+        },
+        open: %State{
+          name: :open,
+          transitions: [
+            %Transition{message_pattern: :s_data, message_types: [], kind: :event, to: :closed}
+          ]
+        },
+        closed: %State{name: :closed, terminal: true}
+      }
+    }
+
+    assert ValidateReachability.warnings(ir) == []
+  end
+
   test "handles branching transitions" do
     ir = %IR{
       name: Test,
