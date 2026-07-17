@@ -1,17 +1,18 @@
-defmodule Accord.Test.SendWindow.Protocol do
+defmodule Accord.Examples.Http2.FlowControl.Protocol do
   @moduledoc """
   HTTP/2 send-window flow control (RFC 9113 §6.9 / §6.9.1), from the Bandit case
-  study (`docs/case-study-http2-bandit.md`, round 2).
+  study round 2.
 
-  The server's per-stream send window is the octet budget the peer has granted
-  us to send. The peer's WINDOW_UPDATE — a one-way `cast` — increments it; the
+  The server's per-stream send window is the octet budget the peer has granted us
+  to send. The peer's WINDOW_UPDATE — a one-way `cast` — increments it; the
   server's DATA — a one-way server-push `event` — decrements it. §6.9.1 requires
   that a WINDOW_UPDATE not push the window past 2^31-1; the `const :max` ceiling
   stands in for that bound, with a bounded head-room domain so an overflow is
   representable. TLC proves the window never overflows.
 
-  `SendWindowUnguarded` drops the overflow guard and TLC finds the overflow in
-  two states.
+  `Unguarded` drops the overflow guard — mirroring a deserializer that forgets the
+  §6.9.1 `current + increment > max` check — and TLC finds the overflow in two
+  states.
   """
   use Accord.Protocol
 
@@ -48,12 +49,13 @@ defmodule Accord.Test.SendWindow.Protocol do
   end
 end
 
-defmodule Accord.Test.SendWindowUnguarded.Protocol do
+defmodule Accord.Examples.Http2.FlowControl.Unguarded do
   @moduledoc """
-  Failure fixture: the send window without the §6.9.1 overflow guard on
-  WINDOW_UPDATE. TLC finds the window exceeding the ceiling in two states.
+  Seeded bug: the send window without the §6.9.1 overflow guard on WINDOW_UPDATE.
+  TLC finds the window exceeding the ceiling in two states (send_window 1 -> 4 past
+  a ceiling of 3).
   """
-  use Accord.Protocol
+  use Accord.Protocol, tla: :off
 
   initial :open
 
@@ -66,8 +68,7 @@ defmodule Accord.Test.SendWindowUnguarded.Protocol do
   end
 
   state :open do
-    # Seeded bug: no `send_window + inc <= max` guard, mirroring a deserializer
-    # that forgets the §6.9.1 overflow check.
+    # BUG: no `send_window + inc <= max` guard.
     cast {:window_update, inc :: pos_integer()} do
       update fn {:window_update, inc}, tracks ->
         %{tracks | send_window: tracks.send_window + inc}

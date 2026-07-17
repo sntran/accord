@@ -17,6 +17,15 @@ state, `exclusive` mutual exclusion — see the `DistributedLock` fixture at
 `sessions: 2` and produces the two-sessions-both-locked counterexample when
 the holder guard is dropped.
 
+The four above are pedagogical. For a real, high-profile protocol, see
+[http2](http2/): four specs from Bandit's HTTP/2 implementation (the stream
+state machine, stream-id monotonicity, send-window flow control, and GOAWAY
+gating), each with a seeded bug matching a runtime-confirmed divergence in
+Bandit 1.12.0. It exercises the wire-protocol features (`cast`/`event` one-way
+frames, `abstract: :monotonic` ids, `shared:` connection state) and ships
+reference probes that reproduce the bugs against a running Bandit. The full
+analysis is [`docs/case-study-http2-bandit.md`](../docs/case-study-http2-bandit.md).
+
 Run any demo:
 
 ```

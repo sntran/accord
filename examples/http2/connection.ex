@@ -1,14 +1,18 @@
-defmodule Accord.Test.ConnGate.Protocol do
+defmodule Accord.Examples.Http2.Connection.Protocol do
   @moduledoc """
-  Connection/stream composition: a connection-level state (`conn_state`)
-  gates per-session streams — modeled with `sessions`, `shared:` tracks,
-  a state-changing `cast`, and an `abstract: :monotonic` id, no dedicated
-  two-level construct.
+  HTTP/2 connection GOAWAY gating streams (RFC 9113 §6.8), from the Bandit case
+  study — connection/stream composition without a dedicated two-level construct.
 
-  This is the shape of an HTTP/2 connection that goes away: once
-  `conn_state` is `:going_away`, no new stream may open. The guard on the
-  open branch enforces it; `ConnGateUnguarded` drops the guard and TLC
-  finds a stream opening after the connection went away.
+  A connection-level state gates per-session streams: once the connection is going
+  away, no new stream may open. It is expressed with the three primitives that
+  compose into layered state — a `shared:` connection track, a state-changing
+  `cast :goaway` that flips it, and an `abstract: :monotonic` id keeping the
+  open-guard finite. Each session (a stream) reads the shared `conn_state` in its
+  open guard.
+
+  TLC proves no stream opens once GOAWAY has been sent (`sessions: 2`).
+  `Unguarded` drops the `conn_state == :active` check and TLC finds a stream
+  opening after GOAWAY.
   """
   use Accord.Protocol
 
@@ -26,6 +30,7 @@ defmodule Accord.Test.ConnGate.Protocol do
 
   state :idle do
     on :open do
+      # A stream opens only while the connection is active and with a fresh id.
       branch({:opened, id :: pos_integer()},
         goto: :active,
         where: fn {:opened, id}, tracks ->
@@ -50,6 +55,7 @@ defmodule Accord.Test.ConnGate.Protocol do
   state :done, terminal: true
 
   anystate do
+    # The connection goes away — a one-way client cast flipping shared state.
     cast :goaway do
       update fn _msg, tracks -> %{tracks | conn_state: :going_away} end
     end
@@ -60,12 +66,12 @@ defmodule Accord.Test.ConnGate.Protocol do
   end
 end
 
-defmodule Accord.Test.ConnGateUnguarded.Protocol do
+defmodule Accord.Examples.Http2.Connection.Unguarded do
   @moduledoc """
-  Failure fixture: the connection gate without the `conn_state == :active`
-  check on the open branch. TLC finds a stream opening after GOAWAY.
+  Seeded bug: the connection gate without the `conn_state == :active` check on the
+  open branch. TLC finds a stream opening after GOAWAY.
   """
-  use Accord.Protocol
+  use Accord.Protocol, tla: :off
 
   initial :idle
 
@@ -81,6 +87,7 @@ defmodule Accord.Test.ConnGateUnguarded.Protocol do
 
   state :idle do
     on :open do
+      # BUG: no `conn_state == :active` check — a stream can open after GOAWAY.
       branch({:opened, id :: pos_integer()},
         goto: :active,
         where: fn {:opened, id}, tracks -> id > tracks.last_id end

@@ -31,14 +31,10 @@ defmodule Accord.TLA.CheckTest do
       assert_passes(Accord.Test.EnumeratedMode.Protocol, tmp_dir: tmp_dir)
     end
 
-    test "an abstract: :monotonic id track does not spuriously deadlock",
-         %{tmp_dir: tmp_dir} do
-      # Deadlock checking is on. Without abstract: :monotonic a session
-      # starves once the tiny id domain is exhausted (a false deadlock);
-      # the modifier lets exploration stop at the bound instead, and the
-      # distinct property is proven.
-      assert_passes(Accord.Test.MonotonicId.Protocol, tmp_dir: tmp_dir)
-    end
+    # abstract: :monotonic, connection/stream composition, and send-window flow
+    # control are exercised end-to-end by the HTTP/2 example
+    # (test/examples/http2_test.exs); the emitter-level unit tests live in
+    # build_state_space_test.exs and build_actions_test.exs.
   end
 
   describe "invariant violations" do
@@ -108,32 +104,6 @@ defmodule Accord.TLA.CheckTest do
         tmp_dir: tmp_dir,
         model_config_path: "test/support/protocols/distributed_lock_model.exs"
       )
-    end
-  end
-
-  describe "connection/stream composition" do
-    test "a connection gate blocks stream opens after GOAWAY", %{tmp_dir: tmp_dir} do
-      # Connection state (shared) gates per-session streams; TLC proves no
-      # stream opens once the connection is going away.
-      assert_passes(Accord.Test.ConnGate.Protocol, tmp_dir: tmp_dir)
-    end
-
-    test "without the connection guard, a stream opens after GOAWAY", %{tmp_dir: tmp_dir} do
-      assert_fails(Accord.Test.ConnGateUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
-    end
-  end
-
-  describe "flow-control send window (HTTP/2 §6.9.1)" do
-    test "the overflow guard keeps the send window within its ceiling", %{tmp_dir: tmp_dir} do
-      # WINDOW_UPDATE (cast) grows the window, DATA (event) shrinks it; the
-      # guard `send_window + inc <= max` proves it never overflows.
-      assert_passes(Accord.Test.SendWindow.Protocol, tmp_dir: tmp_dir)
-    end
-
-    test "without the overflow guard, a WINDOW_UPDATE overshoots the ceiling",
-         %{tmp_dir: tmp_dir} do
-      # Two-state counterexample: send_window 1 -> 4 past a ceiling of 3.
-      assert_fails(Accord.Test.SendWindowUnguarded.Protocol, :invariant, tmp_dir: tmp_dir)
     end
   end
 
