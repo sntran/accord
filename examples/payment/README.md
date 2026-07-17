@@ -1,42 +1,38 @@
 # Payment lifecycle
 
-authorize → partial captures → finalize / void → refunds. The
-property-algebra showcase: everything here works end to end with no
-planned extensions.
+A card payment moves through these steps:
 
-## What it exercises
+- `authorize(n)` — reserve up to `n` on the card
+- `capture(n)` — take money; captures accumulate and must not exceed the
+  authorized amount
+- `finalize` — close captures; refunds are only allowed afterward
+- `refund(n)` — return money; refunds must not exceed what was captured
+- `void` — cancel before any money moved
 
-- Cumulative guards carrying the money rules (`captured + amount <=
-  authorized`, `refunded + amount <= captured`).
-- Global invariants (`never_overcapture`, `never_overrefund`), an action
-  property (money only flows forward), `precedence`
-  (authorize-before-capture), a local invariant on a terminal state
-  (void means no money moved), and three `reachable` checks.
-- Inline model config (`domain:` on tracks, `model do ... end` for the
-  message amount).
+## What the protocol declares
 
-## What TLC finds
+- Guards carry the money rules: `captured + amount <= authorized` on
+  capture, `refunded + amount <= captured` on refund.
+- Tracks for the authorized, captured, and refunded amounts, with inline
+  domains.
+- Properties: captures never exceed the authorization, refunds never
+  exceed captures, money only moves forward, and capture only happens
+  after authorize.
 
-`protocol_percall_guard.ex` seeds the classic double-capture: the guard
-checks `amount <= authorized` per call instead of cumulatively. TLC's
-counterexample reads like an incident postmortem: authorize(4),
-capture(3), capture(3) — captured 6 > authorized 4. The guard *is* the
-model; a wrong guard is a wrong state space.
+## The seeded bug
 
-```
-mix accord.check Accord.Examples.Payment.Protocol
-```
+`protocol_percall_guard.ex` checks `amount <= authorized` per call instead
+of against the running total. Model checking finds it:
 
-## What the monitor adds
+    mix accord.check Accord.Examples.Payment.Protocol
 
-- `{:capture, 3}` against a 2-unit authorization → `:guard_failed`,
-  client blame, span on the guard.
-- `{:refund, 1}` while still `:authorized` → `:invalid_message` with the
-  valid-message list — "you refunded before finalizing" caught in test,
-  not in month-end reconciliation.
-- `Accord.Test.FaultyServer` injections (`:wrong_reply_type`,
-  `:timeout`) → server blame.
+The counterexample: authorize(4), capture(3), capture(3) — captured 6
+exceeds authorized 4.
 
-```
-mix run examples/payment/demo.exs
-```
+## What the demo shows
+
+    mix run examples/payment/demo.exs
+
+- The normal flow: authorize, two captures, finalize, refund.
+- A client capturing more than authorized (`guard_failed`, client blame).
+- A client refunding before finalizing (`invalid_message`, client blame).

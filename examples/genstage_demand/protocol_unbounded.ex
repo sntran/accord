@@ -2,10 +2,8 @@ defmodule Accord.Examples.Demand.ProtocolUnbounded do
   @moduledoc """
   Seeded design bug: the events push has no demand guard.
 
-  TLC's counterexample is three actions: ask(1), push events(2) — or
-  push with zero demand at all — and `demand` goes negative. That trace
-  is the GenStage documentation rule ("never emit more events than
-  demanded"), mechanically derived from its absence.
+  The counterexample takes three steps: ask(1), then a push of 2 events
+  (or a push with no demand at all) drives `demand` negative.
   """
   # tla: :off — deliberately broken; not part of the project's verified
   # surface. The TLC test compiles the spec from the IR directly and

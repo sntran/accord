@@ -1,16 +1,15 @@
 defmodule Accord.Examples.Demand.Protocol do
   @moduledoc """
-  The GenStage demand contract: never emit more events than demanded.
+  The GenStage demand rule: never emit more events than demanded.
 
-  The rule every GenStage/Broadway user knows from the documentation —
-  and that nothing enforces at runtime — as a contract. The consumer
-  asks for demand (a call); the producer pushes `{:events, n}` through
-  the monitor (a server event) whose guard IS the documented rule.
-  Over-delivery is immediate server blame; TLC interleaves asks and
-  pushes and proves demand never goes negative.
+  The consumer asks for demand (a call); the producer pushes
+  `{:events, n}` through the monitor (a server event) whose guard is
+  `n <= tracks.demand`. Emitting more events than were asked for is
+  server blame. Model checking interleaves asks and pushes and verifies
+  demand never goes negative.
 
-  The shortest example with the largest argument: this contract was
-  inexpressible before server-push events existed.
+  See `protocol_unbounded.ex` for a version that drops the guard, which
+  model checking catches.
   """
   use Accord.Protocol
 

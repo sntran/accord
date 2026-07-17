@@ -74,12 +74,11 @@ end
 
 defmodule Accord.Examples.JobQueue.StaleTokenServer do
   @moduledoc """
-  A buggy queue that re-issues an old fence token after expiry.
+  A buggy queue that reissues an old fence token after an expiry.
 
-  Re-using a token violates the checkout branch's
-  `where: token > tracks.fence` constraint — the monitor reports
-  `:constraint_failed` with server blame the moment the stale lease is
-  handed out, answering "who leaked the lease" mechanically.
+  Reusing a token breaks the checkout rule `token > tracks.fence`, so the
+  monitor reports `:constraint_failed` with server blame the moment the
+  stale token is handed out.
   """
   use GenServer
 

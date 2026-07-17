@@ -1,42 +1,44 @@
 # Circuit breaker
 
-The intro example: closed/open/half-open with a trip threshold of 3,
-recognizable to anyone who has run `fuse` or hand-rolled a breaker around a
-flaky downstream.
+The breaker sits in front of a flaky downstream and has three states:
 
-## What it exercises
+- `closed` — passes requests through and counts consecutive failures
+- `open` — rejects every request
+- `half_open` — lets a single probe request through
 
-- Reply-shape-driven branching: `:ok` / `:error` / `:tripped` pick the next
-  state, refined by `where:` constraints on the failure counter.
-- A `failures` track with an inline model domain (`domain: 0..4`).
-- A protocol constant (`const :threshold, 3`) shared by the constraints
-  and the invariant — declared once, substituted at compile time.
-- A state timeout (`state_timeout 30_000, goto: :half_open`): the
-  cooldown fires on its own, and its automatic weak fairness discharges
-  the `breaker_recovers` liveness property with no `assuming:` needed.
-- Local invariant (`threshold_respected`), `forbidden` (counter
-  overshoot), `precedence` (no probe without a trip), and `reachable`.
+It trips (`closed` → `open`) after 3 failures in a row. After a 30s
+cooldown it moves to `half_open` on its own; a successful probe closes it,
+a failed probe opens it again.
 
-## What TLC finds
+## What the protocol declares
 
-`protocol_stuck_counter.ex` seeds the classic flapping-breaker bug: the
-half-open success branch forgets `failures: 0`. TLC's counterexample: trip
-(failures 0 → 3), probe, recover — the breaker is `:closed` with
-`failures = 3`, violating `threshold_respected`. In production this breaker
-instantly re-trips on the first post-recovery error.
+- The reply (`:ok` / `:error` / `:tripped`) selects the next state, and
+  `where:` constraints on the failure counter decide which reply is valid
+  at each count.
+- A `failures` track (0..4) and the trip threshold as a constant
+  (`const :threshold, 3`), used by both the constraints and the invariant.
+- A state timeout (`state_timeout 30_000, goto: :half_open`) for the
+  cooldown.
+- Properties: the failure count never passes the threshold, there is no
+  probe without a trip, and the breaker eventually recovers from `open`.
 
-```
-mix accord.check Accord.Examples.CircuitBreaker.Protocol
-```
+## The seeded bug
 
-## What the monitor adds
+`protocol_stuck_counter.ex` forgets to reset `failures` to 0 when a
+half-open probe succeeds. Model checking finds it:
 
-- A client probing (`:attempt_reset`) while the breaker is closed →
-  `:invalid_message`, client blame.
-- A server replying `:error` at the threshold instead of `:tripped`
-  (`MislabelingServer`) → `:constraint_failed`, server blame, span on the
-  `where:` clause. Same contract rule, caught at the reply boundary.
+    mix accord.check Accord.Examples.CircuitBreaker.Protocol
 
-```
-mix run examples/circuit_breaker/demo.exs
-```
+The counterexample: trip (failures 0 → 3), probe, recover — the breaker is
+back in `closed` but with `failures = 3`, so the next single error trips
+it again.
+
+## What the demo shows
+
+    mix run examples/circuit_breaker/demo.exs
+
+- Normal operation: three failures trip the breaker, then it rejects.
+- A client sending a message the current state does not accept
+  (`invalid_message`, client blame).
+- A server replying `:error` on the failure that should trip, instead of
+  `:tripped` (`constraint_failed`, server blame).

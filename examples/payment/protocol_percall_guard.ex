@@ -2,12 +2,10 @@ defmodule Accord.Examples.Payment.ProtocolPercallGuard do
   @moduledoc """
   Seeded design bug: the capture guard checks per call, not cumulatively.
 
-  `amount <= tracks.authorized` allows each individual capture to fit
-  the authorization while their sum exceeds it. TLC's counterexample is
-  the classic partial-capture double-spend: authorize(4), capture(3),
-  capture(3) — captured = 6 > authorized = 4, `never_overcapture`
-  violated. The guard IS the model; a wrong guard is a wrong state
-  space, which is exactly what model checking is for.
+  `amount <= tracks.authorized` lets each capture fit the authorization
+  while their sum exceeds it. The counterexample: authorize(4),
+  capture(3), capture(3) — captured = 6 > authorized = 4, which violates
+  `never_overcapture`.
 
   Verified by `test/examples/payment_test.exs` against real TLC.
   """

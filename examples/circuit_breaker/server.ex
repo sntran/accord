@@ -73,11 +73,10 @@ end
 
 defmodule Accord.Examples.CircuitBreaker.MislabelingServer do
   @moduledoc """
-  A buggy breaker that replies `:error` at the threshold instead of
-  `:tripped` — the mislabeled reply violates the `:error` branch's
-  `where: failures < 2` constraint, and the monitor blames the server
-  (`:constraint_failed`). The same contract rule, caught at the reply
-  boundary instead of by the invariant.
+  A buggy breaker that replies `:error` on the failure that should trip,
+  instead of `:tripped`. That reply is only valid below the threshold, so
+  it breaks the `:error` branch's `where: failures < 2` constraint and the
+  monitor blames the server (`:constraint_failed`).
   """
   use GenServer
 

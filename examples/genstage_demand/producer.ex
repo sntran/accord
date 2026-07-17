@@ -46,10 +46,10 @@ end
 
 defmodule Accord.Examples.Demand.OverEagerProducer do
   @moduledoc """
-  A producer that ignores demand — it pushes whatever it has.
+  A producer that ignores demand and pushes whatever it has.
 
-  The monitor's event guard (`n <= tracks.demand`) turns the documented
-  GenStage rule into immediate server blame.
+  The monitor's event guard (`n <= tracks.demand`) rejects the
+  over-delivery with server blame.
   """
   use GenServer
 

@@ -1,38 +1,34 @@
 # GenStage demand contract
 
-The shortest example with the largest argument: the documented
-producer/consumer rule — "never emit more events than demanded" — as an
-enforceable, model-checkable contract. Before server-push events existed
-in accord, this contract was inexpressible.
+The GenStage producer/consumer demand rule as an enforceable contract:
 
-## What it exercises
+- `ask(n)` — the consumer asks for up to `n` events (increases demand)
+- the producer pushes `{:events, n}` — but must never send more than the
+  outstanding demand
 
-- `event {:events, n}` — the producer pushes through the monitor, and
-  the event guard `n <= tracks.demand` *is* the documented rule.
-- `bounded :demand, max: 6` (the max_demand cap) plus a global
-  invariant (`demand >= 0`).
-- A terminal push (`event :producer_done`) ending the subscription from
-  the server side.
+## What the protocol declares
 
-## What TLC finds
+- `{:events, n}` is a server-pushed event whose guard is `n <=
+  tracks.demand` — the demand rule.
+- A `demand` track (0..6), with `bounded :demand, max: 6` and a global
+  invariant that demand never goes negative.
+- A terminal push (`event :producer_done`) ends the subscription from the
+  producer side.
 
-`protocol_unbounded.ex` drops the guard: TLC interleaves asks and
-pushes and drives `demand` negative in three actions. The
-counterexample is the GenStage documentation rule, mechanically derived
-from its absence.
+## The seeded bug
 
-```
-mix accord.check Accord.Examples.Demand.Protocol
-```
+`protocol_unbounded.ex` drops the guard on the events push. Model checking
+finds it:
 
-## What the monitor adds
+    mix accord.check Accord.Examples.Demand.Protocol
 
-An over-eager producer pushing 3 events against demand of 1
-(`OverEagerProducer`) → `:guard_failed` with **server** blame — the
-event direction determines fault. Today this bug surfaces as a
-`Broadway`/`GenStage` consumer crash or silent buffer bloat; here it is
-attributed at the boundary.
+The counterexample, in three steps: the producer pushes more events than
+were asked for and drives `demand` negative.
 
-```
-mix run examples/genstage_demand/demo.exs
-```
+## What the demo shows
+
+    mix run examples/genstage_demand/demo.exs
+
+- The normal flow: ask for 3, the producer emits 2 (within demand).
+- A producer pushing 3 events against demand of 1 (`guard_failed`, server
+  blame — the event direction makes it the producer's fault).

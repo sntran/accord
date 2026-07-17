@@ -2,15 +2,13 @@ defmodule Accord.Examples.Payment.Protocol do
   @moduledoc """
   Card payment lifecycle: authorize, partial captures, void, refunds.
 
-  Recognizable to anyone who has integrated a payment service provider.
-  The guards carry the money rules — cumulative captures never exceed
+  The guards carry the money rules — captures accumulate and never exceed
   the authorization, refunds never exceed captures — and the global
-  invariants restate them so TLC checks every reachable interleaving of
-  partial captures and refunds.
+  invariants restate them so model checking verifies every reachable
+  interleaving of partial captures and refunds.
 
-  This example needs no extensions: it is the property-algebra showcase
-  that works end to end today. See `protocol_percall_guard.ex` for the
-  classic double-capture bug TLC catches.
+  See `protocol_percall_guard.ex` for a version with a seeded
+  double-capture bug that model checking catches.
   """
   use Accord.Protocol
 

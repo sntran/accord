@@ -1,21 +1,19 @@
 defmodule Accord.Examples.CircuitBreaker.Protocol do
   @moduledoc """
-  A circuit breaker with a trip threshold of 3 consecutive failures.
+  A circuit breaker that trips after 3 consecutive failures.
 
-  The protocol governs the breaker itself: `:closed` passes requests
-  through and counts failures, `:open` rejects them, `:half_open` probes
-  with a single request. The reply shape discloses which side of the
-  threshold the breaker is on — an honest contract obligation, and what
-  lets the monitor pick the right branch at runtime.
+  States: `:closed` passes requests through and counts failures, `:open`
+  rejects them, `:half_open` lets a single probe through. The reply
+  (`:ok` / `:error` / `:tripped`) tells the monitor which state the
+  breaker moved to.
 
-  The `where:` constraints and the local invariant state the same
-  threshold rule twice on purpose: the constraints are enforced per
-  reply (server blame when the breaker mislabels a failure), and the
-  invariant is the safety net TLC checks over every reachable state.
+  The `where:` constraints on the failure counter decide which reply is
+  valid at each count, and the local invariant restates the threshold
+  rule so model checking verifies it over every reachable state.
 
   Run `mix accord.check Accord.Examples.CircuitBreaker.Protocol` to
-  model-check it, and see `protocol_stuck_counter.ex` for the seeded
-  design bug TLC catches.
+  model-check it; `protocol_stuck_counter.ex` is a version with a seeded
+  bug that model checking catches.
   """
   use Accord.Protocol
 

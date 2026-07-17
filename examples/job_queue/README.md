@@ -1,60 +1,57 @@
-# Job queue with leases and fencing tokens
+# Job queue with leases and fence tokens
 
-The flagship: an SQS/Oban-shaped worker↔queue lease protocol —
-checkout, heartbeat, ack/nack, a visibility timeout that *arrives* as a
-server event, and Kleppmann's fencing-token critique made executable.
+A worker leases a job from the queue:
 
-## What it exercises
+- `checkout` — take a job; the queue replies `{:job, token}`
+- `heartbeat(token)` — keep the lease; must present the current token
+- `ack(token)` / `nack(token)` — finish or return the job
+- the queue can push `{:lease_expired, token}` when a lease times out
 
-- Reply refinement: the checkout branch's `where: token > tracks.fence`
-  is the fencing rule, enforced at runtime (server blame on a re-issued
-  token) and as a TLC action precondition.
-- A real server push: `event {:lease_expired, token}` flows through the
-  monitor, guarded (`token == tracks.holding`), validated, and forwarded
-  downstream. A mismatched expiry is a server violation.
-- `correspondence :checkout, [:ack, :nack, :lease_expired]` — every
-  lease settles, however it ends.
-- `ordered :ack, by: :token` (runtime-only — labeled in the spec),
-  paired local invariants (`lease_iff_working`), `forbidden`, and an
-  action property (fence monotonic).
+Each checkout returns a token strictly larger than any issued before (a
+fence token), so a worker holding an expired lease can be told apart from
+the one holding the current lease.
 
-Liveness is *not* asserted here on purpose: correspondence emits its
-counter bound as a TLA+ `CONSTRAINT`, and TLC checks liveness only over
-constrained states (a bounded, `⚠`-flagged verdict). The circuit_breaker
-example shows liveness where it is cleanly discharged by a `state_timeout`.
+## What the protocol declares
 
-## What TLC finds
+- The checkout reply is constrained by `where: token > tracks.fence`, so
+  the issued token always increases.
+- Tracks for the highest token issued so far (`fence`) and the token this
+  worker holds (`holding`).
+- The expiry is a server-pushed event, guarded so it only applies to the
+  token the worker currently holds.
+- Properties: the held token never exceeds the fence, a lease is held only
+  while working, and every checkout is settled — by ack, nack, or expiry.
 
-`protocol_leaky_lease.ex` seeds the expiry handler forgetting
-`holding: 0`. The counterexample takes **three actions**: checkout →
-`{:job, 1}`, the expiry event fires, and the worker is `:idle` with
-`holding = 1` — it still believes it owns a job the queue will hand to
-someone else. Double processing, found exhaustively before any code ran.
+Liveness is not asserted here: `correspondence` emits a state constraint
+that makes a liveness verdict only cover bounded runs (`mix accord.check`
+flags this with `⚠`). The circuit_breaker example shows liveness where a
+state timeout discharges it cleanly.
 
-```
-mix accord.check Accord.Examples.JobQueue.Protocol
-```
+## The seeded bug
 
-The cross-worker claim — no two workers hold the same lease — is
-checkable with `distinct :holding, empty: 0` at `sessions: 2`: see the
-DistributedQueue fixture (`test/support/protocols/distributed_queue.ex`),
-where TLC proves the fencing constraint makes leases unique, and hands
-both workers token 1 in two steps when the constraint is dropped. The
-mutual-exclusion variant lives in the DistributedLock fixture.
+`protocol_leaky_lease.ex` forgets to clear `holding` when a lease expires.
+Model checking finds it:
 
-## What the monitor adds
+    mix accord.check Accord.Examples.JobQueue.Protocol
 
-- Stale ack after an expiry → `:guard_failed`, client blame, span on the
-  guard — "who leaked the lease" answered mechanically.
-- A queue re-issuing fence token 1 (`StaleTokenServer`) →
-  `:constraint_failed`, server blame, the moment the stale lease is
-  handed out.
-- An expiry push for a token the worker no longer holds → server blame.
+The counterexample, in three steps: checkout `{:job, 1}`, the expiry
+fires, and the worker is back in `:idle` still believing it holds token 1
+— a job the queue will hand to someone else.
 
-```
-mix run examples/job_queue/demo.exs
-```
+## What the demo shows
 
-Or open [notebook.livemd](notebook.livemd) in Livebook for the interactive
-walkthrough — protocol, blame diagnostics, the TLC counterexample, and a
-trace-validation round trip.
+    mix run examples/job_queue/demo.exs
+
+- The normal flow: checkout, heartbeat, ack.
+- The queue pushing a lease-expired event.
+- A client acking after its lease expired (`invalid_message`, client
+  blame).
+- A queue reissuing token 1 instead of increasing it
+  (`constraint_failed`, server blame).
+
+The cross-worker rule — no two workers hold the same lease — is checked
+separately in `test/support/protocols/distributed_queue.ex`, where model
+checking proves it with `sessions: 2`.
+
+Or open [notebook.livemd](notebook.livemd) in Livebook for an interactive
+walkthrough.

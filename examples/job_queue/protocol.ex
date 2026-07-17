@@ -1,21 +1,20 @@
 defmodule Accord.Examples.JobQueue.Protocol do
   @moduledoc """
-  Worker ↔ queue lease protocol with fencing tokens.
+  Worker/queue lease protocol with fence tokens.
 
-  The queue issues a strictly increasing fence token with every lease
-  (Kleppmann's fencing-token critique of distributed locks, made
-  executable). The worker presents its token on heartbeat/ack/nack, and
-  the queue pushes `{:lease_expired, token}` through the monitor when a
-  visibility timeout fires — a server event, validated and forwarded
-  like any other message.
+  The queue issues a strictly increasing fence token with every lease, so
+  a worker holding an expired lease can be told apart from the one holding
+  the current lease. The worker presents its token on heartbeat/ack/nack,
+  and the queue pushes `{:lease_expired, token}` through the monitor when
+  a lease times out — a server event, validated and forwarded like any
+  other message.
 
-  The single-session contract here answers "is THIS worker's session
-  legal"; the cross-worker mutual-exclusion story is the
-  `Accord.Test.DistributedLock` fixture (`sessions: 2`, shared tracks,
-  `exclusive`).
+  This is a single-worker contract. The cross-worker rule — no two workers
+  hold the same lease — is checked separately in the
+  `Accord.Test.DistributedQueue` fixture with `sessions: 2`.
 
-  See `protocol_leaky_lease.ex` for the double-processing bug TLC finds
-  in three actions.
+  See `protocol_leaky_lease.ex` for a version with a seeded
+  double-processing bug that model checking catches in three steps.
   """
   use Accord.Protocol
 

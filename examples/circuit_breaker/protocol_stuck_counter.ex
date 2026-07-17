@@ -3,11 +3,10 @@ defmodule Accord.Examples.CircuitBreaker.ProtocolStuckCounter do
   Seeded design bug: recovery forgets to reset the failure counter.
 
   The `:half_open` success branch returns `tracks` unchanged instead of
-  `%{tracks | failures: 0}`. TLC finds the "flapping breaker" in a few
-  states: trip (failures 0 → 3), probe, recover — and the breaker is
-  `:closed` with `failures = 3`, violating `threshold_respected`. In
-  production this is the breaker that instantly re-trips on the first
-  post-recovery error.
+  `%{tracks | failures: 0}`. Model checking finds it in a few states: trip
+  (failures 0 → 3), probe, recover — the breaker is `:closed` with
+  `failures = 3`, which violates `threshold_respected`. In production this
+  breaker re-trips on the first error after it recovers.
 
   Verified by `test/examples/circuit_breaker_test.exs` against real TLC.
   """

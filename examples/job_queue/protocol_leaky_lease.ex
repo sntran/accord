@@ -2,15 +2,14 @@ defmodule Accord.Examples.JobQueue.ProtocolLeakyLease do
   @moduledoc """
   Seeded design bug: the expiry event forgets to release the lease.
 
-  The `{:lease_expired, _}` update returns `tracks` with `holding`
-  untouched. TLC's counterexample takes three actions: checkout →
-  `{:job, 1}` (fence = holding = 1), the expiry event fires — and the
-  worker is `:idle` with `holding = 1`, violating `lease_iff_working`.
+  The `{:lease_expired, _}` update leaves `holding` untouched. The
+  counterexample takes three steps: checkout → `{:job, 1}` (fence =
+  holding = 1), the expiry event fires — and the worker is `:idle` with
+  `holding = 1`, which violates `lease_iff_working`.
 
-  Production meaning: the lease expired, the queue will hand the job to
-  another worker, but this worker still believes it owns it — double
-  processing, the exact interleaving fencing tokens exist to prevent,
-  found exhaustively before any code ran.
+  The lease has expired and the queue will hand the job to another worker,
+  but this worker still believes it owns it — the same job gets processed
+  twice.
   """
   # tla: :off — deliberately broken; not part of the project's verified
   # surface. The TLC test compiles the spec from the IR directly and
