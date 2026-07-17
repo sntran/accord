@@ -61,7 +61,11 @@ defmodule Accord.MixProject do
       # channel protocol via a wrapping serializer. Phoenix (and phoenix_pubsub)
       # are only needed there, so they stay out of :prod.
       {:phoenix, "~> 1.7", only: [:dev, :test]},
-      {:phoenix_pubsub, "~> 2.1", only: [:dev, :test]}
+      {:phoenix_pubsub, "~> 2.1", only: [:dev, :test]},
+      # Slipstream is an independent Elixir Phoenix Channels *client*. Driving it
+      # against the instrumented endpoint checks the harness against a different
+      # client implementation than the example's raw WebSocket client.
+      {:slipstream, "~> 1.0", only: [:dev, :test]}
     ]
   end
 

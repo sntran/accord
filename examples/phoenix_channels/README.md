@@ -54,7 +54,18 @@ Against a **real running Phoenix endpoint**:
 | a stale `join_ref` (Phoenix drops it silently) | **client** blame — the silent drop made visible |
 | a server-initiated push mid-session | no violation |
 
-Two of these are the point:
+The first two rows use a raw WebSocket client sending sequences a real library
+refuses to — so a clean run is meaningful. A **third-party Elixir client**
+([Slipstream](https://hexdocs.pm/slipstream)), driven through the same endpoint,
+runs a normal session and two concurrent channels with **zero violations** —
+validating the monitor across an independent client implementation. This makes the
+instrumented endpoint a reusable **conformance harness for channel client
+libraries**: point any client at it and a `client`-blame violation is that client's
+protocol bug. (No bug was found in Slipstream — the honest expected result; the
+richer targets are the less-tested non-Elixir clients, which need their own
+toolchains to run. See `docs/case-study-phoenix-channels.md`.)
+
+Two of the caught cases are the point:
 
 - **The reply obligation.** Phoenix does not track "one reply per request" — a
   `handle_in` that replies twice, or replies to a `ref` no client sent, violates

@@ -3,7 +3,7 @@ defmodule Accord.Examples.PhoenixChannelsTest do
 
   @moduletag :capture_log
 
-  alias Accord.Examples.PhoenixChannels.{Channel, Endpoint, Tap, WsClient}
+  alias Accord.Examples.PhoenixChannels.{Channel, Endpoint, SlipstreamClient, Tap, WsClient}
   alias Accord.Test.TLACheck
 
   setup_all do
@@ -96,6 +96,43 @@ defmodule Accord.Examples.PhoenixChannelsTest do
 
       assert Tap.violations() == []
       WsClient.close(sock)
+    end
+  end
+
+  describe "conformance of an independent client library (Slipstream)" do
+    # Slipstream is a third-party Elixir channels client, unrelated to the raw
+    # WsClient the other tests use. A clean run means the monitor is faithful
+    # across implementations — and confirms Slipstream conforms to the protocol.
+    setup %{port: port} do
+      uri = "ws://127.0.0.1:#{port}/socket/websocket?vsn=2.0.0"
+      {:ok, pid} = SlipstreamClient.start_link(parent: self(), uri: uri)
+      assert_receive {:slipstream, :connected}, 3000
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      %{client: pid}
+    end
+
+    test "a normal session raises no violations", %{client: pid} do
+      SlipstreamClient.join_topic(pid, "room:lobby")
+      assert_receive {:slipstream, {:joined, "room:lobby"}}, 3000
+      SlipstreamClient.push_event(pid, "room:lobby", "ping")
+      assert_receive {:slipstream, {:reply, _ref, {:ok, _}}}, 3000
+      SlipstreamClient.leave_topic(pid, "room:lobby")
+      assert_receive {:slipstream, {:left, "room:lobby"}}, 3000
+
+      assert Tap.violations() == []
+    end
+
+    test "two concurrent channels raise no violations", %{client: pid} do
+      SlipstreamClient.join_topic(pid, "room:a")
+      assert_receive {:slipstream, {:joined, "room:a"}}, 3000
+      SlipstreamClient.join_topic(pid, "room:b")
+      assert_receive {:slipstream, {:joined, "room:b"}}, 3000
+      SlipstreamClient.push_event(pid, "room:a", "ping")
+      assert_receive {:slipstream, {:reply, _, {:ok, _}}}, 3000
+      SlipstreamClient.push_event(pid, "room:b", "ping")
+      assert_receive {:slipstream, {:reply, _, {:ok, _}}}, 3000
+
+      assert Tap.violations() == []
     end
   end
 

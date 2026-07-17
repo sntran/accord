@@ -90,6 +90,42 @@ largely redundant. Phoenix Channels is the complement:
   silently. A monitor derived from the protocol contract is the thing that checks
   them.
 
+## Cross-implementation testing: the harness as a client conformance suite
+
+The channel protocol has essentially **one server** (Phoenix), so there is no rival
+server to differentially test — the HTTP/2 "point it at Bandit" move has no target
+here. But it has **many independent clients** (phoenix.js, and in other languages
+Swift/Kotlin/Rust/Dart/Python, plus the Elixir clients Slipstream and
+PhoenixClient), and those reimplement the tricky parts — reply correlation, the
+rejoin-after-error flow, join_ref discipline — with far less testing than Phoenix's
+server. The instrumented endpoint is exactly a **conformance harness for a client
+library**: point a client at it, and any `client`-blame violation is that client's
+protocol bug.
+
+The example demonstrates both halves against a real, third-party client:
+
+- **The harness has teeth.** The raw-`WsClient` tests send sequences a real library
+  refuses to — a push before join, a stale join_ref — and the monitor flags them as
+  client blame. So a clean run is meaningful, not vacuous.
+- **A conformant client passes clean.** [Slipstream](https://hexdocs.pm/slipstream)
+  (an independent Elixir client, unrelated to the raw one) runs a normal session
+  and two concurrent channels through the instrumented endpoint with **zero
+  violations** — validating the monitor across a different implementation, and
+  confirming Slipstream conforms. (Slipstream is conformant by construction in
+  places: its `push/4` checks `joined?` and returns `{:error, :not_joined}` rather
+  than sending a premature push.)
+
+**No bug was found in Slipstream, and that is the honest expected result** — it is
+mature and well-tested. The value here is the reusable harness and the
+cross-implementation validation, not a headline finding. The richer hunting ground
+is the less-maintained non-Elixir clients (a Swift/Kotlin/Rust client that mishandles
+the rejoin-after-error join_ref update is exactly the bug class this catches) — but
+each needs its own toolchain to drive, so they are targets this environment can
+describe but not run. What the monitor can catch is limited to **wire** violations
+(push before join, stale join_ref, sending after leave); a client's purely internal
+bug — misrouting a correctly-delivered reply to the wrong pending request — happens
+inside the client and never appears on the wire.
+
 ## Honest scope
 
 - **Topic keying.** A channel's push replies are encoded in the channel process
