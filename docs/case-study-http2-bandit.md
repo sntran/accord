@@ -450,3 +450,66 @@ reporting. In every case accord's contribution is the same: not an automatic
 finder, but the discipline of writing the exact contract — the legal-frame-per-
 state table for transitions, the error-per-rejection column for frame values —
 which is what makes each divergence legible on a read.
+
+---
+
+# Round 4: h2spec as an independent oracle
+
+The earlier rounds found divergences by hand — writing accord's per-state frame
+table and reading Bandit against it. That is a forcing function, but it is only as
+broad as the specs I wrote. To check the findings against something authoritative
+and to look for what I *didn't* spec, I ran **h2spec** (summerwind/h2spec 2.6.0),
+the standard HTTP/2 conformance tester, against Bandit 1.12.0 over cleartext h2c.
+
+Result: **146 tests, 132 passed, 2 skipped, 12 failed.** The 12 failures:
+
+| h2spec case | What it sends | Relation |
+|-------------|---------------|----------|
+| 5.1.1/2 | stream id numerically smaller than previous | **confirms Round-1 §5.1.1** |
+| 8.1/1 | a second HEADERS without END_STREAM | **confirms Round-3 §8.1** |
+| 5.1/5 | half-closed(remote): a DATA frame | same class (frame on a done stream) |
+| 5.1/6 | half-closed(remote): a HEADERS frame | same class |
+| 5.1/8 | closed: DATA after RST_STREAM | same class |
+| 5.1/9 | closed: HEADERS after RST_STREAM | same class |
+| 5.1/11 | closed: a DATA frame | same class |
+| 5.1/12 | closed: a HEADERS frame | same class |
+| 6.1/2 | DATA on a stream not open/half-closed(local) | same class |
+| 3.5/2 | invalid connection preface | unrelated |
+| 5.3.1/1 | HEADERS that depends on itself | unrelated (priority) |
+| 5.3.1/2 | PRIORITY that depends on itself | unrelated (priority) |
+
+Two things stand out. First, h2spec **independently confirms both findings that
+accord's discipline surfaced** — the §5.1.1 lower id and the §8.1 unterminated
+trailers — using its own frames, its own oracle. Second, those two are not
+isolated: seven more failures (5.1/5,6,8,9,11,12 and 6.1/2) are the **same class**
+— Bandit accepts DATA or HEADERS frames on streams that are closed or
+half-closed(remote) instead of answering with STREAM_CLOSED / PROTOCOL_ERROR. The
+two divergences accord found by hand are the visible tip of a **systematic
+under-enforcement of the stream state machine**. This is the "find something I
+didn't plant" result: I had specced only two of these states' obligations; h2spec
+showed the pattern spans the whole terminal-state region.
+
+The honest division of labor: **h2spec is far better at breadth.** It is a mature,
+dedicated tool with hundreds of hand-tuned adversarial cases; a few hand-written
+accord specs will never match its coverage. accord's value is orthogonal — a
+single, precise, *checkable* contract that a runtime monitor enforces with
+**blame** (which party is at fault) and that TLC proves internally sound. h2spec
+tells you *that* Bandit fails case 5.1/5; accord's `:reset_expected` mechanism
+says *why* in the protocol's own terms (the server owed a reset and sent a
+response instead) and generalizes to the whole cluster by routing every
+terminal-state peer frame to that obligation. The two are complementary: h2spec
+for breadth and as an external oracle, accord for a precise executable spec that
+doubles as a live monitor.
+
+**On running h2spec *through* the tap proxy.** The proxy relays h2spec's traffic
+transparently — Bandit fails the same 12 cases whether h2spec talks to it directly
+or through the proxy — and in targeted single-connection runs the tap independently
+flags the §8.1 and §5.1.1 cases as server blame (Rounds 3 and the §5.1.1 live
+test). Reconstructing *every* one of h2spec's 146 short adversarial connections
+through the passive per-connection tap, though, is more than the single-connection
+demo proxy does: it needs per-connection monitor lifecycles and careful handling of
+the frame/response interleaving h2spec relies on. That is a real limit of the
+passive-tap approach as built here, and an honest boundary on "accord watched the
+whole conformance suite live" — the confirmations above are from h2spec-direct plus
+accord's own targeted live catches, not from a single accord pass over the full
+h2spec run.
