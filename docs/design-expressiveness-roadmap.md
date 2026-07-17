@@ -24,7 +24,7 @@ monitor** — not just the model — apply to a frame protocol, because both
 directions are now first-class one-way messages the monitor can validate and
 attribute.
 
-## 2. Symbolic / large domains
+## 2. Symbolic / large domains — Tier A DONE
 
 **Wall (two forms).** The HTTP/2 stream-ID rule (a new ID must exceed the
 highest seen) **spuriously deadlocks** at `sessions: 2` with domain `0..3`: one
@@ -43,15 +43,17 @@ These are two different needs:
 
 **Design — two tiers, cheapest first.**
 
-*Tier A: abstraction patterns (small, no new backend).* Add a track modifier for
-quantities whose properties are relational, e.g. `track :last_id,
-:non_neg_integer, abstract: :monotonic`. The emitter models it as a counter
-bounded only by a `StateConstraint` for exploration (bounded checking), and
-suppresses the deadlock that comes from *exhausting* the abstract domain — a
-stream that cannot advance because the abstract counter is at its exploration
-bound is a modeling boundary, not a real stuck state, so it stutters rather than
-deadlocks. This directly fixes the stream-ID spurious deadlock and covers
-monotonic/distinct/bounded properties. It does *not* model 2³¹ overflow.
+*Tier A: abstraction patterns (small, no new backend) — SHIPPED.* A track
+modifier for quantities whose properties are relational: `track :last_id,
+:non_neg_integer, abstract: :monotonic, domain: 0..3`. The emitter extends the
+declared domain by one head-room value and adds a `StateConstraint` conjunct
+(`last_id =< 3`) that stops exploration at the declared bound instead of at
+domain exhaustion — so a session that cannot advance because it has hit the
+exploration bound stutters (bounded-checking boundary) rather than registering a
+false deadlock. This directly fixes the stream-ID spurious deadlock and covers
+monotonic/distinct/bounded properties (`test/support/protocols/monotonic_id.ex`
+proves a `distinct` id across two sessions with deadlock checking on). It does
+*not* model 2³¹ overflow — that is Tier B.
 
 *Tier B: an Apalache backend (large, deferred).* Apalache checks TLA+
 symbolically via SMT, so a 32-bit window with real arithmetic is in reach. It
@@ -62,65 +64,58 @@ types symbolic to hold the door open. Recommendation: build Tier A first — it
 retires the common case at low risk — and reserve Apalache for protocols whose
 correctness genuinely turns on large-value arithmetic.
 
-## 3. Protocol composition / layered state
+## 3. Protocol composition / layered state — largely expressible today
 
-**Wall.** The HTTP/2 state machine is split across two modules: the per-stream
-FSM (`stream.ex`) and the connection-level rules (`connection.ex`,
+**Wall (as first stated).** The HTTP/2 state machine is split across two modules:
+the per-stream FSM (`stream.ex`) and the connection-level rules (`connection.ex`,
 `stream_collection.ex`) — stream-ID monotonicity, max-concurrent-streams,
-connection GOAWAY. A single accord protocol cannot hold both, so the case study
-needed two separate specs, and the connection-level rules that gate the stream
-FSM (no new stream after GOAWAY; the shared flow-control window) could not be
-expressed together with it.
+connection GOAWAY. The concern was that a single accord protocol could not hold
+both, so the connection-level rules that gate the stream FSM (no new stream after
+GOAWAY; the shared window) could not be expressed together with it.
 
-`sessions: N` + `shared:` tracks is a *partial* composition: N sessions of **one**
-protocol sharing scalar state. What is missing is a **second protocol level**
-with its own state machine that constrains the sessions.
+**Finding.** After features 1 and 2 landed, the composition the case study needs
+is already expressible — no dedicated two-level construct required. The three
+existing primitives compose:
 
-**Design.** A connection-level protocol that owns connection state and rules, with
-the stream protocol running as sessions inside it:
+- **`shared:` tracks** carry connection-level state (a `conn_state`, a
+  `last_stream_id`) that every session reads.
+- **A state-changing `cast`** (feature 1) is the connection event that flips that
+  shared state — `cast :goaway` sets `conn_state: :going_away` from any state.
+- **`abstract: :monotonic`** (feature 2) keeps the shared stream-ID counter finite
+  under the monotonic open-guard.
+- Per-session **guards read the shared track**, so the stream-open branch is gated
+  on `conn_state == :active`.
 
-```elixir
-defmodule Http2.Connection do
-  use Accord.Protocol
+`test/support/protocols/conn_gate.ex` is the whole HTTP/2 connection/stream gate
+in one protocol: `ConnGate` proves (TLC, `sessions: 2`) that no stream opens once
+GOAWAY has been cast; `ConnGateUnguarded` drops the `conn_state == :active` guard
+and TLC finds the stream that opens after GOAWAY. The "connection FSM" is modeled
+as shared state flipped by a cast rather than a second nested state machine — for
+the gating rules that matter (admit/reject a stream against connection state),
+that is sufficient and checked for real.
 
-  # Connection-level state machine and shared state.
-  initial :active
-  track :last_stream_id, :non_neg_integer, default: 0, domain: 0..3
+One emitter bug blocked this until fixed: a boolean track assigned from a
+comparison (`open_seen_goaway' = conn_state = "going_away"`) tripped a TLA
+precedence conflict. `BuildActions.parenthesize_value/1` now wraps update values
+whose top level is a comparison; see the feature-3 commit.
 
-  state :active do
-    on :goaway, reply: :ok, goto: :going_away
-  end
-
-  state :going_away, terminal: true
-
-  # The stream protocol runs as sessions within this connection.
-  sessions_of Http2.Stream do
-    # A new stream may open only while :active, with a fresh id.
-    guard_open fn conn, stream_id -> conn.state == :active and stream_id > conn.last_stream_id end
-    on_open fn conn, stream_id -> %{conn | last_stream_id: stream_id} end
-  end
-end
-```
-
-The connection protocol's state (`going_away`) and shared tracks
-(`last_stream_id`) gate the stream sessions; the stream sessions read connection
-state in their guards. In TLA this is a product: connection variables plus
-per-session stream variables, with stream actions carrying the connection
-preconditions. At runtime it is a supervising monitor that owns the connection
-state and admits/rejects stream messages against it.
-
-This is the largest of the three — it introduces genuine two-level state and a
-composed TLA product — and it is what would let a real layered protocol
-(HTTP/2, but also multiplexed session protocols generally) be one checkable
-model rather than several. Recommend it after Tier-A domains, since layered
-state and shared counters interact (the connection's `last_stream_id` is exactly
-the abstract-monotonic case above).
+**Remaining gap (ergonomic, not expressive).** What is *not* here is a genuinely
+separate connection protocol module with its own multi-state FSM that a stream
+protocol is declared inside. Today the connection is one shared track flipped by a
+cast; a two-state (or N-state) connection lifecycle with its own transitions,
+distinct from the session FSM, would need a real nesting construct
+(`sessions_of`). That buys ergonomics and a cleaner blame story (connection vs
+stream), not new checking power for the GOAWAY-gating class — that class is
+covered now. Defer the construct until an example needs a connection FSM richer
+than a single flag.
 
 ## Order
 
 1. **Done:** one-way messages (`cast` with state change).
-2. **Next, cheap:** Tier-A abstract/monotonic domains — retires the stream-ID
+2. **Done:** Tier-A abstract/monotonic domains — retires the stream-ID
    spurious-deadlock class and most relational properties.
-3. **Then:** protocol composition — the connection/stream two-level model.
+3. **Done for the gating class:** protocol composition via `shared:` + `cast` +
+   `abstract` (`conn_gate.ex`). A dedicated `sessions_of` nesting construct is
+   deferred until an example needs a multi-state connection lifecycle.
 4. **Deferred:** Apalache — only for correctness that turns on large-value
    arithmetic (flow-control overflow).
