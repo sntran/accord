@@ -18,13 +18,15 @@ state, `exclusive` mutual exclusion — see the `DistributedLock` fixture at
 the holder guard is dropped.
 
 The four above are pedagogical. For a real, high-profile protocol, see
-[http2](http2/): four specs from Bandit's HTTP/2 implementation (the stream
-state machine, stream-id monotonicity, send-window flow control, and GOAWAY
-gating), each with a seeded bug matching a runtime-confirmed divergence in
-Bandit 1.12.0. It exercises the wire-protocol features (`cast`/`event` one-way
-frames, `abstract: :monotonic` ids, `shared:` connection state) and ships
-reference probes that reproduce the bugs against a running Bandit. The full
-analysis is [`docs/case-study-http2-bandit.md`](../docs/case-study-http2-bandit.md).
+[http2](http2/): four **conformant** specs from Bandit's HTTP/2 implementation
+(the stream state machine, stream-id monotonicity, send-window flow control, and
+GOAWAY gating), model-checked by TLC — plus a live tap proxy that places the
+stream monitor between a real client and a running Bandit and catches an actual
+RFC 9113 §8.1 divergence in real time (Bandit accepts a trailing HEADERS frame
+without END_STREAM). It exercises the wire-protocol features (`cast`/`event`
+one-way frames, `abstract: :monotonic` ids, `shared:` connection state); Bandit
+is a dev/test dependency. The full analysis is
+[`docs/case-study-http2-bandit.md`](../docs/case-study-http2-bandit.md).
 
 Run any demo:
 
