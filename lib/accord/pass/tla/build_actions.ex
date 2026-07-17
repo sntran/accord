@@ -81,14 +81,12 @@ defmodule Accord.Pass.TLA.BuildActions do
     tag = message_tag(transition.message_pattern)
     source = Atom.to_string(state_name)
 
-    # An event, or a cast that changes state (declares goto/guard/update),
-    # is a one-way message with a state transition, guard, and update — the
-    # same shape in TLA regardless of direction (the client/server
-    # distinction is a runtime-blame concept). A plain cast falls through to
-    # the branch builder, which emits it as a stuttering no-op.
-    if transition.kind == :event or (transition.kind == :cast and transition.to != nil) do
-      [
-        build_event_action(
+    # A branching cast routes conditionally: one action per branch, with the
+    # branch's `where:` added as a precondition and the branch's target as the
+    # next state.
+    cond do
+      transition.kind == :cast and transition.branches != [] ->
+        build_cast_branch_actions(
           ir,
           state_name,
           transition,
@@ -99,19 +97,39 @@ defmodule Accord.Pass.TLA.BuildActions do
           all_var_names,
           track_names
         )
-      ]
-    else
-      build_branch_actions(
-        ir,
-        state_name,
-        transition,
-        tag,
-        source,
-        state_space,
-        config,
-        all_var_names,
-        track_names
-      )
+
+      # An event, or a cast that changes state (declares goto/guard/update), is a
+      # one-way message with a state transition, guard, and update — the same
+      # shape in TLA regardless of direction (the client/server distinction is a
+      # runtime-blame concept). A plain cast falls through to the branch builder,
+      # which emits it as a stuttering no-op.
+      transition.kind == :event or (transition.kind == :cast and transition.to != nil) ->
+        [
+          build_event_action(
+            ir,
+            state_name,
+            transition,
+            tag,
+            source,
+            state_space,
+            config,
+            all_var_names,
+            track_names
+          )
+        ]
+
+      true ->
+        build_branch_actions(
+          ir,
+          state_name,
+          transition,
+          tag,
+          source,
+          state_space,
+          config,
+          all_var_names,
+          track_names
+        )
     end
   end
 
@@ -451,6 +469,138 @@ defmodule Accord.Pass.TLA.BuildActions do
          comment:
            "#{if transition.kind == :cast, do: "client cast", else: "server event"} #{tag} from #{source} to #{target}"
        }}
+    end
+  end
+
+  # A branching cast: one action per branch. Each shares the message
+  # existentials, guard, and update, and adds its own `where:` as a precondition
+  # and its own target. Mirrors build_event_action per branch.
+  defp build_cast_branch_actions(
+         ir,
+         state_name,
+         transition,
+         tag,
+         source,
+         state_space,
+         config,
+         all_var_names,
+         track_names
+       ) do
+    sessions = state_space.sessions
+    {msg_existentials, param_bindings} = build_existentials(transition, config)
+    existential_vars = session_existentials(sessions) ++ msg_existentials
+
+    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
+    update_bindings = build_event_update_bindings(transition, msg_existentials)
+
+    track_primed_result =
+      build_track_primed(
+        ir,
+        transition,
+        nil,
+        Map.merge(param_bindings, update_bindings),
+        track_names,
+        sessions
+      )
+
+    target_counts =
+      transition.branches
+      |> Enum.map(&resolve_next_state(&1.next_state, state_name))
+      |> Enum.frequencies()
+
+    {actions, _seen} =
+      Enum.map_reduce(transition.branches, %{}, fn branch, seen ->
+        target_state = resolve_next_state(branch.next_state, state_name)
+        target = Atom.to_string(target_state)
+        idx = Map.get(seen, target_state, 0)
+        seen = Map.put(seen, target_state, idx + 1)
+        suffix = if Map.fetch!(target_counts, target_state) > 1, do: idx, else: nil
+
+        where_result =
+          compile_cast_where(ir, transition, branch, param_bindings, track_names, sessions)
+
+        errors =
+          [guard_result, where_result, track_primed_result]
+          |> Enum.flat_map(fn
+            {:error, reports} -> reports
+            {:ok, _} -> []
+          end)
+
+        action =
+          if errors != [] do
+            {:error, errors}
+          else
+            {:ok, guard_precondition} = guard_result
+            {:ok, where_precondition} = where_result
+            {:ok, track_primed} = track_primed_result
+
+            correspondence_primed = build_correspondence_primed(tag, source, target, state_space)
+
+            all_primed =
+              %{"state" => Sessions.assign(sessions, "state", ~s("#{target}"))}
+              |> Map.merge(track_primed)
+              |> Map.merge(correspondence_primed)
+
+            unchanged =
+              all_var_names
+              |> MapSet.difference(MapSet.new(Map.keys(all_primed)))
+              |> MapSet.to_list()
+              |> Enum.sort()
+
+            {:ok,
+             %Action{
+               name: "Cast" <> build_action_name(tag, source, target, suffix),
+               source_state: source,
+               target_state: target,
+               message_tag: tag,
+               preconditions:
+                 [~s(#{Sessions.read(sessions, "state")} = "#{source}")] ++
+                   guard_precondition ++ where_precondition,
+               existential_vars: existential_vars,
+               primed: all_primed,
+               unchanged: unchanged,
+               comment: "client cast #{tag} from #{source} to #{target}"
+             }}
+          end
+
+        {action, seen}
+      end)
+
+    actions
+  end
+
+  # Compile a cast branch's `where:` (a `fn message, tracks` predicate) into a TLA
+  # precondition, like a guard.
+  defp compile_cast_where(
+         _ir,
+         _transition,
+         %{constraint: nil},
+         _bindings,
+         _track_names,
+         _sessions
+       ),
+       do: {:ok, []}
+
+  defp compile_cast_where(
+         ir,
+         transition,
+         %{constraint: %{ast: ast}} = branch,
+         bindings,
+         track_names,
+         sessions
+       ) do
+    span = branch.span || transition.span
+
+    case Expr.compile(ast, bindings,
+           ir: ir,
+           code: "E041",
+           context: "branch",
+           track_names: track_names,
+           span: span,
+           render_field: Sessions.render_field(sessions)
+         ) do
+      {:ok, tla} -> {:ok, [tla]}
+      {:error, reports} -> {:error, reports}
     end
   end
 

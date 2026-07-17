@@ -26,6 +26,7 @@ protocol_macros = [
   guard: 1,
   update: 1,
   timeout: 1,
+  branch: 1,
   branch: 2,
   # Accord.Protocol.Property (inside `property ... do` blocks)
   invariant: 1,

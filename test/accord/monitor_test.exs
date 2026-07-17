@@ -159,6 +159,13 @@ defmodule Accord.MonitorTest do
       end
 
       cast :done, goto: :closed
+
+      # A branching cast: routes on a where: predicate over (message, tracks).
+      cast {:bump, n :: pos_integer()} do
+        branch goto: :active, where: fn {:bump, n}, tracks -> n > tracks.count end
+        branch goto: :closed, where: fn {:bump, n}, tracks -> n <= tracks.count end
+        update fn {:bump, n}, tracks -> %{tracks | count: n} end
+      end
     end
 
     state :closed, terminal: true
@@ -196,6 +203,21 @@ defmodule Accord.MonitorTest do
       assert [violation] = ViolationCollector.drain()
       assert violation.kind == :invalid_message
       assert violation.blame == :client
+    end
+
+    test "a branching cast routes on its where: predicate", %{monitor: monitor} do
+      Monitor.cast(monitor, :open)
+      # count is 0; n=5 > 0 takes the first branch (stay :active), update count=5.
+      Monitor.cast(monitor, {:bump, 5})
+      {state, data} = :sys.get_state(monitor)
+      assert state == :active
+      assert data.tracks.count == 5
+
+      # n=2 <= 5 takes the second branch (goto :closed).
+      Monitor.cast(monitor, {:bump, 2})
+      {state, _data} = :sys.get_state(monitor)
+      assert state == :closed
+      assert ViolationCollector.drain() == []
     end
 
     test "a cast whose guard fails is client blame", %{monitor: monitor} do

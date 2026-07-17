@@ -117,6 +117,50 @@ defmodule Accord.Protocol.Block do
   end
 
   @doc false
+  # No-reply branch for `cast`/`event` blocks: conditional routing on a `where:`
+  # predicate over `(message, tracks)`, with no reply to match. First branch whose
+  # `where:` holds is taken; `reply_type: :term` is an unused placeholder (the cast
+  # branch path selects by constraint only, never by reply type).
+  defmacro branch(opts) when is_list(opts) do
+    next_state = Keyword.fetch!(opts, :goto)
+
+    where_fn =
+      case Keyword.get(opts, :where) do
+        nil -> nil
+        func -> Const.substitute(func, __CALLER__.module, __CALLER__.file, __CALLER__.line)
+      end
+
+    escaped_where = if where_fn, do: Macro.escape(where_fn)
+    line = __CALLER__.line
+    next_state_pattern = inspect(next_state)
+
+    quote do
+      constraint =
+        if unquote(where_fn) do
+          %{fun: unquote(where_fn), ast: unquote(escaped_where)}
+        end
+
+      branches = Module.get_attribute(__MODULE__, :accord_on_branches)
+
+      Module.put_attribute(
+        __MODULE__,
+        :accord_on_branches,
+        [
+          %Branch{
+            reply_type: :term,
+            next_state: unquote(next_state),
+            constraint: constraint,
+            span: Pentiment.Span.search(line: unquote(line), pattern: "branch"),
+            next_state_span:
+              Pentiment.Span.search(line: unquote(line), pattern: unquote(next_state_pattern))
+          }
+          | branches
+        ]
+      )
+    end
+  end
+
+  @doc false
   defmacro branch(reply_spec, opts) do
     next_state = Keyword.fetch!(opts, :goto)
 

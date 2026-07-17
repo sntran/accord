@@ -406,9 +406,11 @@ defmodule Accord.Monitor do
 
       true ->
         case TransitionTable.lookup(table, state, message) do
-          {:ok, %{kind: :cast, to: to} = transition} when to != nil ->
-            # A state-changing cast: run the full pipeline (types, guard,
-            # update, properties) and forward upstream, blaming the client.
+          {:ok, %{kind: :cast, to: to, branches: branches} = transition}
+          when to != nil or branches != [] ->
+            # A state-changing cast (single target, or conditional branches): run
+            # the full pipeline (types, guard, branch selection, update,
+            # properties) and forward upstream, blaming the client.
             process_cast_transition(transition, message, state, data)
 
           {:ok, transition} when transition.kind == :cast ->
@@ -518,7 +520,14 @@ defmodule Accord.Monitor do
       :ok ->
         case evaluate_guard(transition.guard, message, data.tracks) do
           :ok ->
-            apply_cast_transition(transition, message, state, data)
+            case resolve_cast_next_state(transition, message, state, data.tracks) do
+              {:ok, next_state} ->
+                apply_cast_transition(transition, message, next_state, state, data)
+
+              {:error, :guard_failed} ->
+                violation = Violation.guard_failed(state, message, :client)
+                handle_cast_violation(violation, state, data)
+            end
 
           {:error, :guard_failed} ->
             violation = Violation.guard_failed(state, message, :client)
@@ -530,8 +539,26 @@ defmodule Accord.Monitor do
     end
   end
 
-  defp apply_cast_transition(transition, message, state, data) do
-    next_state = if transition.to == :__same__, do: state, else: transition.to
+  # A plain cast has a single target; a branching cast picks the first branch
+  # whose `where:` predicate holds for the message. No branch matching is a
+  # guard failure (client blame) — the message fit no declared case.
+  defp resolve_cast_next_state(%{branches: []} = transition, _message, state, _tracks) do
+    {:ok, if(transition.to == :__same__, do: state, else: transition.to)}
+  end
+
+  defp resolve_cast_next_state(%{branches: branches}, message, _state, tracks) do
+    case Enum.find(branches, &cast_branch_matches?(&1, message, tracks)) do
+      nil -> {:error, :guard_failed}
+      branch -> {:ok, branch.next_state}
+    end
+  end
+
+  defp cast_branch_matches?(%{constraint: nil}, _message, _tracks), do: true
+
+  defp cast_branch_matches?(%{constraint: %{fun: fun}}, message, tracks),
+    do: fun.(message, tracks) == true
+
+  defp apply_cast_transition(transition, message, next_state, state, data) do
     old_tracks = data.tracks
     new_tracks = apply_event_update(transition.update, message, old_tracks)
 

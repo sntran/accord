@@ -31,6 +31,13 @@ defmodule Accord.TLA.CheckTest do
       assert_passes(Accord.Test.EnumeratedMode.Protocol, tmp_dir: tmp_dir)
     end
 
+    test "a cast with where:-guarded branches model-checks (one action per branch)",
+         %{tmp_dir: tmp_dir} do
+      # Each branch becomes a TLA+ action guarded by its where: predicate; TLC
+      # explores both the accepted and rejected routes.
+      assert_passes(Accord.Test.BranchingCast.Protocol, tmp_dir: tmp_dir)
+    end
+
     # abstract: :monotonic, connection/stream composition, and send-window flow
     # control are exercised end-to-end by the HTTP/2 example
     # (test/examples/http2_test.exs); the emitter-level unit tests live in

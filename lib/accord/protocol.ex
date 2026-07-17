@@ -671,8 +671,9 @@ defmodule Accord.Protocol do
       goto_state = Module.get_attribute(__MODULE__, :accord_on_goto)
       guard_pair = Module.get_attribute(__MODULE__, :accord_on_guard)
       update_pair = Module.get_attribute(__MODULE__, :accord_on_update)
+      explicit_branches = Module.get_attribute(__MODULE__, :accord_on_branches) |> Enum.reverse()
 
-      Accord.Protocol.__validate_event_block__(
+      Accord.Protocol.__validate_cast_block__(
         __MODULE__,
         unquote(caller_file),
         unquote(caller_line)
@@ -680,8 +681,11 @@ defmodule Accord.Protocol do
 
       in_anystate = Module.get_attribute(__MODULE__, :accord_in_anystate, false)
 
-      to =
-        Accord.Protocol.__cast_target__(
+      # Branches (conditional routing) take precedence; each carries its own
+      # target. A plain cast keeps its single `to`.
+      {to, branches} =
+        Accord.Protocol.__cast_branches__(
+          explicit_branches,
           goto_state,
           guard_pair,
           update_pair,
@@ -696,7 +700,7 @@ defmodule Accord.Protocol do
         message_arg_names: unquote(escaped_arg_names),
         message_arg_spans: unquote(escaped_arg_spans),
         kind: :cast,
-        branches: [],
+        branches: branches,
         to: to,
         guard: guard_pair,
         update: update_pair,
@@ -796,6 +800,40 @@ defmodule Accord.Protocol do
 
       true ->
         nil
+    end
+  end
+
+  @doc false
+  # Resolve a cast's target(s). With explicit `branch(...)` clauses the cast
+  # routes conditionally (`to: nil`, targets on each branch); otherwise it keeps a
+  # single `to`. Anystate casts may not branch, since branches carry gotos.
+  def __cast_branches__(
+        explicit_branches,
+        goto_state,
+        guard_pair,
+        update_pair,
+        in_anystate,
+        file,
+        line
+      ) do
+    cond do
+      explicit_branches != [] and in_anystate ->
+        raise CompileError,
+          description: "anystate casts cannot branch (branches specify goto:)",
+          file: file,
+          line: line
+
+      explicit_branches != [] and goto_state != nil ->
+        raise CompileError,
+          description: "a cast cannot combine branch(...) with a top-level goto",
+          file: file,
+          line: line
+
+      explicit_branches != [] ->
+        {nil, explicit_branches}
+
+      true ->
+        {__cast_target__(goto_state, guard_pair, update_pair, in_anystate, file, line), []}
     end
   end
 
@@ -976,6 +1014,29 @@ defmodule Accord.Protocol do
       Module.get_attribute(module, :accord_on_timeout) != nil ->
         raise CompileError,
           description: "events are one-way pushes and do not support timeout",
+          file: file,
+          line: line
+
+      true ->
+        :ok
+    end
+  end
+
+  @doc false
+  # A cast has no reply and does not time out, but — unlike an event — it may
+  # branch: a one-way client message can route to different states on a `where:`
+  # predicate (e.g. a stream id above vs. at-or-below the high-water mark).
+  def __validate_cast_block__(module, file, line) do
+    cond do
+      Module.get_attribute(module, :accord_on_reply_type) != nil ->
+        raise CompileError,
+          description: "casts cannot declare replies",
+          file: file,
+          line: line
+
+      Module.get_attribute(module, :accord_on_timeout) != nil ->
+        raise CompileError,
+          description: "casts are one-way messages and do not support timeout",
           file: file,
           line: line
 
