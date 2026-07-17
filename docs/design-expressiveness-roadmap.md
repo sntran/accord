@@ -119,3 +119,47 @@ than a single flag.
    deferred until an example needs a multi-state connection lifecycle.
 4. **Deferred:** Apalache — only for correctness that turns on large-value
    arithmetic (flow-control overflow).
+
+## Application: accord as a conformance firewall
+
+A monitor that sits between a client and a server can do more than *observe*. In
+the HTTP/2 example (`examples/http2/tap_proxy.ex`) it forwards bytes verbatim and
+taps the frame stream to assign blame. The same position supports a second mode:
+**gate** the traffic — drop frames the spec forbids before they reach the server.
+This is a practical way to mitigate a buggy server while an upstream fix is
+pending: enforce the conformance the server itself does not.
+
+Concretely, for the §8.1 trailers bug, a gate would drop the client's malformed
+trailing HEADERS frame before Bandit sees it, so Bandit only ever receives the
+well-formed frames and cannot fold post-trailer DATA into the body. The operator
+gets RFC-conformant behavior from a non-conformant server, at the proxy, today.
+
+**The design has a subtlety worth stating, because building the server-catch
+(Round 3) surfaced it.** The two modes want *opposite* specs:
+
+- **Observe / server-catch.** A malformed client frame is the expected trigger;
+  the spec *accepts* it and routes to a server-obligation state (`:reset_expected`,
+  `:goaway_expected`) so the server's response is judged. The frame is not a
+  violation here — the server's failure to reset is.
+- **Gate / firewall.** The malformed client frame is exactly what to *reject*. The
+  gate needs a client-conformance stance where that frame has no legal transition,
+  so the monitor rejects it — and the gate then drops its bytes rather than
+  forwarding them, leaving the stream in its pre-frame state so valid traffic
+  continues.
+
+So a firewall is not the observe-mode monitor run backwards; it wants a spec that
+declares the client's obligations (reject bad frames) rather than the server's
+(demand a reset). Both derive from the same protocol, but they enumerate different
+transitions. A production gate would: buffer client→server bytes, extract complete
+frames, run each through a client-conformance monitor, forward the accepted
+frames' bytes and drop the rejected ones (optionally answering the client with a
+RST_STREAM/GOAWAY of the correct error code — the very code Round 2 showed Bandit
+gets wrong). The blame direction tells the gate which side to act on: reject and
+drop **client**-blamed frames; surface **server**-blamed responses to the operator
+(you cannot un-send the server's bytes, but you can alarm on them).
+
+**Status.** The observe-mode proxy is built and tested; the gate mode is a
+documented design, not yet implemented. The frame-level buffering and the second
+(client-conformance) spec are the work. It is a genuinely useful direction — a
+spec-derived conformance firewall is something a hand-rolled filter is not — and a
+natural next step for the example.
