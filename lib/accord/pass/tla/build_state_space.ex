@@ -59,7 +59,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         # "exhausted" in the tiny model. See docs/design-expressiveness-roadmap.md.
         {type_domain, abstract_bound} =
           if track.abstract == :monotonic do
-            {extend_domain(domain), abstract_track_bound(sessions, track.name, domain)}
+            {extend_domain(domain), abstract_track_bound(sessions, track, domain)}
           else
             {domain, nil}
           end
@@ -190,18 +190,40 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
   defp extend_domain(%Range{first: lo, last: hi}), do: lo..(hi + 1)
   defp extend_domain(domain), do: domain
 
-  defp abstract_track_bound(sessions, track_name, %Range{last: hi}) do
-    Sessions.forall(sessions, "#{Sessions.read(sessions, track_name)} =< #{hi}")
+  defp abstract_track_bound(sessions, track, %Range{last: hi}) do
+    # `Sessions.read/2` cannot be used here: the sessions struct's
+    # per-session registry is not populated while the track variables are
+    # still being built, so a per-session abstract track would render as an
+    # unsessioned read (`my_step =< N` where `my_step` is a function — a TLC
+    # type error). The track itself knows whether it is shared.
+    read =
+      if Sessions.multi?(sessions) and not track.shared do
+        "#{track.name}[#{sessions.var}]"
+      else
+        "#{track.name}"
+      end
+
+    Sessions.forall(sessions, "#{read} =< #{hi}")
   end
 
-  defp abstract_track_bound(_sessions, _track_name, _domain), do: nil
+  defp abstract_track_bound(_sessions, _track, _domain), do: nil
 
   defp compose_state_constraint(config_constraint, counter_bounds) do
     parts = List.wrap(config_constraint) ++ counter_bounds
 
     case parts do
-      [] -> nil
-      parts -> Enum.join(parts, " /\\ ")
+      [] ->
+        nil
+
+      [single] ->
+        single
+
+      parts ->
+        # Each part must be parenthesized: a `\A s \in Sessions : ...` bound
+        # otherwise swallows every following conjunct into its body, and a
+        # second quantifier there re-binds `s` (SANY: multiply-defined
+        # symbol). Surfaced by a protocol with two abstract tracks.
+        parts |> Enum.map(&"(#{&1})") |> Enum.join(" /\\ ")
     end
   end
 
