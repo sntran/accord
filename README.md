@@ -139,8 +139,8 @@ silent — see `docs/architecture.md` for the full runtime-vs-TLC table.
 
 ## Examples
 
-Four runnable examples in pedagogical order, each with a seeded design bug
-pinned by a real TLC run and blame stories pinned by monitor tests — see
+Four pedagogical examples, each with a seeded design bug pinned by a real
+TLC run and blame stories pinned by monitor tests — see
 [examples/](examples/):
 
 1. **circuit_breaker** — the intro: branching, `where:`, liveness under
@@ -149,6 +149,13 @@ pinned by a real TLC run and blame stories pinned by monitor tests — see
 3. **job_queue** — the flagship above.
 4. **genstage_demand** — the documented "never exceed demand" rule as an
    enforceable server-push contract.
+
+Two more run the monitor against real third-party servers (dev/test deps
+only): **phoenix_channels** model-checks the Phoenix Channels lifecycle and
+taps a live Phoenix endpoint through a wrapping serializer, and **http2**
+wires the stream monitor between a raw client and a live Bandit to catch
+RFC 9113 divergences — see [`docs/case-study-phoenix-channels.md`](docs/case-study-phoenix-channels.md)
+and [`docs/case-study-http2-bandit.md`](docs/case-study-http2-bandit.md).
 
 ## Core concepts
 

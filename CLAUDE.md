@@ -1,4 +1,4 @@
-# accord2
+# Accord
 
 Protocol contracts for Elixir in the lineage of Joe Armstrong's UBF (2002): one specification, checked twice — a runtime blame-assigning monitor and a TLA+ model checked by TLC.
 
@@ -15,7 +15,7 @@ Accord lets you declare a two-party protocol (states, transitions with typed rep
 
 ## Architecture
 
-For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–011); the July 2026 redesign rationale is in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md). The design review's deferred roadmap has since landed (trace validation with exerciser sampling, check caching, const, state timeouts, --extra, Accord.Compat versioning, cross-session `distinct`); remaining future work is an Apalache backend, correspondence-over-branches, track-predicate liveness, and behavioral refinement checking via TLC refinement mapping.
+For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–011); the redesign rationale and soundness review are in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md) and [`docs/soundness-review-2026-07.md`](docs/soundness-review-2026-07.md), and open expressiveness work in [`docs/design-expressiveness-roadmap.md`](docs/design-expressiveness-roadmap.md).
 
 The IR (`Accord.IR`) is the single source of truth. Two pipelines flow from it:
 
