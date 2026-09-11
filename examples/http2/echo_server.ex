@@ -5,7 +5,7 @@ defmodule Accord.Examples.Http2.EchoServer do
   ephemeral port it listened on.
 
   Cleartext HTTP/2 works because Bandit sniffs the connection preface and switches
-  to its HTTP/2 handler even without TLS/ALPN (`Bandit.InitialHandler`), so the
+  to its HTTP/2 handler even without TLS/ALPN (Bandit's InitialHandler), so the
   tap proxy can read the plaintext frame layer.
   """
 
