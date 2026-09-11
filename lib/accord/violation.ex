@@ -120,14 +120,17 @@ defmodule Accord.Violation do
   Creates a violation for a guard pre-condition failure.
 
   Blames the sender: the client for calls, the server for events.
+  `tracks` carries the track values the guard was evaluated against, so
+  reports can show why the pre-condition did not hold.
   """
-  @spec guard_failed(atom(), term(), blame()) :: t()
-  def guard_failed(state, message, blame \\ :client) do
+  @spec guard_failed(atom(), term(), blame(), map()) :: t()
+  def guard_failed(state, message, blame \\ :client, tracks \\ %{}) do
     %__MODULE__{
       blame: blame,
       kind: :guard_failed,
       state: state,
-      message: message
+      message: message,
+      context: %{tracks: tracks}
     }
   end
 

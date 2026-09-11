@@ -244,6 +244,11 @@ defmodule Accord.ViolationSpanTest do
       assert transition.guard.span.line == 18
       assert transition.guard.span.pattern == "guard"
       assert_search_span_valid(transition.guard.span, compiled.ir.source_file)
+
+      # The rendered report shows the tracks the guard was evaluated
+      # against, so the reader can see why it rejected the message.
+      formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
+      assert formatted =~ "tracks when the message arrived: balance = 1000, current_bet = 0"
     end
   end
 

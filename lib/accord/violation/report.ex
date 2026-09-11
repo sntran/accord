@@ -137,7 +137,7 @@ defmodule Accord.Violation.Report do
         "#{Type.to_string(v.context[:reply_type])}, but the where: constraint below does " <>
         "not hold for these tracks — so no branch accepts this reply"
     )
-    |> maybe_add_tracks_note(v.context[:tracks])
+    |> maybe_add_tracks_note(v.context[:tracks], "when the reply arrived")
   end
 
   defp build_report(%Violation{kind: :invalid_message} = v) do
@@ -161,6 +161,7 @@ defmodule Accord.Violation.Report do
   defp build_report(%Violation{kind: :guard_failed} = v) do
     Report.error("guard rejected message")
     |> Report.with_note("guard rejected #{inspect(v.message)} in state :#{v.state}")
+    |> maybe_add_tracks_note(v.context[:tracks], "when the message arrived")
   end
 
   defp build_report(%Violation{kind: :argument_type} = v) do
@@ -214,18 +215,19 @@ defmodule Accord.Violation.Report do
     |> Report.with_note("state: :#{v.state}, message: #{inspect(v.message)}")
   end
 
-  # The track values a `where:` constraint was evaluated against, so the
-  # reader can see why the shown constraint did not hold.
-  defp maybe_add_tracks_note(report, tracks) when is_map(tracks) and map_size(tracks) > 0 do
+  # The track values a guard or `where:` constraint was evaluated against,
+  # so the reader can see why the shown pre-condition did not hold.
+  defp maybe_add_tracks_note(report, tracks, moment)
+       when is_map(tracks) and map_size(tracks) > 0 do
     rendered =
       tracks
       |> Enum.sort()
       |> Enum.map_join(", ", fn {k, val} -> "#{k} = #{inspect(val)}" end)
 
-    Report.with_note(report, "tracks when the reply arrived: #{rendered}")
+    Report.with_note(report, "tracks #{moment}: #{rendered}")
   end
 
-  defp maybe_add_tracks_note(report, _), do: report
+  defp maybe_add_tracks_note(report, _, _), do: report
 
   # -- Source Labels --
 

@@ -36,6 +36,13 @@ defmodule Accord.ViolationTest do
       assert v.kind == :guard_failed
       assert v.state == :locked
       assert v.message == {:release, 99}
+      assert v.context.tracks == %{}
+    end
+
+    test "carries the tracks the guard was evaluated against" do
+      v = Violation.guard_failed(:locked, {:release, 99}, :client, %{fence_token: 5})
+
+      assert v.context.tracks == %{fence_token: 5}
     end
   end
 

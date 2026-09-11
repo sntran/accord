@@ -494,6 +494,9 @@ defmodule Accord.MonitorTest do
       assert {:accord_violation, violation} = Monitor.call(monitor, {:release, 99})
       assert violation.blame == :client
       assert violation.kind == :guard_failed
+      # The violation carries the tracks the guard saw, so reports can
+      # show why the pre-condition did not hold.
+      assert violation.context.tracks == %{holder: :c1, fence_token: 5}
     end
 
     test "tracks are updated after successful transition", %{monitor: monitor} do
