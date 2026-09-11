@@ -46,7 +46,14 @@ defmodule Accord.MixProject do
 
   defp deps do
     [
-      {:pentiment, "~> 0.1.5"},
+      # Path dep on the workspace pentiment (0.2.0, unpublished): its
+      # syntax-highlighting seam for source-context lines is not yet on hex.
+      # Revert to a hex version constraint once 0.2.0 is published.
+      {:pentiment, path: "../pentiment"},
+      # Optional pentiment lexers: syntax highlighting for the blame frames
+      # rendered to a terminal (colors on). Absent, frames render plain.
+      {:makeup_elixir, "~> 1.0"},
+      {:makeup_erlang, "~> 1.0"},
       {:propcheck, "~> 1.4"},
       {:stream_data, "~> 1.0", only: [:dev, :test]},
       {:assert_boundary, "~> 0.1.0", only: :test},
