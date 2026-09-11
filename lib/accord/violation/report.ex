@@ -54,11 +54,17 @@ defmodule Accord.Violation.Report do
 
     * `:strict` - when `true`, raises on missing or invalid spans for
       violation kinds that should have them. Defaults to `false`.
+    * `:session` - the steps that led to the violation, one string per
+      step. They are rendered as notes ahead of the violation's own notes,
+      so the diagnostic reads as a single narrative: what happened, then
+      what went wrong.
+    * `:tracks` - the track values when the failing message arrived, for
+      violation kinds that do not carry them in their context.
   """
   @spec format(Violation.t(), Compiled.t(), keyword()) :: String.t()
-  def format(%Violation{} = violation, %Compiled{} = compiled, opts \\ []) do
+  def format(%Violation{} = violation, %Compiled{} = compiled, opts) do
     report =
-      build_report(violation)
+      build_report(violation, opts)
       |> add_source_label(violation, compiled, opts)
 
     case compiled.ir.source_file do
@@ -81,11 +87,17 @@ defmodule Accord.Violation.Report do
   Renders the diagnostic message with notes and help, but without
   source code context.
   """
-  @spec format(Violation.t()) :: String.t()
-  def format(%Violation{} = violation) do
-    report = build_report(violation)
+  @spec format(Violation.t(), Compiled.t() | keyword()) :: String.t()
+  def format(%Violation{} = violation, %Compiled{} = compiled),
+    do: format(violation, compiled, [])
+
+  def format(%Violation{} = violation, opts) when is_list(opts) do
+    report = build_report(violation, opts)
     Pentiment.format(report, %{})
   end
+
+  @spec format(Violation.t()) :: String.t()
+  def format(%Violation{} = violation), do: format(violation, [])
 
   @doc """
   Builds a failure report string for a property test.
@@ -120,6 +132,20 @@ defmodule Accord.Violation.Report do
   end
 
   # -- Report Building --
+
+  # The session comes first so the notes read in the order things happened;
+  # the tracks note is only added when the violation did not record them itself.
+  defp build_report(%Violation{} = violation, opts) do
+    report = build_report(violation)
+    session = Keyword.get(opts, :session, [])
+    report = %{report | notes: session ++ report.notes}
+
+    if Enum.any?(report.notes, &String.starts_with?(&1, "tracks ")) do
+      report
+    else
+      maybe_add_tracks_note(report, Keyword.get(opts, :tracks), "when the message arrived")
+    end
+  end
 
   defp build_report(%Violation{kind: :invalid_reply} = v) do
     Report.error("server returned invalid reply")

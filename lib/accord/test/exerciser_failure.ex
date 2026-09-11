@@ -3,9 +3,10 @@ defmodule Accord.Test.ExerciserFailure do
   Exception raised when the protocol exerciser detects a mismatch
   between expected and actual outcomes.
 
-  Contains the step trace leading up to the failure. The failing
-  step's violation is formatted as a pentiment diagnostic with
-  source spans when a compiled protocol is available.
+  The message is a single pentiment diagnostic: the generated session
+  leading up to the failure is rendered as notes ahead of the violation's
+  own notes and help, with source spans when a compiled protocol is
+  available.
   """
 
   alias Accord.Violation
@@ -32,70 +33,62 @@ defmodule Accord.Test.ExerciserFailure do
 
   @impl true
   def message(%__MODULE__{} = e) do
-    step_count = length(e.steps)
     failing = Enum.find(e.steps, &(not &1.passed))
-
-    header =
-      if e.compiled do
-        "Protocol exerciser failure for #{inspect(e.compiled.ir.name)}"
-      else
-        "Protocol exerciser failure"
-      end
-
-    steps_summary = format_steps(e.steps)
-
-    failure_detail =
-      if failing do
-        diagnostic = format_failing_step(failing, e.compiled)
-
-        """
-
-        Failing step:
-          command:  #{inspect(failing.command)}
-          state:    :#{failing.state}
-          tracks:   #{inspect(failing.tracks, pretty: true, limit: 10)}
-          message:  #{inspect(failing.message, limit: 5)}
-          expected: #{format_outcome(failing.expected)}
-
-        #{diagnostic}
-        """
-      else
-        ""
-      end
-
+    session = session_notes(e)
     prop_detail = format_property_violations(e.property_violations, e.compiled)
-
-    """
-    #{header}
-    --- Steps (#{step_count}) ---
-    #{steps_summary}#{failure_detail}#{prop_detail}
-    """
+    format_failing_step(failing, e.compiled, session) <> prop_detail
   end
 
-  # -- Step formatting --
+  # -- The session, as notes --
+  #
+  # One note per applied step, preceded by the protocol under test, so the
+  # diagnostic below carries everything the reader needs: what was sent, in
+  # which state, what came back, and where it stopped matching the contract.
 
-  defp format_steps(steps) do
-    steps
-    |> Enum.with_index(1)
-    |> Enum.map_join("\n", fn {step, idx} ->
-      status = if step.passed, do: "ok", else: "FAIL"
-      msg_str = inspect(step.message, limit: 5)
-      "  #{idx}. :#{step.state} #{msg_str} -> #{format_outcome(step.expected)} [#{status}]"
-    end)
+  defp session_notes(%__MODULE__{steps: steps, compiled: compiled}) do
+    header =
+      case compiled do
+        %{ir: %{name: name}} -> ["exerciser session against #{inspect(name)}"]
+        _ -> ["exerciser session"]
+      end
+
+    lines =
+      steps
+      |> Enum.with_index(1)
+      |> Enum.map(fn {step, idx} ->
+        outcome = format_outcome(step.expected)
+        mark = if step.passed, do: "", else: " ✗"
+        "step #{idx} · :#{step.state} #{inspect(step.message, limit: 5)} → #{outcome}#{mark}"
+      end)
+
+    header ++ lines
   end
 
   # -- Failing step diagnostic --
 
-  defp format_failing_step(%{actual: {:accord_violation, %Violation{} = v}}, %{} = compiled) do
-    Violation.Report.format(v, compiled, strict: true)
+  defp format_failing_step(nil, _compiled, session) do
+    Enum.join(session, "\n")
   end
 
-  defp format_failing_step(%{actual: {:accord_violation, %Violation{} = v}}, _compiled) do
-    Violation.Report.format(v)
+  defp format_failing_step(
+         %{actual: {:accord_violation, %Violation{} = v}} = step,
+         %{} = compiled,
+         session
+       ) do
+    Violation.Report.format(v, compiled, strict: true, session: session, tracks: step.tracks)
   end
 
-  defp format_failing_step(%{actual: actual, expected: expected}, _compiled) do
-    "expected: #{format_outcome(expected)}\n     got: #{inspect(actual, pretty: true, limit: 10)}"
+  defp format_failing_step(
+         %{actual: {:accord_violation, %Violation{} = v}} = step,
+         _compiled,
+         session
+       ) do
+    Violation.Report.format(v, session: session, tracks: step.tracks)
+  end
+
+  defp format_failing_step(%{actual: actual, expected: expected}, _compiled, session) do
+    Enum.join(session, "\n") <>
+      "\nexpected: #{format_outcome(expected)}\n     got: #{inspect(actual, pretty: true, limit: 10)}"
   end
 
   # -- Property violation formatting --
