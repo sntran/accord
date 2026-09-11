@@ -26,10 +26,13 @@ defmodule Accord.Property.BlackjackStatemTest do
   alias Accord.Monitor
   alias Accord.Test.Blackjack
   alias Accord.Test.FaultyServer
+  alias Accord.Test.ViolationCollector
 
   # -- Model State --
   # Mirrors the server's internal state so we can predict branching outcomes.
 
+  # The model starts from its defaults (initial_state/0).
+  @enforce_keys []
   defstruct protocol_state: :waiting,
             balance: 1000,
             current_bet: 0,
@@ -402,7 +405,7 @@ defmodule Accord.Property.BlackjackStatemTest do
     result =
       quickcheck(
         forall cmds <- commands(__MODULE__) do
-          Accord.Test.ViolationCollector.init()
+          ViolationCollector.init()
 
           {:ok, faulty} = FaultyServer.start_link(Blackjack.Server)
           compiled = Blackjack.Protocol.__compiled__()
@@ -418,7 +421,7 @@ defmodule Accord.Property.BlackjackStatemTest do
 
           {history, _state, result} = run_commands(__MODULE__, cmds)
 
-          prop_violations = Accord.Test.ViolationCollector.property_violations()
+          prop_violations = ViolationCollector.property_violations()
 
           # Cleanup.
           if Process.alive?(monitor), do: GenServer.stop(monitor, :normal, 100)

@@ -215,44 +215,42 @@ defmodule Accord.Compat do
   end
 
   defp check_arg_types(findings, name, tag, old_t, new_t, new_ir) do
-    cond do
-      length(old_t.message_types) != length(new_t.message_types) ->
-        report =
-          Report.error(
-            "message :#{tag} in state :#{name} changed arity — old clients send " <>
-              "#{length(old_t.message_types)} argument(s), the new contract expects " <>
-              "#{length(new_t.message_types)}"
-          )
-          |> Report.with_code("C004")
-          |> maybe_add_source(new_ir.source_file)
-          |> maybe_add_span_label(new_t.span, "declared here")
+    if length(old_t.message_types) != length(new_t.message_types) do
+      report =
+        Report.error(
+          "message :#{tag} in state :#{name} changed arity — old clients send " <>
+            "#{length(old_t.message_types)} argument(s), the new contract expects " <>
+            "#{length(new_t.message_types)}"
+        )
+        |> Report.with_code("C004")
+        |> maybe_add_source(new_ir.source_file)
+        |> maybe_add_span_label(new_t.span, "declared here")
 
-        [{:error, report} | findings]
+      [{:error, report} | findings]
+    else
+      old_t.message_types
+      |> Enum.zip(new_t.message_types)
+      |> Enum.with_index()
+      |> Enum.reduce(findings, fn {{old_type, new_type}, idx}, acc ->
+        if Type.subtype?(old_type, new_type) do
+          acc
+        else
+          report =
+            Report.error(
+              "message :#{tag} in state :#{name}: argument #{idx} narrowed from " <>
+                "#{Type.to_string(old_type)} to #{Type.to_string(new_type)} — " <>
+                "old clients may send values the new contract rejects"
+            )
+            |> Report.with_code("C004")
+            |> maybe_add_source(new_ir.source_file)
+            |> maybe_add_span_label(
+              Enum.at(new_t.message_arg_spans, idx) || new_t.span,
+              "narrowed here"
+            )
 
-      true ->
-        old_t.message_types
-        |> Enum.zip(new_t.message_types)
-        |> Enum.with_index()
-        |> Enum.reduce(findings, fn {{old_type, new_type}, idx}, acc ->
-          if Type.subtype?(old_type, new_type) do
-            acc
-          else
-            report =
-              Report.error(
-                "message :#{tag} in state :#{name}: argument #{idx} narrowed from " <>
-                  "#{Type.to_string(old_type)} to #{Type.to_string(new_type)} — " <>
-                  "old clients may send values the new contract rejects"
-              )
-              |> Report.with_code("C004")
-              |> maybe_add_source(new_ir.source_file)
-              |> maybe_add_span_label(
-                Enum.at(new_t.message_arg_spans, idx) || new_t.span,
-                "narrowed here"
-              )
-
-            [{:error, report} | acc]
-          end
-        end)
+          [{:error, report} | acc]
+        end
+      end)
     end
   end
 
@@ -463,29 +461,27 @@ defmodule Accord.Compat do
     old_target = timeout_target(old_state)
     new_target = timeout_target(new_state)
 
-    cond do
-      old_target == new_target ->
-        # Same target (or both absent): a duration change is behavioral,
-        # not protocol-shape.
-        findings
+    if old_target == new_target do
+      # Same target (or both absent): a duration change is behavioral,
+      # not protocol-shape.
+      findings
+    else
+      describe = fn
+        nil -> "none"
+        target -> ":#{target}"
+      end
 
-      true ->
-        describe = fn
-          nil -> "none"
-          target -> ":#{target}"
-        end
+      report =
+        Report.error(
+          "state :#{name}'s autonomous movement changed — state_timeout target " <>
+            "was #{describe.(old_target)}, now #{describe.(new_target)}; old " <>
+            "clients track the session through the old behavior"
+        )
+        |> Report.with_code("C009")
+        |> maybe_add_source(new_ir.source_file)
+        |> maybe_add_span_label(new_state.span, "state defined here")
 
-        report =
-          Report.error(
-            "state :#{name}'s autonomous movement changed — state_timeout target " <>
-              "was #{describe.(old_target)}, now #{describe.(new_target)}; old " <>
-              "clients track the session through the old behavior"
-          )
-          |> Report.with_code("C009")
-          |> maybe_add_source(new_ir.source_file)
-          |> maybe_add_span_label(new_state.span, "state defined here")
-
-        [{:error, report} | findings]
+      [{:error, report} | findings]
     end
   end
 

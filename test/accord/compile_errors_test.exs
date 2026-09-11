@@ -11,6 +11,16 @@ defmodule Accord.CompileErrorsTest do
 
   alias Accord.IR
   alias Accord.IR.{Branch, Check, Property, State, Track, Transition}
+
+  alias Accord.Pass.{
+    ResolveFieldPaths,
+    ValidateDeterminism,
+    ValidateProperties,
+    ValidateReachability,
+    ValidateStructure,
+    ValidateTypes
+  }
+
   alias Accord.Test.SpanHelper
   alias Pentiment.Span.Search
 
@@ -97,7 +107,7 @@ defmodule Accord.CompileErrorsTest do
         states: %{ready: %State{name: :ready}}
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateStructure.run(ir)
+      assert {:error, [report]} = ValidateStructure.run(ir)
       assert report.code == "E001"
       assert report.message =~ "initial state :nonexistent is not defined"
       assert report.labels == []
@@ -145,7 +155,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateStructure.run(ir)
+      assert {:error, [report]} = ValidateStructure.run(ir)
       assert report.code == "E002"
       assert report.message =~ "undefined state reference :nowhere"
       assert length(report.labels) == 1
@@ -205,7 +215,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateStructure.run(ir)
+      assert {:error, [report]} = ValidateStructure.run(ir)
       assert report.code == "E003"
       assert report.message =~ "terminal state :stopped has transitions"
       assert length(report.labels) == 1
@@ -250,7 +260,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateTypes.run(ir)
+      assert {:error, [report]} = ValidateTypes.run(ir)
       assert report.code == "E010"
       assert report.message =~ "track :counter"
       assert report.message =~ "does not conform to type"
@@ -298,7 +308,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateTypes.run(ir)
+      assert {:error, [report]} = ValidateTypes.run(ir)
       assert report.code == "E011"
       assert report.message =~ "call transition has no branches"
       assert length(report.labels) == 1
@@ -359,7 +369,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateDeterminism.run(ir)
+      assert {:error, [report]} = ValidateDeterminism.run(ir)
       assert report.code == "E020"
       assert report.message =~ "ambiguous dispatch"
       assert report.message =~ ":ping"
@@ -408,7 +418,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, [report]} = ValidateProperties.run(ir)
       assert report.code == "E030"
       assert report.message =~ "bounded check references undefined track :nonexistent"
       assert length(report.labels) == 1
@@ -453,7 +463,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, [report]} = ValidateProperties.run(ir)
       assert report.code == "E031"
       assert report.message =~ "correspondence check references undefined open event :nonexistent"
       assert length(report.labels) == 1
@@ -497,7 +507,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, [report]} = ValidateProperties.run(ir)
       assert report.code == "E032"
       assert report.message =~ "local_invariant check references undefined state :nonexistent"
       assert length(report.labels) == 1
@@ -536,7 +546,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, [report]} = ValidateProperties.run(ir)
       assert report.code == "E033"
       assert report.message =~ "reachable check references undefined state :nonexistent"
       assert length(report.labels) == 1
@@ -579,7 +589,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, reports} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, reports} = ValidateProperties.run(ir)
       assert length(reports) == 2
 
       [target_report, required_report] = reports
@@ -631,7 +641,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ResolveFieldPaths.run(ir)
+      assert {:error, [report]} = ResolveFieldPaths.run(ir)
       assert report.code == "E035"
       assert report.message =~ "field path references unknown event :nonexistent"
       assert length(report.labels) == 1
@@ -674,7 +684,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, [report]} = Accord.Pass.ResolveFieldPaths.run(ir)
+      assert {:error, [report]} = ResolveFieldPaths.run(ir)
       assert report.code == "E036"
       assert report.message =~ "field :nonexistent not found in :acquire message parameters"
       assert length(report.labels) == 1
@@ -734,7 +744,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      warnings = Accord.Pass.ValidateReachability.warnings(ir)
+      warnings = ValidateReachability.warnings(ir)
       assert [report] = warnings
       assert report.code == "W001"
       assert report.severity == :warning
@@ -779,7 +789,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      warnings = Accord.Pass.ValidateReachability.warnings(ir)
+      warnings = ValidateReachability.warnings(ir)
       assert [report] = warnings
       assert report.code == "W002"
       assert report.severity == :warning
@@ -813,7 +823,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateStructure.run(ir)
+      assert {:error, [report]} = ValidateStructure.run(ir)
       assert report.code == "E002"
       assert report.labels == []
     end
@@ -845,7 +855,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, [report]} = Accord.Pass.ValidateDeterminism.run(ir)
+      assert {:error, [report]} = ValidateDeterminism.run(ir)
       assert report.code == "E020"
       assert report.labels == []
     end
@@ -875,7 +885,7 @@ defmodule Accord.CompileErrorsTest do
         }
       }
 
-      assert {:error, errors} = Accord.Pass.ValidateStructure.run(ir)
+      assert {:error, errors} = ValidateStructure.run(ir)
       assert length(errors) >= 2
       codes = Enum.map(errors, & &1.code)
       assert "E001" in codes
@@ -899,7 +909,7 @@ defmodule Accord.CompileErrorsTest do
           }
         ])
 
-      assert {:error, errors} = Accord.Pass.ValidateProperties.run(ir)
+      assert {:error, errors} = ValidateProperties.run(ir)
       assert length(errors) == 2
       codes = Enum.map(errors, & &1.code)
       assert "E030" in codes

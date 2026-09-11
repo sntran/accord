@@ -26,6 +26,8 @@ defmodule Accord.TLA.Sessions do
   # is not a compile-time literal of an opaque type; every accessor
   # short-circuits on multi?/1 before touching it, and build/3 always
   # sets a real set.
+  # Defaults describe the single-session case; build/3 fills the rest.
+  @enforce_keys []
   defstruct count: 1, var: "s", per_session: nil
 
   @doc """

@@ -82,8 +82,7 @@ defmodule Accord.Pass.TLA.BuildProperties do
 
     vars =
       ctx.ir.tracks
-      |> Enum.map(fn t -> Atom.to_string(t.name) end)
-      |> Enum.join(", ")
+      |> Enum.map_join(", ", fn t -> Atom.to_string(t.name) end)
 
     bindings = extract_action_bindings(check.spec.ast)
 
@@ -334,7 +333,6 @@ defmodule Accord.Pass.TLA.BuildProperties do
     name
     |> Atom.to_string()
     |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
+    |> Enum.map_join("", &String.capitalize/1)
   end
 end

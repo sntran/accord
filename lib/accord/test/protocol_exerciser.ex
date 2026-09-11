@@ -576,10 +576,10 @@ defmodule Accord.Test.ProtocolExerciser do
     Enum.reduce_while(1..50, :skip, fn _, _ ->
       {:ok, message} = :proper_gen.pick(TypeGen.gen_message(transition))
 
-      if not guard_passes?(transition, message, tracks) do
-        {:halt, {:ok, message}}
-      else
+      if guard_passes?(transition, message, tracks) do
         {:cont, :skip}
+      else
+        {:halt, {:ok, message}}
       end
     end)
   end

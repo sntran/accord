@@ -83,7 +83,7 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       {_ss, actions} = build(ir)
       casts = Enum.filter(actions, &(&1.message_tag == "heartbeat"))
 
-      assert length(casts) > 0
+      assert casts != []
 
       Enum.each(casts, fn cast ->
         assert cast.source_state == cast.target_state

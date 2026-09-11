@@ -223,7 +223,7 @@ defmodule Accord.Pass.TLA.BuildStateSpace do
         # otherwise swallows every following conjunct into its body, and a
         # second quantifier there re-binds `s` (SANY: multiply-defined
         # symbol). Surfaced by a protocol with two abstract tracks.
-        parts |> Enum.map(&"(#{&1})") |> Enum.join(" /\\ ")
+        parts |> Enum.map_join(" /\\ ", &"(#{&1})")
     end
   end
 

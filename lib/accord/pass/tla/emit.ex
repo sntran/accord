@@ -68,8 +68,7 @@ defmodule Accord.Pass.TLA.Emit do
 
   defp render_tla_actions(actions) do
     actions
-    |> Enum.map(&render_tla_action/1)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &render_tla_action/1)
   end
 
   defp render_tla_action(%Action{} = action) do
@@ -233,11 +232,10 @@ defmodule Accord.Pass.TLA.Emit do
       else
         props =
           checked
-          |> Enum.map(fn prop ->
+          |> Enum.map_join("\n", fn prop ->
             comment = if prop.comment, do: "\\* #{prop.comment}\n", else: ""
             "#{comment}#{property_formula(prop, actions)}\n"
           end)
-          |> Enum.join("\n")
 
         "\\* Properties\n#{props}"
       end

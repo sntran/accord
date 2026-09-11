@@ -16,9 +16,12 @@ defmodule Accord.Property.CounterStatemTest do
   alias Accord.Monitor
   alias Accord.Test.Counter
   alias Accord.Test.FaultyServer
+  alias Accord.Test.ViolationCollector
 
   # -- Model State --
 
+  # The model starts from its defaults (initial_state/0).
+  @enforce_keys []
   defstruct [
     :monitor,
     :faulty_server,
@@ -257,7 +260,7 @@ defmodule Accord.Property.CounterStatemTest do
     result =
       quickcheck(
         forall cmds <- commands(__MODULE__) do
-          Accord.Test.ViolationCollector.init()
+          ViolationCollector.init()
 
           # Start fresh server + monitor for each test run.
           {:ok, faulty} = FaultyServer.start_link(Counter.Server)
@@ -274,7 +277,7 @@ defmodule Accord.Property.CounterStatemTest do
 
           {history, _state, result} = run_commands(__MODULE__, cmds)
 
-          prop_violations = Accord.Test.ViolationCollector.property_violations()
+          prop_violations = ViolationCollector.property_violations()
 
           # Cleanup.
           if Process.alive?(monitor), do: GenServer.stop(monitor, :normal, 100)

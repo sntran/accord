@@ -123,7 +123,6 @@ defmodule Accord.TLA.SpanMap do
     name
     |> Atom.to_string()
     |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
+    |> Enum.map_join("", &String.capitalize/1)
   end
 end

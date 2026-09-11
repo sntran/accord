@@ -84,19 +84,17 @@ defmodule Accord.Pass.TLA.BuildActions do
     # A branching cast routes conditionally: one action per branch, with the
     # branch's `where:` added as a precondition and the branch's target as the
     # next state.
+    env = %{
+      ir: ir,
+      state_space: state_space,
+      config: config,
+      all_var_names: all_var_names,
+      track_names: track_names
+    }
+
     cond do
       transition.kind == :cast and transition.branches != [] ->
-        build_cast_branch_actions(
-          ir,
-          state_name,
-          transition,
-          tag,
-          source,
-          state_space,
-          config,
-          all_var_names,
-          track_names
-        )
+        build_cast_branch_actions(env, state_name, transition, tag, source)
 
       # An event, or a cast that changes state (declares goto/guard/update), is a
       # one-way message with a state transition, guard, and update — the same
@@ -105,45 +103,17 @@ defmodule Accord.Pass.TLA.BuildActions do
       # which emits it as a stuttering no-op.
       transition.kind == :event or (transition.kind == :cast and transition.to != nil) ->
         [
-          build_event_action(
-            ir,
-            state_name,
-            transition,
-            tag,
-            source,
-            state_space,
-            config,
-            all_var_names,
-            track_names
-          )
+          build_event_action(env, state_name, transition, tag, source)
         ]
 
       true ->
-        build_branch_actions(
-          ir,
-          state_name,
-          transition,
-          tag,
-          source,
-          state_space,
-          config,
-          all_var_names,
-          track_names
-        )
+        build_branch_actions(env, state_name, transition, tag, source)
     end
   end
 
-  defp build_branch_actions(
-         ir,
-         state_name,
-         transition,
-         tag,
-         source,
-         state_space,
-         config,
-         all_var_names,
-         track_names
-       ) do
+  defp build_branch_actions(env, state_name, transition, tag, source) do
+    %{ir: ir, state_space: state_space, all_var_names: all_var_names} = env
+
     # For branching transitions, create one action per branch.
     case transition.branches do
       [] ->
@@ -170,19 +140,7 @@ defmodule Accord.Pass.TLA.BuildActions do
               if Map.fetch!(target_counts, target_state) > 1, do: idx, else: nil
 
             action =
-              build_call_action(
-                ir,
-                state_name,
-                transition,
-                branch,
-                tag,
-                source,
-                state_space,
-                config,
-                all_var_names,
-                track_names,
-                suffix
-              )
+              build_call_action(env, state_name, transition, branch, tag, source, suffix)
 
             {action, seen}
           end)
@@ -191,19 +149,15 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp build_call_action(
-         ir,
-         state_name,
-         transition,
-         branch,
-         tag,
-         source,
-         state_space,
-         config,
-         all_var_names,
-         track_names,
-         suffix
-       ) do
+  defp build_call_action(env, state_name, transition, branch, tag, source, suffix) do
+    %{
+      ir: ir,
+      state_space: state_space,
+      config: config,
+      all_var_names: all_var_names,
+      track_names: track_names
+    } = env
+
     target_state = resolve_next_state(branch.next_state, state_name)
     target = Atom.to_string(target_state)
     sessions = state_space.sessions
@@ -393,17 +347,15 @@ defmodule Accord.Pass.TLA.BuildActions do
   # this is where server-push pays off in the model: TLC explores races
   # between requests and pushes that a single-direction model cannot
   # represent. Same shape as a call action minus reply existentials.
-  defp build_event_action(
-         ir,
-         state_name,
-         transition,
-         tag,
-         source,
-         state_space,
-         config,
-         all_var_names,
-         track_names
-       ) do
+  defp build_event_action(env, state_name, transition, tag, source) do
+    %{
+      ir: ir,
+      state_space: state_space,
+      config: config,
+      all_var_names: all_var_names,
+      track_names: track_names
+    } = env
+
     target_state = resolve_next_state(transition.to, state_name)
     target = Atom.to_string(target_state)
     sessions = state_space.sessions
@@ -475,17 +427,15 @@ defmodule Accord.Pass.TLA.BuildActions do
   # A branching cast: one action per branch. Each shares the message
   # existentials, guard, and update, and adds its own `where:` as a precondition
   # and its own target. Mirrors build_event_action per branch.
-  defp build_cast_branch_actions(
-         ir,
-         state_name,
-         transition,
-         tag,
-         source,
-         state_space,
-         config,
-         all_var_names,
-         track_names
-       ) do
+  defp build_cast_branch_actions(env, state_name, transition, tag, source) do
+    %{
+      ir: ir,
+      state_space: state_space,
+      config: config,
+      all_var_names: all_var_names,
+      track_names: track_names
+    } = env
+
     sessions = state_space.sessions
     {msg_existentials, param_bindings} = build_existentials(transition, config)
     existential_vars = session_existentials(sessions) ++ msg_existentials
@@ -707,9 +657,10 @@ defmodule Accord.Pass.TLA.BuildActions do
     value
     |> String.split(" ")
     |> Enum.reduce_while(0, fn token, depth ->
-      cond do
-        depth == 0 and token in @tla_binops -> {:halt, :found}
-        true -> {:cont, depth + paren_delta(token)}
+      if depth == 0 and token in @tla_binops do
+        {:halt, :found}
+      else
+        {:cont, depth + paren_delta(token)}
       end
     end)
     |> Kernel.==(:found)
@@ -825,25 +776,29 @@ defmodule Accord.Pass.TLA.BuildActions do
       # if reply == :ok, do: ..., else: ...
       # Resolvable when the condition compares the reply to a literal.
       {:if, _, [cond_ast, clauses]} ->
-        case resolve_if_condition(cond_ast, branch, ctx) do
-          {:resolved, true} ->
-            extract_update_body(Keyword.get(clauses, :do), branch, ctx)
-
-          {:resolved, false} ->
-            case Keyword.get(clauses, :else) do
-              nil -> :identity
-              else_body -> extract_update_body(else_body, branch, ctx)
-            end
-
-          :unknown ->
-            {:unsupported, ast}
-        end
+        extract_if_update(ast, cond_ast, clauses, branch, ctx)
 
       # Block — check last expression.
       {:__block__, _, exprs} ->
         extract_update_body(List.last(exprs), branch, ctx)
 
       _ ->
+        {:unsupported, ast}
+    end
+  end
+
+  defp extract_if_update(ast, cond_ast, clauses, branch, ctx) do
+    case resolve_if_condition(cond_ast, branch, ctx) do
+      {:resolved, true} ->
+        extract_update_body(Keyword.get(clauses, :do), branch, ctx)
+
+      {:resolved, false} ->
+        case Keyword.get(clauses, :else) do
+          nil -> :identity
+          else_body -> extract_update_body(else_body, branch, ctx)
+        end
+
+      :unknown ->
         {:unsupported, ast}
     end
   end
@@ -1238,7 +1193,6 @@ defmodule Accord.Pass.TLA.BuildActions do
   defp camelize(s) when is_binary(s) do
     s
     |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
+    |> Enum.map_join("", &String.capitalize/1)
   end
 end

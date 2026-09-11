@@ -16,10 +16,10 @@ defmodule Accord.Pass.ValidateDeterminism do
     errors =
       ir.states
       |> Enum.flat_map(fn {_name, state} ->
-        unless state.terminal do
-          check_state_determinism(state, ir.anystate, ir)
-        else
+        if state.terminal do
           []
+        else
+          check_state_determinism(state, ir.anystate, ir)
         end
       end)
 

@@ -20,6 +20,7 @@ defmodule Accord.Monitor do
 
   @type violation_policy :: :log | :reject | :crash | {module(), atom()}
 
+  @enforce_keys [:compiled, :upstream, :downstream, :tracks, :violation_policy]
   defstruct [
     :compiled,
     :upstream,
@@ -163,25 +164,23 @@ defmodule Accord.Monitor do
   defp handle_call(message, from, state, data) do
     table = data.compiled.transition_table
 
-    cond do
-      TransitionTable.terminal?(table, state) ->
-        violation = Violation.session_ended(state, message)
-        handle_violation(violation, from, state, data)
+    if TransitionTable.terminal?(table, state) do
+      violation = Violation.session_ended(state, message)
+      handle_violation(violation, from, state, data)
+    else
+      case TransitionTable.lookup(table, state, message) do
+        {:ok, transition} when transition.kind == :call ->
+          process_call_transition(transition, message, from, state, data)
 
-      true ->
-        case TransitionTable.lookup(table, state, message) do
-          {:ok, transition} when transition.kind == :call ->
-            process_call_transition(transition, message, from, state, data)
+        {:ok, _transition} ->
+          # The tag belongs to a cast or a server event — not callable.
+          violation = Violation.invalid_message(state, message, valid_tags(table, state))
+          handle_violation(violation, from, state, data)
 
-          {:ok, _transition} ->
-            # The tag belongs to a cast or a server event — not callable.
-            violation = Violation.invalid_message(state, message, valid_tags(table, state))
-            handle_violation(violation, from, state, data)
-
-          :error ->
-            violation = Violation.invalid_message(state, message, valid_tags(table, state))
-            handle_violation(violation, from, state, data)
-        end
+        :error ->
+          violation = Violation.invalid_message(state, message, valid_tags(table, state))
+          handle_violation(violation, from, state, data)
+      end
     end
   end
 
@@ -399,40 +398,38 @@ defmodule Accord.Monitor do
   defp handle_cast(message, state, data) do
     table = data.compiled.transition_table
 
-    cond do
-      TransitionTable.terminal?(table, state) ->
-        violation = Violation.session_ended(state, message)
-        handle_cast_violation(violation, state, data)
+    if TransitionTable.terminal?(table, state) do
+      violation = Violation.session_ended(state, message)
+      handle_cast_violation(violation, state, data)
+    else
+      case TransitionTable.lookup(table, state, message) do
+        {:ok, %{kind: :cast, to: to, branches: branches} = transition}
+        when to != nil or branches != [] ->
+          # A state-changing cast (single target, or conditional branches): run
+          # the full pipeline (types, guard, branch selection, update,
+          # properties) and forward upstream, blaming the client.
+          process_cast_transition(transition, message, state, data)
 
-      true ->
-        case TransitionTable.lookup(table, state, message) do
-          {:ok, %{kind: :cast, to: to, branches: branches} = transition}
-          when to != nil or branches != [] ->
-            # A state-changing cast (single target, or conditional branches): run
-            # the full pipeline (types, guard, branch selection, update,
-            # properties) and forward upstream, blaming the client.
-            process_cast_transition(transition, message, state, data)
+        {:ok, transition} when transition.kind == :cast ->
+          # A plain fire-and-forget cast: type-check and forward.
+          case check_message_types(message, transition, state, :client) do
+            :ok ->
+              GenServer.cast(data.upstream, message)
+              {:keep_state, data}
 
-          {:ok, transition} when transition.kind == :cast ->
-            # A plain fire-and-forget cast: type-check and forward.
-            case check_message_types(message, transition, state, :client) do
-              :ok ->
-                GenServer.cast(data.upstream, message)
-                {:keep_state, data}
+            {:error, violation} ->
+              handle_cast_violation(violation, state, data)
+          end
 
-              {:error, violation} ->
-                handle_cast_violation(violation, state, data)
-            end
+        {:ok, _transition} ->
+          # Found a :call transition, not valid for cast.
+          violation = Violation.invalid_message(state, message, [])
+          handle_cast_violation(violation, state, data)
 
-          {:ok, _transition} ->
-            # Found a :call transition, not valid for cast.
-            violation = Violation.invalid_message(state, message, [])
-            handle_cast_violation(violation, state, data)
-
-          :error ->
-            violation = Violation.invalid_message(state, message, valid_tags(table, state))
-            handle_cast_violation(violation, state, data)
-        end
+        :error ->
+          violation = Violation.invalid_message(state, message, valid_tags(table, state))
+          handle_cast_violation(violation, state, data)
+      end
     end
   end
 
@@ -441,20 +438,18 @@ defmodule Accord.Monitor do
   defp handle_push_event(message, state, data) do
     table = data.compiled.transition_table
 
-    cond do
-      TransitionTable.terminal?(table, state) ->
-        violation = Violation.session_ended(state, message, :server)
-        handle_cast_violation(violation, state, data)
+    if TransitionTable.terminal?(table, state) do
+      violation = Violation.session_ended(state, message, :server)
+      handle_cast_violation(violation, state, data)
+    else
+      case TransitionTable.lookup(table, state, message) do
+        {:ok, transition} when transition.kind == :event ->
+          process_event_transition(transition, message, state, data)
 
-      true ->
-        case TransitionTable.lookup(table, state, message) do
-          {:ok, transition} when transition.kind == :event ->
-            process_event_transition(transition, message, state, data)
-
-          _ ->
-            violation = Violation.invalid_event(state, message, valid_event_tags(table, state))
-            handle_cast_violation(violation, state, data)
-        end
+        _ ->
+          violation = Violation.invalid_event(state, message, valid_event_tags(table, state))
+          handle_cast_violation(violation, state, data)
+      end
     end
   end
 

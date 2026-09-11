@@ -231,7 +231,7 @@ defmodule Accord.TLA.CompilerTest do
 
     test "anystate ping preserves state", %{actions: actions} do
       pings = Enum.filter(actions, &(&1.message_tag == "ping"))
-      assert length(pings) > 0
+      assert pings != []
 
       Enum.each(pings, fn ping ->
         assert ping.source_state == ping.target_state
@@ -396,7 +396,7 @@ defmodule Accord.TLA.CompilerTest do
       # Verify all components present.
       assert is_binary(result.tla)
       assert is_binary(result.cfg)
-      assert length(result.actions) > 0
+      assert result.actions != []
       assert length(result.properties) == 2
       assert result.state_space.module_name == "LockProtocol"
     end

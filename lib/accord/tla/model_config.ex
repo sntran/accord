@@ -45,6 +45,8 @@ defmodule Accord.TLA.ModelConfig do
           sessions: pos_integer()
         }
 
+  # Every field has a meaningful default; an empty config is a valid config.
+  @enforce_keys []
   defstruct domains: %{},
             init: %{},
             symmetry_sets: [],

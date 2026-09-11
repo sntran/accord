@@ -12,7 +12,9 @@ defmodule Accord.ViolationSpanTest do
 
   alias Accord.Monitor
   alias Accord.Monitor.TransitionTable
+  alias Accord.Test.FaultyServer
   alias Accord.Test.ViolationCollector
+  alias Accord.Violation.Report
 
   # Lock server that returns monotonically decreasing fence tokens.
   defmodule DecreasingTokenServer do
@@ -120,7 +122,7 @@ defmodule Accord.ViolationSpanTest do
       assert violation.blame == :server
       assert violation.reply == {:ok, 5}
 
-      formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
+      formatted = Report.format(violation, compiled, strict: true)
       assert formatted =~ "reply {:ok, 5} is not valid"
       assert formatted =~ "where: constraint below does not hold"
       assert formatted =~ "where: constraint defined here"
@@ -162,8 +164,8 @@ defmodule Accord.ViolationSpanTest do
   describe "transition violation spans" do
     test ":invalid_reply — branch span points to reply declaration" do
       compiled = Accord.Test.Lock.Protocol.__compiled__()
-      {:ok, faulty} = Accord.Test.FaultyServer.start_link(Accord.Test.Lock.Server)
-      Accord.Test.FaultyServer.inject_fault(faulty, :wrong_reply_type)
+      {:ok, faulty} = FaultyServer.start_link(Accord.Test.Lock.Server)
+      FaultyServer.inject_fault(faulty, :wrong_reply_type)
 
       {:ok, monitor} =
         Monitor.start_link(compiled, upstream: faulty, violation_policy: :log)
@@ -214,7 +216,7 @@ defmodule Accord.ViolationSpanTest do
       assert arg_span.pattern == "pos_integer()"
 
       # Report highlights the type annotation.
-      formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
+      formatted = Report.format(violation, compiled, strict: true)
       assert formatted =~ "pos_integer()"
 
       assert_search_span_valid(arg_span, compiled.ir.source_file)
@@ -247,7 +249,7 @@ defmodule Accord.ViolationSpanTest do
 
       # The rendered report shows the tracks the guard was evaluated
       # against, so the reader can see why it rejected the message.
-      formatted = Accord.Violation.Report.format(violation, compiled, strict: true)
+      formatted = Report.format(violation, compiled, strict: true)
       assert formatted =~ "tracks when the message arrived: balance = 1000, current_bet = 0"
     end
   end
@@ -341,7 +343,7 @@ defmodule Accord.ViolationSpanTest do
         context: %{timeout_ms: 5000}
       }
 
-      formatted = Accord.Violation.Report.format(violation, compiled)
+      formatted = Report.format(violation, compiled)
 
       # Bracket closing tail should appear in the output.
       assert formatted =~ "╰── violation occurs within this transition"
@@ -356,7 +358,7 @@ defmodule Accord.ViolationSpanTest do
 
       assert {:accord_violation, violation} = Monitor.call(monitor, {:bet, 9999})
 
-      formatted = Accord.Violation.Report.format(violation, compiled)
+      formatted = Report.format(violation, compiled)
 
       # Guard failures resolve to the guard keyword span (inline), not bracket.
       # Inline labels have a ┬ tee on the underline; brackets do not.
@@ -366,15 +368,15 @@ defmodule Accord.ViolationSpanTest do
 
     test "invalid_reply stays inline (does not use bracket)" do
       compiled = Accord.Test.Lock.Protocol.__compiled__()
-      {:ok, faulty} = Accord.Test.FaultyServer.start_link(Accord.Test.Lock.Server)
-      Accord.Test.FaultyServer.inject_fault(faulty, :wrong_reply_type)
+      {:ok, faulty} = FaultyServer.start_link(Accord.Test.Lock.Server)
+      FaultyServer.inject_fault(faulty, :wrong_reply_type)
 
       {:ok, monitor} =
         Monitor.start_link(compiled, upstream: faulty, violation_policy: :log)
 
       assert {:accord_violation, violation} = Monitor.call(monitor, {:acquire, :c1})
 
-      formatted = Accord.Violation.Report.format(violation, compiled)
+      formatted = Report.format(violation, compiled)
 
       # Invalid reply resolves to branch span (inline), not bracket.
       assert formatted =~ "reply type defined here"

@@ -352,7 +352,7 @@ defmodule Accord.ProtocolTest do
       assert length(ir.states[:idle].transitions) == 1
       assert length(ir.states[:running].transitions) == 2
       assert length(ir.states[:paused].transitions) == 2
-      assert length(ir.states[:done].transitions) == 0
+      assert ir.states[:done].transitions == []
     end
   end
 

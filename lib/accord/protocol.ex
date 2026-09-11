@@ -63,7 +63,9 @@ defmodule Accord.Protocol do
 
   alias Accord.IR
   alias Accord.IR.{Branch, State, Transition}
+  alias Accord.Protocol.Const
   alias Accord.TLA.{Files, ModelConfig, SpanMap}
+  alias Pentiment.Span.Position
 
   @tla_modes [:strict, :warn, :off]
 
@@ -309,7 +311,7 @@ defmodule Accord.Protocol do
     caller_line = __CALLER__.line
 
     milliseconds =
-      Accord.Protocol.Const.substitute(
+      Const.substitute(
         milliseconds,
         __CALLER__.module,
         caller_file,
@@ -393,7 +395,7 @@ defmodule Accord.Protocol do
 
     block_span =
       quote do
-        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+        Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
       end
 
     quote do
@@ -650,7 +652,7 @@ defmodule Accord.Protocol do
 
     block_span =
       quote do
-        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+        Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
       end
 
     quote do
@@ -878,7 +880,7 @@ defmodule Accord.Protocol do
 
     block_span =
       quote do
-        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+        Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
       end
 
     quote do
@@ -1094,7 +1096,7 @@ defmodule Accord.Protocol do
     # constants at expansion time, and module bodies are fully expanded
     # before evaluation — an evaluation-time write would be invisible to
     # every later macro. Literal values only (their AST is the value).
-    Accord.Protocol.Const.register(
+    Const.register(
       __CALLER__.module,
       name,
       value,
@@ -1172,7 +1174,7 @@ defmodule Accord.Protocol do
 
     block_span =
       quote do
-        Pentiment.Span.Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
+        Position.new(unquote(caller_line), 1, unquote(block_end_line), 1)
       end
 
     quote do

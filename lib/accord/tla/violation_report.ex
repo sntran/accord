@@ -393,8 +393,7 @@ defmodule Accord.TLA.ViolationReport do
     name
     |> Atom.to_string()
     |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
+    |> Enum.map_join("", &String.capitalize/1)
   end
 
   # -- TypeInvariant Overflow Detection --

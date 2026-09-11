@@ -12,8 +12,8 @@ defmodule Accord.Property.ExerciserTest do
   @moduletag :property
   @moduletag :capture_log
 
-  alias Accord.Test.ProtocolExerciser
   alias Accord.Test.ExerciserFailure
+  alias Accord.Test.ProtocolExerciser
 
   # -- Non-conforming servers for negative testing --
 
