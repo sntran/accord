@@ -1,7 +1,7 @@
 defmodule Accord.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/QuinnWilton/accord"
 
   def project do
@@ -82,7 +82,7 @@ defmodule Accord.MixProject do
       links: %{
         "GitHub" => @source_url
       },
-      files: ~w(lib mix.exs README.md LICENSE .formatter.exs)
+      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md .formatter.exs)
     ]
   end
 
