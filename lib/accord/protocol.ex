@@ -1218,6 +1218,7 @@ defmodule Accord.Protocol do
     span_defs = build_span_defs(tla_result)
     domains_map = build_domains_map(tla_result)
     tla_status = build_tla_status(tla_result)
+    model_config = build_model_config(tla_result)
     monitor_module = Module.concat(env.module, Monitor)
     parent_module = env.module
 
@@ -1238,6 +1239,13 @@ defmodule Accord.Protocol do
       def __compiled__, do: :erlang.binary_to_term(@accord_compiled_bin)
       def __tla_domains__, do: unquote(Macro.escape(domains_map))
       def __tla_status__, do: unquote(Macro.escape(tla_status))
+
+      # The resolved model config that the TLA+ spec was built from. The
+      # native explorer (Accord.Explore) uses the same config, so that
+      # both checkers explore the same finite model. It is nil when no
+      # spec was made.
+      @doc false
+      def __model_config__, do: unquote(Macro.escape(model_config))
 
       @doc false
       unquote_splicing(span_defs)
@@ -1372,6 +1380,9 @@ defmodule Accord.Protocol do
 
   # Status baked into __tla_status__/0 so `mix accord.check` can report
   # truthfully when a spec was never generated (rather than "file not found").
+  defp build_model_config({:ok, %{model_config: config}}), do: config
+  defp build_model_config(_), do: nil
+
   defp build_tla_status({:ok, _result}), do: :ok
   defp build_tla_status({:error, summary}), do: {:error, summary}
   defp build_tla_status(:off), do: :off
@@ -1458,7 +1469,7 @@ defmodule Accord.Protocol do
 
         # Build span map for __tla_span__/1.
         span_map = SpanMap.build(ir, result.actions)
-        {:ok, Map.put(result, :span_map, span_map)}
+        {:ok, result |> Map.put(:span_map, span_map) |> Map.put(:model_config, config)}
 
       {:error, reports} ->
         case mode do
