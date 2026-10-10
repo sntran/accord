@@ -1,10 +1,11 @@
 defmodule Accord.Pass.TLA.BuildActionsTest do
   use ExUnit.Case, async: true
 
+  alias Accord.Explore.Model
   alias Accord.IR
   alias Accord.IR.{Branch, State, Track, Transition}
   alias Accord.Pass.TLA.{BuildActions, BuildStateSpace}
-  alias Accord.TLA.ModelConfig
+  alias Accord.TLA.{Compiler, ModelConfig}
 
   defp build(ir, config \\ %ModelConfig{}) do
     {:ok, ss} = BuildStateSpace.run(ir, config)
@@ -474,14 +475,21 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert report.message =~ "Enum.max"
     end
 
-    test "guard variable not matching a declared argument reports E043" do
-      # The declared name is `chips`; the guard binds `c` in its own head,
-      # which the model cannot connect to the msg_chips existential.
+    test "a guard head name binds the argument at its position" do
+      # The declared name is `chips`; the guard binds `c` at the same
+      # position, so `c` is the msg_chips existential.
       ast = quote(do: fn {:bet, c}, tracks -> c <= tracks.balance end)
+
+      assert {:ok, [action]} = run_actions(guarded_ir(ast))
+      assert "msg_chips =< balance" in action.preconditions
+    end
+
+    test "guard variable bound nowhere reports E043" do
+      ast = quote(do: fn {:bet, _c}, tracks -> d <= tracks.balance end)
 
       assert {:error, [report]} = run_actions(guarded_ir(ast))
       assert report.code == "E043"
-      assert report.message =~ "`c`"
+      assert report.message =~ "`d`"
       assert Enum.any?(report.help, &(&1 =~ ":chips"))
     end
 
@@ -794,6 +802,128 @@ defmodule Accord.Pass.TLA.BuildActionsTest do
       assert {:error, reports} = run_actions(ir)
       codes = reports |> Enum.map(& &1.code) |> Enum.sort()
       assert codes == ["E041", "E043"]
+    end
+  end
+
+  # The model must make the same choices as the monitor. Each test here
+  # has a probe protocol in test/support/probes, which the cross-check
+  # compares with the native explorer.
+  describe "agreement with the monitor" do
+    defp compiled_actions(protocol) do
+      config = Model.model_config(protocol)
+      {:ok, result} = Compiler.compile(protocol.__ir__(), config)
+      Map.new(result.actions, &{&1.name, &1})
+    end
+
+    test "an update reads an argument at its own position after an ignored one" do
+      actions = compiled_actions(Accord.Test.Probe.UnderscoreArgs.Protocol)
+
+      assert actions["PutFromReadyToReady"].primed["x"] == "msg_b"
+      assert actions["EventPushFromReadyToReady"].primed["y"] == "msg_b"
+    end
+
+    test "an update arm for a reply with two values is kept" do
+      actions = compiled_actions(Accord.Test.Probe.TripleReply.Protocol)
+      ok = actions["GetFromReadyToReady0"]
+
+      assert ok.primed["x"] == "reply_a"
+      assert {"reply_a", "1..2"} in ok.existential_vars
+      refute "x" in ok.unchanged
+    end
+
+    test "a call branch runs only when no earlier branch accepts the reply" do
+      actions = compiled_actions(Accord.Test.Probe.OverlapBranches.Protocol)
+
+      assert "reply_n > 1" in actions["ReadFromReadyToHigh"].preconditions
+      assert "~((reply_n > 1))" in actions["ReadFromReadyToLow"].preconditions
+    end
+
+    test "a cast branch runs only when no earlier where: holds" do
+      actions = compiled_actions(Accord.Test.Probe.OverlapCast.Protocol)
+
+      assert "~(msg_id > 1)" in actions["CastOpenFromReadyToAny"].preconditions
+    end
+
+    test "a branch after an equal branch without where: never runs" do
+      ir = %{
+        minimal_ir()
+        | states:
+            Map.update!(minimal_ir().states, :ready, fn state ->
+              [t] = state.transitions
+
+              branches =
+                t.branches ++ [%Branch{reply_type: {:literal, :ok}, next_state: :ready}]
+
+              %{state | transitions: [%{t | branches: branches}]}
+            end)
+      }
+
+      {_ss, actions} = build(ir)
+      second = Enum.find(actions, &(&1.target_state == "ready"))
+
+      assert "FALSE" in second.preconditions
+    end
+  end
+
+  describe "update case arms" do
+    defmodule ArmOrder do
+      use Accord.Protocol, tla: :off
+
+      initial :ready
+
+      track :x, :non_neg_integer, default: 0, domain: 0..3
+
+      state :ready do
+        on :get do
+          branch {:val, v :: non_neg_integer()}, goto: :ready
+
+          update fn :get, reply, tracks ->
+            case reply do
+              _ -> %{tracks | x: 1}
+              {:val, v} -> %{tracks | x: v}
+            end
+          end
+        end
+      end
+    end
+
+    defmodule PartialArm do
+      use Accord.Protocol, tla: :off
+
+      initial :ready
+
+      track :x, :non_neg_integer, default: 0, domain: 0..3
+
+      state :ready do
+        on :get do
+          branch {:val, v :: non_neg_integer()}, goto: :ready
+
+          update fn :get, reply, tracks ->
+            case reply do
+              {:val, 0} -> tracks
+              {:val, v} -> %{tracks | x: v}
+            end
+          end
+        end
+      end
+    end
+
+    test "the first arm in order is taken, as in Elixir" do
+      {:ok, result} =
+        Compiler.compile(
+          ArmOrder.__ir__(),
+          Model.model_config(ArmOrder)
+        )
+
+      [action] = result.actions
+      assert action.primed["x"] == "1"
+    end
+
+    test "an arm that matches only some replies cannot be translated" do
+      config = Model.model_config(PartialArm)
+
+      assert {:error, [report]} = Compiler.compile(PartialArm.__ir__(), config)
+      assert report.code == "E042"
     end
   end
 end

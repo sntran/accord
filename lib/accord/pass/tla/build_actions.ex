@@ -131,7 +131,9 @@ defmodule Accord.Pass.TLA.BuildActions do
           |> Enum.frequencies()
 
         {actions, _seen} =
-          Enum.map_reduce(branches, %{}, fn branch, seen ->
+          branches
+          |> Enum.with_index()
+          |> Enum.map_reduce(%{}, fn {branch, b_idx}, seen ->
             target_state = resolve_next_state(branch.next_state, state_name)
             idx = Map.get(seen, target_state, 0)
             seen = Map.put(seen, target_state, idx + 1)
@@ -139,8 +141,20 @@ defmodule Accord.Pass.TLA.BuildActions do
             suffix =
               if Map.fetch!(target_counts, target_state) > 1, do: idx, else: nil
 
+            # The monitor gives a reply to the first branch that accepts it,
+            # so this branch runs only when no earlier branch accepts the reply.
+            earlier = Enum.take(branches, b_idx)
+
             action =
-              build_call_action(env, state_name, transition, branch, tag, source, suffix)
+              build_call_action(
+                env,
+                state_name,
+                transition,
+                {branch, earlier},
+                tag,
+                source,
+                suffix
+              )
 
             {action, seen}
           end)
@@ -149,7 +163,7 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  defp build_call_action(env, state_name, transition, branch, tag, source, suffix) do
+  defp build_call_action(env, state_name, transition, {branch, earlier}, tag, source, suffix) do
     %{
       ir: ir,
       state_space: state_space,
@@ -175,23 +189,31 @@ defmodule Accord.Pass.TLA.BuildActions do
     preconditions = [~s(#{Sessions.read(sessions, "state")} = "#{source}")]
 
     # Guard condition.
-    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
-
-    # Build bindings for update fn params and additional reply existentials.
-    {reply_existentials, update_bindings} =
-      build_update_bindings(transition, branch, msg_existentials, config)
-
-    # Constraint precondition from where clause.
-    constraint_result =
-      build_constraint(
+    guard_result =
+      compile_guard(
         ir,
-        branch,
-        reply_existentials,
-        update_bindings,
-        config,
+        transition,
+        guard_bindings(transition, param_bindings, msg_existentials),
         track_names,
         sessions
       )
+
+    # One existential for each reply position that the update, the
+    # `where:`, or an earlier branch reads.
+    plan = reply_plan(transition, branch, earlier, config)
+
+    update_bindings =
+      param_bindings
+      |> Map.merge(update_message_bindings(transition, msg_existentials))
+      |> Map.merge(plan.update)
+
+    # Constraint precondition from where clause.
+    constraint_result =
+      compile_branch_constraint(ir, branch, plan.constraint, track_names, sessions)
+
+    # First-match selection: no earlier branch accepts this reply.
+    first_match_result =
+      compile_first_match(ir, transition, branch, plan, track_names, sessions)
 
     # Track updates from update AST.
     track_primed_result =
@@ -199,7 +221,7 @@ defmodule Accord.Pass.TLA.BuildActions do
 
     # Collect errors from every failing site, not just the first.
     errors =
-      [guard_result, constraint_result, track_primed_result]
+      [guard_result, constraint_result, first_match_result, track_primed_result]
       |> Enum.flat_map(fn
         {:error, reports} -> reports
         {:ok, _} -> []
@@ -209,12 +231,12 @@ defmodule Accord.Pass.TLA.BuildActions do
       {:error, errors}
     else
       {:ok, guard_precondition} = guard_result
-      {:ok, {constraint_existentials, constraint_precondition}} = constraint_result
+      {:ok, constraint_precondition} = constraint_result
+      {:ok, first_match_precondition} = first_match_result
       {:ok, track_primed} = track_primed_result
 
       existential_vars =
-        session_existentials(sessions) ++
-          msg_existentials ++ reply_existentials ++ constraint_existentials
+        session_existentials(sessions) ++ msg_existentials ++ plan.existentials
 
       # Primed assignments.
       primed = %{"state" => Sessions.assign(sessions, "state", ~s("#{target}"))}
@@ -241,7 +263,9 @@ defmodule Accord.Pass.TLA.BuildActions do
          source_state: source,
          target_state: target,
          message_tag: tag,
-         preconditions: preconditions ++ guard_precondition ++ constraint_precondition,
+         preconditions:
+           preconditions ++
+             guard_precondition ++ constraint_precondition ++ first_match_precondition,
          existential_vars: existential_vars,
          primed: all_primed,
          unchanged: unchanged,
@@ -365,11 +389,18 @@ defmodule Accord.Pass.TLA.BuildActions do
     {msg_existentials, param_bindings} = build_existentials(transition, config)
     existential_vars = session_existentials(sessions) ++ msg_existentials
 
-    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
+    guard_result =
+      compile_guard(
+        ir,
+        transition,
+        guard_bindings(transition, param_bindings, msg_existentials),
+        track_names,
+        sessions
+      )
 
     # Update values may reference either the declared argument names
     # (param_bindings) or the update fn head's own names (update_bindings).
-    update_bindings = build_event_update_bindings(transition, msg_existentials)
+    update_bindings = update_message_bindings(transition, msg_existentials)
 
     track_primed_result =
       build_track_primed(
@@ -440,8 +471,17 @@ defmodule Accord.Pass.TLA.BuildActions do
     {msg_existentials, param_bindings} = build_existentials(transition, config)
     existential_vars = session_existentials(sessions) ++ msg_existentials
 
-    guard_result = compile_guard(ir, transition, param_bindings, track_names, sessions)
-    update_bindings = build_event_update_bindings(transition, msg_existentials)
+    guard_result =
+      compile_guard(
+        ir,
+        transition,
+        guard_bindings(transition, param_bindings, msg_existentials),
+        track_names,
+        sessions
+      )
+
+    update_bindings = update_message_bindings(transition, msg_existentials)
+    where_env = {param_bindings, msg_existentials}
 
     track_primed_result =
       build_track_primed(
@@ -459,7 +499,9 @@ defmodule Accord.Pass.TLA.BuildActions do
       |> Enum.frequencies()
 
     {actions, _seen} =
-      Enum.map_reduce(transition.branches, %{}, fn branch, seen ->
+      transition.branches
+      |> Enum.with_index()
+      |> Enum.map_reduce(%{}, fn {branch, b_idx}, seen ->
         target_state = resolve_next_state(branch.next_state, state_name)
         target = Atom.to_string(target_state)
         idx = Map.get(seen, target_state, 0)
@@ -467,10 +509,17 @@ defmodule Accord.Pass.TLA.BuildActions do
         suffix = if Map.fetch!(target_counts, target_state) > 1, do: idx, else: nil
 
         where_result =
-          compile_cast_where(ir, transition, branch, param_bindings, track_names, sessions)
+          compile_cast_where(ir, transition, branch, where_env, track_names, sessions)
+
+        # The monitor takes the first branch whose `where:` holds, so this
+        # branch runs only when no earlier `where:` holds.
+        first_match_result =
+          transition.branches
+          |> Enum.take(b_idx)
+          |> compile_cast_first_match(ir, transition, where_env, track_names, sessions)
 
         errors =
-          [guard_result, where_result, track_primed_result]
+          [guard_result, where_result, first_match_result, track_primed_result]
           |> Enum.flat_map(fn
             {:error, reports} -> reports
             {:ok, _} -> []
@@ -482,6 +531,7 @@ defmodule Accord.Pass.TLA.BuildActions do
           else
             {:ok, guard_precondition} = guard_result
             {:ok, where_precondition} = where_result
+            {:ok, first_match_precondition} = first_match_result
             {:ok, track_primed} = track_primed_result
 
             correspondence_primed = build_correspondence_primed(tag, source, target, state_space)
@@ -505,7 +555,7 @@ defmodule Accord.Pass.TLA.BuildActions do
                message_tag: tag,
                preconditions:
                  [~s(#{Sessions.read(sessions, "state")} = "#{source}")] ++
-                   guard_precondition ++ where_precondition,
+                   guard_precondition ++ where_precondition ++ first_match_precondition,
                existential_vars: existential_vars,
                primed: all_primed,
                unchanged: unchanged,
@@ -535,11 +585,12 @@ defmodule Accord.Pass.TLA.BuildActions do
          ir,
          transition,
          %{constraint: %{ast: ast}} = branch,
-         bindings,
+         {param_bindings, msg_existentials},
          track_names,
          sessions
        ) do
     span = branch.span || transition.span
+    bindings = Map.merge(param_bindings, head_bindings(ast, msg_existentials))
 
     case Expr.compile(ast, bindings,
            ir: ir,
@@ -554,17 +605,79 @@ defmodule Accord.Pass.TLA.BuildActions do
     end
   end
 
-  # Event updates are `fn message, tracks` — map the fn head's message
-  # params to the existing message existentials by position.
-  defp build_event_update_bindings(
-         %Transition{update: %{ast: {:fn, _, [{:->, _, [[msg_pat | _], _body]}]}}},
-         existentials
-       ) do
-    msg_params = extract_pattern_params(msg_pat)
-    zip_to_existentials(msg_params, existentials)
+  # A cast branch runs only when no earlier branch's `where:` holds. An
+  # earlier branch without `where:` takes every message, so this branch
+  # never runs.
+  defp compile_cast_first_match([], _ir, _transition, _env, _track_names, _sessions),
+    do: {:ok, []}
+
+  defp compile_cast_first_match(earlier, ir, transition, env, track_names, sessions) do
+    results =
+      Enum.map(earlier, fn branch ->
+        case compile_cast_where(ir, transition, branch, env, track_names, sessions) do
+          {:ok, []} -> {:ok, "FALSE"}
+          {:ok, [tla]} -> {:ok, "~(#{tla})"}
+          error -> error
+        end
+      end)
+
+    collect_preconditions(results)
   end
 
-  defp build_event_update_bindings(_, _), do: %{}
+  defp collect_preconditions(results) do
+    case Enum.flat_map(results, fn
+           {:error, reports} -> reports
+           {:ok, _} -> []
+         end) do
+      [] -> {:ok, for({:ok, tla} <- results, do: tla)}
+      errors -> {:error, errors}
+    end
+  end
+
+  # The message names in an update head (`fn message, ...`), bound to the
+  # message existentials by position. An ignored position (`_a`) binds
+  # nothing, and the names after it keep their own positions.
+  defp update_message_bindings(%Transition{update: %{ast: ast}}, existentials)
+       when not is_nil(ast),
+       do: head_bindings(ast, existentials)
+
+  defp update_message_bindings(_, _), do: %{}
+
+  # The bindings of a guard: the declared argument names, and the names
+  # in the guard head at their positions.
+  defp guard_bindings(%Transition{guard: %{ast: ast}}, param_bindings, existentials)
+       when not is_nil(ast),
+       do: Map.merge(param_bindings, head_bindings(ast, existentials))
+
+  defp guard_bindings(_, param_bindings, _), do: param_bindings
+
+  # The names in the message pattern of a fn head (its first argument),
+  # bound to the message existentials by position.
+  defp head_bindings({:fn, _, [{:->, _, [[msg_pat | _], _body]}]}, existentials) do
+    zip_positions(tuple_positions(msg_pat), Enum.map(existentials, &elem(&1, 0)))
+  end
+
+  defp head_bindings(_, _), do: %{}
+
+  # The variable names of a tagged tuple pattern, by position after the
+  # tag: `{:put, _a, b}` gives `[nil, :b]`. An ignored or non-variable
+  # position is nil.
+  defp tuple_positions({tag, inner}) when is_atom(tag), do: [var_name(inner)]
+  defp tuple_positions({:{}, _meta, [_tag | rest]}), do: Enum.map(rest, &var_name/1)
+  defp tuple_positions(_), do: []
+
+  defp var_name({name, meta, ctx}) when is_atom(name) and is_list(meta) and is_atom(ctx) do
+    if String.starts_with?(Atom.to_string(name), "_"), do: nil, else: name
+  end
+
+  defp var_name(_), do: nil
+
+  defp zip_positions(names, values) do
+    names
+    |> Enum.zip(values)
+    |> Enum.reject(fn {name, _} -> is_nil(name) end)
+    |> Map.new()
+  end
 
   defp build_existentials(
          %Transition{
@@ -861,44 +974,69 @@ defmodule Accord.Pass.TLA.BuildActions do
   defp guarded_clause?({:->, _, [[{:when, _, _}], _body]}), do: true
   defp guarded_clause?(_), do: false
 
+  # Takes the first arm, in order, that matches every reply of the
+  # branch, as Elixir does. An arm that matches only some replies of the
+  # branch (a literal against a general type) makes the case
+  # untranslatable.
   defp resolve_unguarded_case(clauses, reply_type, branch, ctx) do
-    # Find the first matching clause.
-    matching_clause =
-      Enum.find(clauses, fn {:->, _, [[pattern], _body]} ->
-        case_pattern_matches_reply_type?(pattern, reply_type)
-      end)
+    Enum.reduce_while(clauses, {:unsupported, {:case, [], clauses}}, fn
+      {:->, _, [[pattern], body]}, acc ->
+        match =
+          if wildcard_pattern?(pattern),
+            do: true,
+            else: case_pattern_matches_reply_type?(pattern, reply_type)
 
-    case matching_clause do
-      {:->, _, [[_pattern], body]} ->
-        extract_update_body(body, branch, ctx)
-
-      nil ->
-        # No match found — try wildcard clause.
-        wildcard =
-          Enum.find(clauses, fn {:->, _, [[pattern], _body]} ->
-            wildcard_pattern?(pattern)
-          end)
-
-        case wildcard do
-          {:->, _, [[_pattern], body]} ->
-            extract_update_body(body, branch, ctx)
-
-          nil ->
-            {:unsupported, {:case, [], clauses}}
+        case match do
+          true -> {:halt, extract_update_body(body, branch, ctx)}
+          false -> {:cont, acc}
+          :partial -> {:halt, {:unsupported, {:case, [], clauses}}}
         end
-    end
+    end)
   end
 
-  # Checks if a case pattern matches the branch's reply type.
+  # Checks if a case pattern matches the branch's reply type. A tagged
+  # pattern must have the same tag and size. A literal in the pattern must
+  # equal a literal type at that position; against a general type it
+  # matches only some replies, so the arm cannot be selected statically.
   defp case_pattern_matches_reply_type?(pattern, {:literal, value}) do
     pattern == value
   end
 
-  defp case_pattern_matches_reply_type?({tag, _}, {:tagged, tag, _inner}) do
-    true
+  defp case_pattern_matches_reply_type?(pattern, {:tagged, tag, inner}) do
+    types = List.wrap(inner)
+
+    case pattern_parts(pattern) do
+      {^tag, parts} when length(parts) == length(types) ->
+        parts
+        |> Enum.zip(types)
+        |> Enum.reduce_while(true, fn {part, type}, acc ->
+          case part_matches?(part, type) do
+            true -> {:cont, acc}
+            false -> {:halt, false}
+            :partial -> {:cont, :partial}
+          end
+        end)
+
+      _ ->
+        false
+    end
   end
 
   defp case_pattern_matches_reply_type?(_, _), do: false
+
+  defp pattern_parts({tag, inner}) when is_atom(tag), do: {tag, [inner]}
+  defp pattern_parts({:{}, _meta, [tag | rest]}) when is_atom(tag), do: {tag, rest}
+  defp pattern_parts(_), do: nil
+
+  defp part_matches?({name, meta, ctx}, _type)
+       when is_atom(name) and is_list(meta) and is_atom(ctx),
+       do: true
+
+  defp part_matches?(literal, {:literal, value}) when is_atom(literal) or is_integer(literal),
+    do: literal == value
+
+  defp part_matches?(literal, _type) when is_atom(literal) or is_integer(literal), do: :partial
+  defp part_matches?(_, _type), do: :partial
 
   # Checks if a pattern is a wildcard (matches anything).
   defp wildcard_pattern?({:_, _, _}), do: true
@@ -912,79 +1050,228 @@ defmodule Accord.Pass.TLA.BuildActions do
     end)
   end
 
-  # Builds bindings from the update fn's param names to TLA+ identifiers.
-  # Maps message params to existing existential vars and creates new
-  # existential vars for reply params.
-  defp build_update_bindings(%Transition{update: nil}, _branch, _existentials, _config) do
-    {[], %{}}
-  end
+  # -- Reply values --
+  #
+  # A call branch quantifies over the reply values that matter: each
+  # reply position that the update, the branch's `where:`, or an earlier
+  # branch (for first-match selection) reads. Each position has one
+  # existential, so every reader of a position sees the same value.
 
-  defp build_update_bindings(%Transition{update: %{ast: ast}}, branch, existentials, config)
-       when not is_nil(ast) do
-    case ast do
-      {:fn, _, [{:->, _, [[msg_pat, reply_pat, _tracks_var], body]}]} ->
-        # Map update fn's message params to existing existential vars by position.
-        msg_params = extract_pattern_params(msg_pat)
-        msg_bindings = zip_to_existentials(msg_params, existentials)
+  @typep plan :: %{
+           existentials: [{String.t(), String.t()}],
+           update: map(),
+           constraint: map(),
+           earlier: [{Accord.IR.Branch.t(), map(), [String.t()]}]
+         }
 
-        # Create reply existentials either from destructured pattern or from
-        # case-arm patterns when the reply is a bare variable with case dispatch.
-        {reply_existentials, reply_bindings} =
-          if destructured_pattern?(reply_pat) do
-            reply_params = extract_pattern_params(reply_pat)
-            reply_types = extract_reply_inner_types(branch.reply_type)
-            build_reply_existentials(reply_params, reply_types, config)
-          else
-            extract_case_reply_bindings(reply_pat, body, branch, config)
+  @spec reply_plan(Transition.t(), Accord.IR.Branch.t(), [Accord.IR.Branch.t()], ModelConfig.t()) ::
+          plan()
+  defp reply_plan(transition, branch, earlier, config) do
+    types = reply_inner_types(branch.reply_type)
+    update_names = update_reply_positions(transition, branch)
+    constraint_names = constraint_positions(branch.constraint)
+
+    overlapping = Enum.filter(earlier, &overlaps?(&1.reply_type, branch.reply_type))
+
+    earlier_names =
+      Enum.map(overlapping, fn other ->
+        {other, constraint_positions(other.constraint), type_tests(other.reply_type, types)}
+      end)
+
+    tested_positions =
+      for {_other, _names, tests} <- earlier_names, {idx, _test} <- tests, uniq: true, do: idx
+
+    sources = [update_names, constraint_names | Enum.map(earlier_names, &elem(&1, 1))]
+
+    needed =
+      for idx <- 0..(length(types) - 1)//1,
+          idx in tested_positions or Enum.any?(sources, &(Enum.at(&1, idx) != nil)),
+          do: idx
+
+    {vars, existentials, _used} =
+      Enum.reduce(needed, {%{}, [], MapSet.new()}, fn idx, {vars, exs, used} ->
+        name = Enum.find_value(sources, &Enum.at(&1, idx))
+        type = Enum.at(types, idx)
+        base = "reply_#{name || idx}"
+
+        {var, domain} =
+          case type do
+            {:list, _} ->
+              {base <> "_len", "0..#{config.max_list_length || 3}"}
+
+            _ ->
+              {base,
+               config
+               |> ModelConfig.resolve_domain(name || :_, type)
+               |> ModelConfig.domain_to_tla()}
           end
 
-        {reply_existentials, Map.merge(msg_bindings, reply_bindings)}
+        var = if MapSet.member?(used, var), do: "#{var}_#{idx}", else: var
+        binding = if match?({:list, _}, type), do: {:list_length, var}, else: var
+        {Map.put(vars, idx, binding), [{var, domain} | exs], MapSet.put(used, var)}
+      end)
 
-      _ ->
-        {[], %{}}
+    bind = fn names ->
+      names
+      |> Enum.with_index()
+      |> Enum.flat_map(fn
+        {nil, _idx} -> []
+        {name, idx} -> [{name, Map.fetch!(vars, idx)}]
+      end)
+      |> Map.new()
     end
+
+    %{
+      existentials: Enum.reverse(existentials),
+      update: bind.(update_names),
+      constraint: bind.(constraint_names),
+      earlier:
+        Enum.map(earlier_names, fn {other, names, tests} ->
+          {other, bind.(names),
+           Enum.map(tests, fn {idx, test} -> test.(plain_var(vars[idx])) end)}
+        end)
+    }
   end
 
-  defp build_update_bindings(_, _, _, _), do: {[], %{}}
+  defp plain_var({:list_length, var}), do: var
+  defp plain_var(var), do: var
 
-  # When the update fn binds the reply to a bare variable and dispatches via
-  # a case expression, extract reply param bindings from the matching arm's
-  # pattern. This handles patterns like:
-  #
-  #     fn _msg, reply, tracks ->
-  #       case reply do
-  #         {:ok, items} -> %{tracks | buffer_size: tracks.buffer_size - length(items)}
-  #         {:done, items} -> %{tracks | buffer_size: tracks.buffer_size - length(items)}
-  #       end
-  #     end
-  #
-  defp extract_case_reply_bindings(reply_pat, body, branch, config) do
-    reply_var_name = extract_var_name(reply_pat)
+  defp reply_inner_types({:tagged, _tag, inner}), do: List.wrap(inner)
+  defp reply_inner_types(_), do: []
 
-    case find_case_on_var(body, reply_var_name) do
-      {:ok, clauses} ->
-        matching_clause =
-          Enum.find(clauses, fn {:->, _, [[pattern], _body]} ->
-            case_pattern_matches_reply_type?(pattern, branch.reply_type)
-          end)
-
-        case matching_clause do
-          {:->, _, [[pattern], _body]} ->
-            reply_params = extract_pattern_params(pattern)
-            reply_types = extract_reply_inner_types(branch.reply_type)
-            build_reply_existentials(reply_params, reply_types, config)
-
-          nil ->
-            {[], %{}}
+  # The names in the update's reply pattern, by position: from a
+  # destructured head (`fn msg, {:ok, a}, tracks`), or from the arm of
+  # `case reply do` that matches this branch.
+  defp update_reply_positions(%Transition{update: %{ast: ast}}, branch) when not is_nil(ast) do
+    case ast do
+      {:fn, _, [{:->, _, [[_msg, reply_pat, _tracks], body]}]} ->
+        case var_name_any(reply_pat) do
+          nil -> tuple_positions(reply_pat)
+          reply_var -> case_arm_positions(body, reply_var, branch)
         end
 
-      :not_found ->
-        {[], %{}}
+      _ ->
+        []
     end
   end
 
-  defp extract_var_name({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: name
-  defp extract_var_name(_), do: nil
+  defp update_reply_positions(_, _), do: []
+
+  # The names of the `case reply do` arm that matches the branch.
+  defp case_arm_positions(body, reply_var, branch) do
+    case find_case_on_var(body, reply_var) do
+      {:ok, clauses} ->
+        Enum.find_value(clauses, [], fn {:->, _, [[pattern], _]} ->
+          if case_pattern_matches_reply_type?(pattern, branch.reply_type) == true,
+            do: tuple_positions(pattern)
+        end)
+
+      :not_found ->
+        []
+    end
+  end
+
+  defp var_name_any({name, meta, ctx}) when is_atom(name) and is_list(meta) and is_atom(ctx),
+    do: name
+
+  defp var_name_any(_), do: nil
+
+  defp constraint_positions(%{ast: {:fn, _, [{:->, _, [[reply_pat, _tracks], _body]}]}}),
+    do: tuple_positions(reply_pat)
+
+  defp constraint_positions(_), do: []
+
+  # Whether an earlier branch can accept a reply of this branch. Two
+  # literals overlap when they are equal. Two tagged tuples overlap when
+  # they have the same tag and size.
+  defp overlaps?({:literal, a}, {:literal, b}), do: a == b
+
+  defp overlaps?({:tagged, tag, a}, {:tagged, tag, b}),
+    do: length(List.wrap(a)) == length(List.wrap(b))
+
+  defp overlaps?({:literal, _}, {:tagged, _, _}), do: false
+  defp overlaps?({:tagged, _, _}, {:literal, _}), do: false
+  defp overlaps?(earlier, type), do: Accord.IR.Type.subtype?(type, earlier)
+
+  # The positions where an earlier branch's type is narrower than this
+  # branch's type, with a TLA+ test that the value has the earlier type.
+  defp type_tests({:tagged, _tag, inner}, types) do
+    inner
+    |> List.wrap()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {type, idx} ->
+      case type_test(type, Enum.at(types, idx)) do
+        nil -> []
+        test -> [{idx, test}]
+      end
+    end)
+  end
+
+  defp type_tests(_type, _types), do: []
+
+  defp type_test(same, same), do: nil
+  defp type_test(:term, _), do: nil
+  defp type_test({:list, _}, _), do: nil
+  defp type_test({:literal, value}, _), do: &"#{&1} = #{literal_to_tla(value)}"
+  defp type_test(:integer, _), do: &"#{&1} \\in Int"
+  defp type_test(:pos_integer, _), do: &"(#{&1} \\in Int /\\ #{&1} > 0)"
+  defp type_test(:non_neg_integer, _), do: &"#{&1} \\in Nat"
+  defp type_test(:boolean, _), do: &"#{&1} \\in BOOLEAN"
+  # Atoms, strings, maps, and structs are model values or strings in the
+  # model. Only an integer value is outside these types.
+  defp type_test(_, _), do: &"~(#{&1} \\in Int)"
+
+  defp literal_to_tla(true), do: "TRUE"
+  defp literal_to_tla(false), do: "FALSE"
+  defp literal_to_tla(nil), do: "NULL"
+  defp literal_to_tla(n) when is_integer(n), do: Integer.to_string(n)
+  defp literal_to_tla(a) when is_atom(a), do: ~s("#{a}")
+  defp literal_to_tla(s) when is_binary(s), do: ~s("#{s}")
+
+  defp compile_branch_constraint(_ir, %{constraint: nil}, _bindings, _track_names, _sessions),
+    do: {:ok, []}
+
+  defp compile_branch_constraint(
+         ir,
+         %{constraint: %{ast: ast}} = branch,
+         bindings,
+         track_names,
+         sessions
+       ) do
+    case ast do
+      {:fn, _, [{:->, _, [[_reply_pat, _tracks_var], body]}]} ->
+        case Expr.compile(body, bindings,
+               ir: ir,
+               code: "E045",
+               context: "where: constraint",
+               track_names: track_names,
+               span: branch.span,
+               render_field: Sessions.render_field(sessions)
+             ) do
+          {:ok, tla} -> {:ok, [tla]}
+          {:error, reports} -> {:error, reports}
+        end
+
+      _ ->
+        {:ok, []}
+    end
+  end
+
+  # This branch runs only when no earlier branch accepts the reply: for
+  # each earlier branch that can accept it, the reply fails that branch's
+  # type or that branch's `where:`.
+  defp compile_first_match(ir, _transition, _branch, plan, track_names, sessions) do
+    plan.earlier
+    |> Enum.map(fn {other, bindings, tests} ->
+      with {:ok, where} <- compile_branch_constraint(ir, other, bindings, track_names, sessions) do
+        case tests ++ where do
+          [] -> {:ok, "FALSE"}
+          conds -> {:ok, "~(" <> Enum.map_join(conds, " /\\ ", &"(#{&1})") <> ")"}
+        end
+      end
+    end)
+    |> collect_preconditions()
+  end
 
   # Walks the AST to find a case expression whose subject is the given variable.
   defp find_case_on_var({:case, _, [{var_name, _, ctx}, [do: clauses]]}, var_name)
@@ -1002,148 +1289,6 @@ defmodule Accord.Pass.TLA.BuildActions do
   end
 
   defp find_case_on_var(_, _), do: :not_found
-
-  # Compiles a branch constraint (where clause) into a TLA+ precondition.
-  # Maps the constraint fn's reply params to existing reply existential vars,
-  # or creates new ones if the branch has no update fn.
-  defp build_constraint(
-         _ir,
-         %{constraint: nil},
-         _reply_existentials,
-         _update_bindings,
-         _config,
-         _track_names,
-         _sessions
-       ),
-       do: {:ok, {[], []}}
-
-  defp build_constraint(
-         ir,
-         %{constraint: %{ast: ast}, reply_type: reply_type} = branch,
-         reply_existentials,
-         update_bindings,
-         config,
-         track_names,
-         sessions
-       ) do
-    case ast do
-      {:fn, _, [{:->, _, [[reply_pat, _tracks_var], body]}]} ->
-        reply_params = extract_pattern_params(reply_pat)
-
-        {extra_existentials, bindings} =
-          if reply_existentials != [] do
-            # Map constraint params to existing reply existentials by position,
-            # then merge update_bindings to preserve list-length tags.
-            base = zip_to_existentials(reply_params, reply_existentials)
-            {[], enrich_bindings(base, update_bindings)}
-          else
-            # No update fn created reply existentials — create from constraint.
-            reply_types = extract_reply_inner_types(reply_type)
-            build_reply_existentials(reply_params, reply_types, config)
-          end
-
-        case Expr.compile(body, bindings,
-               ir: ir,
-               code: "E045",
-               context: "where: constraint",
-               track_names: track_names,
-               span: branch.span,
-               render_field: Sessions.render_field(sessions)
-             ) do
-          {:ok, tla} -> {:ok, {extra_existentials, [tla]}}
-          {:error, reports} -> {:error, reports}
-        end
-
-      _ ->
-        {:ok, {[], []}}
-    end
-  end
-
-  # Enriches base bindings with tagged forms (e.g. {:list_length, var}) from
-  # the update bindings. When a constraint param maps to the same TLA+ var as
-  # an update param, the richer binding form is used so that length() calls
-  # compile correctly.
-  defp enrich_bindings(base, update_bindings) do
-    # Build reverse lookup: tla_var string → full binding form.
-    reverse =
-      Map.new(update_bindings, fn
-        {_name, {:list_length, tla_var} = binding} -> {tla_var, binding}
-        {_name, tla_var} -> {tla_var, tla_var}
-      end)
-
-    Map.new(base, fn {name, tla_var} ->
-      {name, Map.get(reverse, tla_var, tla_var)}
-    end)
-  end
-
-  # Returns true if the pattern destructures into components (tagged tuple),
-  # false if it's a bare variable binding.
-  defp destructured_pattern?({name, meta, ctx})
-       when is_atom(name) and is_list(meta) and is_atom(ctx),
-       do: false
-
-  defp destructured_pattern?(_), do: true
-
-  # Extracts variable names from pattern AST, skipping tags and underscored vars.
-  defp extract_pattern_params({name, meta, ctx})
-       when is_atom(name) and is_list(meta) and is_atom(ctx) do
-    name_str = Atom.to_string(name)
-    if String.starts_with?(name_str, "_"), do: [], else: [name]
-  end
-
-  defp extract_pattern_params({tag, inner}) when is_atom(tag) do
-    # 2-tuple pattern like {:ok, val} — skip tag, extract from inner.
-    extract_pattern_params(inner)
-  end
-
-  defp extract_pattern_params({:{}, _meta, [_tag | rest]}) do
-    # 3+ tuple pattern — skip tag, extract from rest.
-    Enum.flat_map(rest, &extract_pattern_params/1)
-  end
-
-  defp extract_pattern_params(_), do: []
-
-  # Maps param names to existing existential TLA+ var names by position.
-  defp zip_to_existentials(param_names, existential_vars) do
-    param_names
-    |> Enum.zip(existential_vars)
-    |> Map.new(fn {name, {tla_var, _domain}} -> {name, tla_var} end)
-  end
-
-  # Extracts the inner type atoms from a reply type spec.
-  defp extract_reply_inner_types({:tagged, _tag, inner_type}), do: [inner_type]
-  defp extract_reply_inner_types(_), do: []
-
-  # Creates existential vars for reply parameters.
-  # When a reply parameter has list type, abstracts it to its length
-  # (a non_neg_integer) since TLC can't enumerate variable-length sequences.
-  # The binding marks the variable as a list-length abstraction so that
-  # `length(name)` in guards/updates compiles to just the variable.
-  defp build_reply_existentials(params, types, config) do
-    {vars_rev, bindings} =
-      params
-      |> Enum.zip(types)
-      |> Enum.reduce({[], %{}}, fn {name, type}, {vars_acc, bindings_acc} ->
-        case type do
-          {:list, _elem_type} ->
-            # Abstract list to its length.
-            tla_var = "reply_#{name}_len"
-            max_len = config.max_list_length || 3
-            domain_tla = "0..#{max_len}"
-
-            {[{tla_var, domain_tla} | vars_acc],
-             Map.put(bindings_acc, name, {:list_length, tla_var})}
-
-          _ ->
-            tla_var = "reply_#{name}"
-            domain = ModelConfig.resolve_domain(config, name, type)
-            domain_tla = ModelConfig.domain_to_tla(domain)
-            {[{tla_var, domain_tla} | vars_acc], Map.put(bindings_acc, name, tla_var)}
-        end
-      end)
-
-    {Enum.reverse(vars_rev), bindings}
-  end
 
   # Builds primed assignments for correspondence counter variables.
   defp build_correspondence_primed(tag, source, target, %StateSpace{
