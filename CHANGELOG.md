@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Native explorer and cross-check
+
+- `Accord.Explore` — a native explicit-state model checker. It runs the
+  protocol functions on the finite model, with the rules of the monitor
+  and the search rules of TLC. It checks `TypeInvariant`, invariants,
+  action properties, and deadlock, and gives minimum-length traces. It
+  does not check liveness yet.
+- `mix accord.explore` — checks protocols with the explorer. Java is not
+  necessary.
+- `Accord.CrossCheck` and `mix accord.crosscheck` — compare the explorer
+  with TLC: the state graph, the symmetry-reduced count, the verdict of
+  each safety check, and the replay of each counterexample in the other
+  checker. `--mutants N` adds IR mutants (`Accord.CrossCheck.Mutant`);
+  `--random N` checks random protocols
+  (`Accord.CrossCheck.RandomProtocol`).
+- Each protocol module has `__model_config__/0`: the resolved model
+  config of its spec.
+- The first cross-check runs found five differences between the monitor
+  and the TLA+ spec. Probe protocols in `test/support/probes/` pin them.
+  See `docs/cross-check.md` and ADR-012.
+
 ## 0.2.0 — 2026-09-11
 
 The redesign release. 0.1.0 was a runtime monitor with a TLA+ emitter

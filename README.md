@@ -195,6 +195,28 @@ output.
 TLC requires Java and `tla2tools.jar`. Set the `TLA2TOOLS_JAR` environment
 variable, place it at `~/.tla/tla2tools.jar`, or in the project root.
 
+## Native explorer and cross-check
+
+`mix accord.explore` checks the same finite model without Java. The
+explorer (`Accord.Explore`) runs the guards, updates, and `where:`
+constraints of the protocol directly, with the rules of the monitor. It
+checks the safety properties and deadlock; it does not check liveness
+yet.
+
+`mix accord.crosscheck` runs the explorer and TLC on each protocol and
+compares the state graphs, the verdicts, and the counterexamples. A
+difference shows a defect in the explorer or in the TLA+ translation.
+With `--mutants N` and `--random N`, it also checks mutants and random
+protocols. See [`docs/cross-check.md`](docs/cross-check.md), which also
+lists the differences between the monitor and the spec that the first
+runs found.
+
+```
+mix accord.explore                     # check all protocols, no Java
+mix accord.crosscheck                  # compare with TLC
+mix accord.crosscheck --random 50      # 50 random protocols
+```
+
 ## Rolling upgrades
 
 Servers and clients deploy at different times; for a window, old clients

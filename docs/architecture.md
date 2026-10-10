@@ -98,6 +98,15 @@ depends on nothing internal to accord2 except pentiment for span types.
 
 The TLA+ files are written to `_build/accord/` at compile time.
 
+## Native explorer
+
+The IR also feeds a third consumer: the native explorer
+(`Accord.Explore`). It is a model checker that runs the protocol
+functions directly on the finite model. It reads the IR and the model
+config only. It does not use the TLA+ passes, so a defect in the
+translation makes the explorer and TLC disagree. `Accord.CrossCheck`
+compares the two. See ADR-012 and `docs/cross-check.md`.
+
 ## Blame assignment semantics
 
 When the monitor detects a protocol violation, it assigns blame to one of three
