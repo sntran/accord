@@ -58,6 +58,24 @@ defmodule Accord.BoundaryTest do
     end
   end
 
+  # The cross-check compares the explorer with TLC. A defect in the
+  # TLA+ translation shows only if the explorer does not use it.
+  describe "explorer independence" do
+    test "the explorer does not depend on the TLA+ passes", %{boundary: boundary} do
+      refute_calls(boundary,
+        from: under(Accord.Explore),
+        to: under(Accord.Pass)
+      )
+    end
+
+    test "the explorer does not depend on Monitor", %{boundary: boundary} do
+      refute_calls(boundary,
+        from: under(Accord.Explore),
+        to: under(Accord.Monitor)
+      )
+    end
+  end
+
   describe "IR independence" do
     test "IR does not depend on passes", %{boundary: boundary} do
       refute_calls(boundary,
