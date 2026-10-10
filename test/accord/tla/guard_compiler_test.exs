@@ -109,6 +109,11 @@ defmodule Accord.TLA.GuardCompilerTest do
       assert {:ok, "(x - 1)", _} = GuardCompiler.compile(ast)
     end
 
+    test "unary minus" do
+      assert {:ok, "-(2)", _} = GuardCompiler.compile(quote(do: -2))
+      assert {:ok, "(x - -(y))", _} = GuardCompiler.compile(quote(do: x - -y))
+    end
+
     test "multiplication" do
       ast = quote(do: x * 2)
       assert {:ok, "(x * 2)", _} = GuardCompiler.compile(ast)
@@ -116,12 +121,24 @@ defmodule Accord.TLA.GuardCompilerTest do
 
     test "integer division" do
       ast = quote(do: div(x, 2))
-      assert {:ok, "(x \\div 2)", _} = GuardCompiler.compile(ast)
+      # Elixir rounds toward zero, so the sign comes from the operands.
+      assert {:ok,
+              "(IF x >= 0 THEN ((IF x >= 0 THEN x ELSE -(x)) \\div 2) ELSE -((IF x >= 0 THEN x ELSE -(x)) \\div 2))",
+              _} =
+               GuardCompiler.compile(ast)
+
+      ast = quote(do: div(x, y))
+
+      assert {:ok, "(IF (x >= 0) = (y >= 0) THEN " <> _, _} = GuardCompiler.compile(ast)
     end
 
     test "remainder" do
       ast = quote(do: rem(x, 3))
-      assert {:ok, "(x % 3)", _} = GuardCompiler.compile(ast)
+      # The result has the sign of the dividend, as in Elixir.
+      assert {:ok,
+              "(IF x >= 0 THEN ((IF x >= 0 THEN x ELSE -(x)) % 3) ELSE -((IF x >= 0 THEN x ELSE -(x)) % 3))",
+              _} =
+               GuardCompiler.compile(ast)
     end
   end
 

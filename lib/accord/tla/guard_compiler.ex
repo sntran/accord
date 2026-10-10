@@ -173,6 +173,15 @@ defmodule Accord.TLA.GuardCompiler do
     {"(#{l} #{tla_op} #{r})", acc}
   end
 
+  # -- Unary minus and plus: `-x`, `-2` --
+
+  defp do_compile({:-, _meta, [arg]}, bindings, acc) do
+    {a, acc} = do_compile(arg, bindings, acc)
+    {"-(#{a})", acc}
+  end
+
+  defp do_compile({:+, _meta, [arg]}, bindings, acc), do: do_compile(arg, bindings, acc)
+
   # -- Boolean operators --
 
   defp do_compile({:and, _meta, [left, right]}, bindings, acc) do
@@ -226,16 +235,25 @@ defmodule Accord.TLA.GuardCompiler do
     {"IF #{a} >= 0 THEN #{a} ELSE -(#{a})", acc}
   end
 
+  # Elixir's `div/2` and `rem/2` round toward zero: `div(-1, 2) == 0` and
+  # `rem(-1, 2) == -1`. TLA+ `\\div` and `%` round down: `-1 \\div 2 = -1`
+  # and `-1 % 2 = 1`. Both are computed on the absolute values, and the
+  # sign is set as Elixir sets it.
   defp do_compile({:div, _meta, [left, right]}, bindings, acc) do
     {l, acc} = do_compile(left, bindings, acc)
     {r, acc} = do_compile(right, bindings, acc)
-    {"(#{l} \\div #{r})", acc}
+    q = "(#{tla_abs(l)} \\div #{tla_abs(r)})"
+
+    if r =~ ~r/^\d+$/,
+      do: {"(IF #{l} >= 0 THEN #{q} ELSE -#{q})", acc},
+      else: {"(IF (#{l} >= 0) = (#{r} >= 0) THEN #{q} ELSE -#{q})", acc}
   end
 
   defp do_compile({:rem, _meta, [left, right]}, bindings, acc) do
     {l, acc} = do_compile(left, bindings, acc)
     {r, acc} = do_compile(right, bindings, acc)
-    {"(#{l} % #{r})", acc}
+    m = "(#{tla_abs(l)} % #{tla_abs(r)})"
+    {"(IF #{l} >= 0 THEN #{m} ELSE -#{m})", acc}
   end
 
   # -- fn expressions (extract body) --
@@ -255,6 +273,12 @@ defmodule Accord.TLA.GuardCompiler do
 
   defp do_compile(ast, _bindings, acc) do
     {"TRUE", add_unsupported(acc, ast)}
+  end
+
+  defp tla_abs(expr) do
+    if expr =~ ~r/^\d+$/,
+      do: expr,
+      else: "(IF #{expr} >= 0 THEN #{expr} ELSE -(#{expr}))"
   end
 
   defp compile_len(arg, bindings, acc) do
