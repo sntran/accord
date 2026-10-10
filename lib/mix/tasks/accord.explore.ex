@@ -5,8 +5,8 @@ defmodule Mix.Tasks.Accord.Explore do
 
   The explorer (`Accord.Explore`) does a breadth-first search over the
   same finite model as the TLA+ spec. It checks `TypeInvariant`, the
-  invariants, the action properties, and deadlock. It does not check
-  liveness yet. Use `mix accord.check` (TLC) for liveness.
+  invariants, the action properties, deadlock, and liveness under the
+  fairness of each liveness property.
 
   ## Usage
 
@@ -89,6 +89,7 @@ defmodule Mix.Tasks.Accord.Explore do
         :error -> "    ✗ evaluation error: #{violation.message}"
         :action -> "    ✗ action property #{violation.name} is violated"
         :invariant -> "    ✗ invariant #{violation.name} is violated"
+        :liveness -> "    ✗ liveness property #{violation.name} is violated"
       end
 
     steps =
@@ -98,7 +99,19 @@ defmodule Mix.Tasks.Accord.Explore do
         "      #{i}. #{format_label(step.label)} #{format_state(model, step.state)}"
       end)
 
-    Enum.join([title | steps], "\n")
+    loop =
+      case Map.get(violation, :loop) do
+        nil ->
+          []
+
+        :stutter ->
+          ["      … stays in state #{length(violation.trace)} forever"]
+
+        %{to: to, label: label} ->
+          ["      … #{format_label(label)} goes back to state #{to}, forever"]
+      end
+
+    Enum.join([title | steps] ++ loop, "\n")
   end
 
   defp format_label(nil), do: "initial"

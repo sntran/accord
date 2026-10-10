@@ -3,13 +3,14 @@ defmodule Accord.Explore do
   A native explicit-state model checker for Accord protocols.
 
   The explorer does a breadth-first search over `Accord.Explore.Model`.
-  It does not use Java or TLC. It checks the same safety properties as
-  the generated TLA+ spec:
+  It does not use Java or TLC. It checks the same properties as the
+  generated TLA+ spec:
 
   - `TypeInvariant`, and each invariant, local invariant, forbidden,
     bounded, correspondence, exclusive, and distinct check.
   - Each action property, on each step that changes a track.
   - Deadlock: a state with no successor.
+  - Each liveness property, `trigger ~> target`, under its fairness.
 
   The search follows the rules of TLC, so that the two checkers give the
   same results:
@@ -22,8 +23,12 @@ defmodule Accord.Explore do
   - For each property, the search keeps the first violation. Because the
     search is breadth-first, this trace has the minimum length.
 
-  Liveness is not checked yet. The result lists each check that the
-  explorer did not do in `skipped`.
+  After the search, the explorer checks each liveness property on the
+  full state graph, under the fairness of the property (see
+  `Accord.Explore.Liveness`). A liveness violation is a lasso: a trace
+  and a loop. Liveness is not checked when the search stops early or
+  uses symmetry. The result lists each check that the explorer did not
+  do in `skipped`.
 
   ## Example
 
@@ -31,7 +36,7 @@ defmodule Accord.Explore do
       result.violations["TypeInvariant"]
   """
 
-  alias Accord.Explore.Model
+  alias Accord.Explore.{Liveness, Model}
   alias Accord.Explore.Model.EvaluationFailure
 
   defmodule Result do
@@ -146,21 +151,58 @@ defmodule Accord.Explore do
       end)
 
     acc = loop(ctx, acc)
+    {liveness_violations, liveness_skipped} = check_liveness(ctx, acc)
 
     checked =
       Enum.map(model.invariants ++ model.action_checks, & &1.name) ++
-        if(deadlock, do: ["Deadlock"], else: [])
+        if(deadlock, do: ["Deadlock"], else: []) ++
+        (Enum.map(model.liveness, & &1.name) -- Enum.map(liveness_skipped, &elem(&1, 0)))
 
     %Result{
       distinct: map_size(acc.seen),
       depth: acc.depth,
-      violations: acc.violations,
+      violations: Map.merge(acc.violations, liveness_violations),
       checked: checked,
-      skipped: model.skipped,
+      skipped: model.skipped ++ liveness_skipped,
       states: if(Keyword.get(opts, :collect_states, false), do: Map.keys(acc.seen)),
       complete: not acc.truncated,
       model: model
     }
+  end
+
+  # Liveness needs the full graph of the model. It is not checked when
+  # the search stopped early, or with symmetry (TLC also turns symmetry off
+  # for a spec with liveness).
+  defp check_liveness(%{model: %{liveness: []}}, _acc), do: {%{}, []}
+
+  defp check_liveness(ctx, acc) do
+    reason =
+      cond do
+        acc.truncated -> "the model has more states than max_states"
+        acc.halted -> "the search stopped early"
+        ctx.symmetry -> "liveness is not checked with symmetry"
+        true -> nil
+      end
+
+    if reason do
+      {%{}, Enum.map(ctx.model.liveness, &{&1.name, reason})}
+    else
+      violations =
+        for check <- ctx.model.liveness,
+            lasso = Liveness.check(ctx.model, acc.seen, check),
+            into: %{} do
+          {check.name,
+           %{
+             kind: :liveness,
+             name: check.name,
+             message: nil,
+             trace: lasso.trace,
+             loop: lasso.loop
+           }}
+        end
+
+      {violations, []}
+    end
   end
 
   defp loop(ctx, acc) do

@@ -46,7 +46,30 @@ defmodule Accord.Explore.Model do
           required(:from) => atom() | nil,
           required(:to) => atom() | nil,
           optional(:message) => term(),
-          optional(:reply) => term()
+          optional(:reply) => term(),
+          optional(:tag) => atom(),
+          optional(:action) => action_key()
+        }
+
+  @typedoc """
+  The TLA+ action that makes a step: `{state, index, branch}` for a
+  transition of a state (the branch index is 0 for a step without
+  branches), `{:timeout, state}` for a state timeout, or `:terminating`.
+  """
+  @type action_key ::
+          {atom(), non_neg_integer(), non_neg_integer()} | {:timeout, atom()} | :terminating
+
+  @typedoc """
+  A liveness check: `trigger ~> target` for each session, under the
+  fairness of the check. `fairness` is a list of `{:weak | :strong,
+  action}`, where `action` is an `action_key()` or `:next` (any step that
+  changes the state).
+  """
+  @type liveness :: %{
+          name: String.t(),
+          trigger: atom(),
+          target: atom(),
+          fairness: [{:weak | :strong, action_key() | :next}]
         }
 
   @type check :: %{
@@ -68,6 +91,7 @@ defmodule Accord.Explore.Model do
           constraint: [(state() -> boolean())],
           invariants: [check()],
           action_checks: [check()],
+          liveness: [liveness()],
           skipped: [{String.t(), String.t()}],
           model_values: MapSet.t(atom())
         }
@@ -86,6 +110,7 @@ defmodule Accord.Explore.Model do
     constraint: [],
     invariants: [],
     action_checks: [],
+    liveness: [],
     skipped: [],
     model_values: MapSet.new()
   ]
@@ -191,8 +216,14 @@ defmodule Accord.Explore.Model do
         transitions =
           if state.terminal, do: state.transitions, else: state.transitions ++ ir.anystate
 
-        built = Enum.map(transitions, &build_action(model, name, &1))
-        {name, built ++ timeout_action(state)}
+        # Each action has its index in the state, so that a step names the
+        # TLA+ action that makes it (for fairness).
+        built =
+          (Enum.map(transitions, &build_action(model, name, &1)) ++ timeout_action(state))
+          |> Enum.with_index()
+          |> Enum.map(fn {action, idx} -> Map.put(action, :index, idx) end)
+
+        {name, built}
       end
 
     %{model | actions: actions}
@@ -518,6 +549,7 @@ defmodule Accord.Explore.Model do
       model
       | invariants: [type_inv | Enum.filter(checks, &(&1.kind == :invariant))],
         action_checks: Enum.filter(checks, &(&1.kind == :action)),
+        liveness: Enum.filter(checks, &(&1.kind == :liveness)),
         skipped: Enum.reverse(skipped)
     }
   end
@@ -650,8 +682,22 @@ defmodule Accord.Explore.Model do
      }}
   end
 
-  defp build_check(_model, prop, %{kind: :liveness}),
-    do: {:skip, camelize(prop), "liveness is not supported yet"}
+  defp build_check(model, prop, %{kind: :liveness, spec: spec}) do
+    case {spec.trigger, spec.target} do
+      {{:in_state, trigger}, {:in_state, target}} ->
+        {:check,
+         %{
+           name: camelize(prop),
+           kind: :liveness,
+           trigger: trigger,
+           target: target,
+           fairness: fairness(model, spec)
+         }}
+
+      _ ->
+        {:skip, camelize(prop), "liveness supports only in_state predicates"}
+    end
+  end
 
   defp build_check(_model, prop, %{kind: kind}) when kind in [:ordered, :precedence],
     do: {:skip, camelize(prop), "#{kind} is runtime-only"}
@@ -659,6 +705,43 @@ defmodule Accord.Explore.Model do
   defp build_check(_model, _prop, _check), do: :none
 
   defp truthy?(value), do: value not in [nil, false]
+
+  # The fairness of a liveness check, as the TLA+ spec states it. Without
+  # `assuming:`, weak fairness on all of Next. With `assuming:`, weak (or
+  # strong) fairness on each action of each named message tag: one action
+  # for each branch. A state timeout is always weakly fair: a real timer
+  # always fires.
+  defp fairness(model, spec) do
+    declared =
+      case Map.get(spec, :assuming) do
+        nil ->
+          [{:weak, :next}]
+
+        tags ->
+          strength = if Map.get(spec, :fairness) == :strong, do: :strong, else: :weak
+
+          for {state, actions} <- Enum.sort(model.actions),
+              action <- actions,
+              action.kind != :timeout,
+              action.tag in tags,
+              key <- action_keys(state, action),
+              do: {strength, key}
+      end
+
+    timeouts =
+      for {state, actions} <- Enum.sort(model.actions),
+          %{kind: :timeout} <- actions,
+          do: {:weak, {:timeout, state}}
+
+    Enum.uniq(declared ++ timeouts)
+  end
+
+  defp action_keys(state, %{kind: kind, transition: t, index: idx})
+       when kind in [:call, :cast_branches] do
+    for b <- 0..(length(t.branches) - 1)//1, do: {state, idx, b}
+  end
+
+  defp action_keys(state, %{index: idx}), do: [{state, idx, 0}]
 
   # Calls `fun.(tracks, session)` for each session, where `tracks` has the
   # session tracks and the shared tracks.
@@ -794,18 +877,37 @@ defmodule Accord.Explore.Model do
       end)
 
     if Enum.all?(session_list, fn {name, _, _} -> MapSet.member?(model.terminal, name) end) do
-      steps ++ [{%{session: 1, kind: :terminating, from: nil, to: nil}, state}]
+      label = %{session: 1, kind: :terminating, from: nil, to: nil, action: :terminating}
+      steps ++ [{label, state}]
     else
       steps
     end
   end
 
-  defp action_steps(_model, state, i, name, %{kind: :stutter, tag: tag}) do
-    [{%{session: i, kind: :cast, from: name, to: name, message: tag}, state}]
+  defp action_steps(_model, state, i, name, %{kind: :stutter, tag: tag} = action) do
+    label = %{
+      session: i,
+      kind: :cast,
+      from: name,
+      to: name,
+      message: tag,
+      tag: tag,
+      action: {name, action.index, 0}
+    }
+
+    [{label, state}]
   end
 
   defp action_steps(model, state, i, name, %{kind: :timeout, tag: tag, to: target}) do
-    label = %{session: i, kind: :timeout, from: name, to: target}
+    label = %{
+      session: i,
+      kind: :timeout,
+      from: name,
+      to: target,
+      tag: tag,
+      action: {:timeout, name}
+    }
+
     [{label, move(model, state, i, tag, name, target, session_tracks(model, state, i))}]
   end
 
@@ -815,7 +917,15 @@ defmodule Accord.Explore.Model do
     tracks = session_tracks(model, state, i)
 
     for msg <- action.messages,
-        label = %{session: i, kind: kind, from: name, to: target, message: msg},
+        label = %{
+          session: i,
+          kind: kind,
+          from: name,
+          to: target,
+          message: msg,
+          tag: action.tag,
+          action: {name, action.index, 0}
+        },
         guard?(t.guard, [msg, tracks], label) do
       new_tracks = update(t.update, [msg, tracks], tracks, label)
       {label, move(model, state, i, action.tag, name, target, new_tracks)}
@@ -827,12 +937,13 @@ defmodule Accord.Explore.Model do
     tracks = session_tracks(model, state, i)
 
     for msg <- action.messages,
-        label = %{session: i, kind: :cast, from: name, to: nil, message: msg},
+        label = %{session: i, kind: :cast, from: name, to: nil, message: msg, tag: action.tag},
         guard?(t.guard, [msg, tracks], label),
-        branch = Enum.find(t.branches, &cast_branch?(&1, msg, tracks, label)),
-        branch != nil do
+        b_idx = Enum.find_index(t.branches, &cast_branch?(&1, msg, tracks, label)),
+        b_idx != nil do
+      branch = Enum.at(t.branches, b_idx)
       target = resolve(branch.next_state, name)
-      label = %{label | to: target}
+      label = label |> Map.put(:to, target) |> Map.put(:action, {name, action.index, b_idx})
       new_tracks = update(t.update, [msg, tracks], tracks, label)
       {label, move(model, state, i, action.tag, name, target, new_tracks)}
     end
@@ -843,13 +954,20 @@ defmodule Accord.Explore.Model do
     tracks = session_tracks(model, state, i)
 
     for msg <- action.messages,
-        label = %{session: i, kind: :call, from: name, to: nil, message: msg},
+        label = %{session: i, kind: :call, from: name, to: nil, message: msg, tag: action.tag},
         guard?(t.guard, [msg, tracks], label),
         reply <- action.replies,
-        branch = select_branch(t.branches, reply, tracks),
-        branch != nil do
+        b_idx = select_branch(t.branches, reply, tracks),
+        b_idx != nil do
+      branch = Enum.at(t.branches, b_idx)
       target = resolve(branch.next_state, name)
-      label = label |> Map.put(:reply, reply) |> Map.put(:to, target)
+
+      label =
+        label
+        |> Map.put(:reply, reply)
+        |> Map.put(:to, target)
+        |> Map.put(:action, {name, action.index, b_idx})
+
       new_tracks = update(t.update, [msg, reply, tracks], tracks, label)
       {label, move(model, state, i, action.tag, name, target, new_tracks)}
     end
@@ -858,7 +976,7 @@ defmodule Accord.Explore.Model do
   # The monitor rule: the first branch whose reply type matches and whose
   # `where:` constraint holds. A constraint that raises does not hold.
   defp select_branch(branches, reply, tracks) do
-    Enum.find(branches, fn branch ->
+    Enum.find_index(branches, fn branch ->
       type_match?(branch.reply_type, reply) and constraint?(branch.constraint, reply, tracks)
     end)
   end

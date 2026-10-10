@@ -98,6 +98,49 @@ defmodule Accord.ExploreTest do
     end
   end
 
+  describe "liveness" do
+    test "a loop that never reaches the target is a lasso" do
+      result = Explore.run(Accord.Test.LivenessUnfair.Protocol)
+
+      assert %{kind: :liveness, trace: [_, _], loop: %{to: 1, label: %{reply: :continue}}} =
+               result.violations["EventuallyDone"]
+    end
+
+    test "a state where no fair action can run ends the lasso" do
+      result = Explore.run(Accord.Test.LivenessFail.Protocol)
+      assert %{loop: :stutter} = result.violations["EventuallyDone"]
+    end
+
+    test "each property has its own fairness" do
+      result = Explore.run(Accord.Test.FairnessLeak.Protocol)
+
+      assert "FinishesWhenFinishIsFair" in result.checked
+      refute Map.has_key?(result.violations, "FinishesWhenFinishIsFair")
+      assert %{kind: :liveness} = result.violations["FinishesWhenRetryIsFair"]
+    end
+
+    test "strong fairness: an action enabled infinitely often must run" do
+      result = Explore.run(Accord.Test.Probe.StrongFairness.Protocol)
+
+      assert %{kind: :liveness} = result.violations["WeakFinish"]
+      refute Map.has_key?(result.violations, "StrongFinish")
+    end
+
+    test "a state timeout is weakly fair without assuming:" do
+      result = Explore.run(Accord.Test.Probe.TimeoutFairness.Protocol)
+
+      refute Map.has_key?(result.violations, "TimerFires")
+      assert %{loop: :stutter} = result.violations["OpenEnds"]
+    end
+
+    test "liveness needs the full model" do
+      result = Explore.run(Accord.Examples.CircuitBreaker.Protocol, max_states: 3)
+
+      assert {"BreakerRecovers", "the model has more states than max_states"} in result.skipped
+      refute "BreakerRecovers" in result.checked
+    end
+  end
+
   describe "evaluation errors" do
     defmodule Raising do
       use Accord.Protocol, tla: :off
