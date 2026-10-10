@@ -662,6 +662,22 @@ defmodule Accord.ProtocolTest do
       end
     end
 
+    test "an unknown state option raises CompileError" do
+      assert_raise CompileError, ~r/unknown state option :state_timeout/, fn ->
+        defmodule BadStateOption do
+          use Accord.Protocol
+
+          initial :waiting
+
+          state :waiting, state_timeout: {100, :done} do
+            on :poll, reply: :ok, goto: :waiting
+          end
+
+          state :done, terminal: true
+        end
+      end
+    end
+
     test "anystate with goto raises CompileError" do
       assert_raise CompileError, ~r/anystate transitions cannot specify goto/, fn ->
         defmodule BadAnystateGoto do

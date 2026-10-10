@@ -204,6 +204,27 @@ defmodule Accord.Protocol do
     end
   end
 
+  # An unknown option would be dropped with no message (a state timeout
+  # is a `state_timeout` call in the block, not an option).
+  @state_opts [:terminal]
+
+  @doc false
+  def validate_state_opts!(opts, caller) do
+    case Keyword.keys(opts) -- @state_opts do
+      [] ->
+        :ok
+
+      unknown ->
+        raise CompileError,
+          file: caller.file,
+          line: caller.line,
+          description:
+            "unknown state option #{Enum.map_join(unknown, ", ", &inspect/1)} " <>
+              "(the only option is :terminal; declare a timeout with " <>
+              "`state_timeout ms, goto: :state` in the state block)"
+    end
+  end
+
   @doc """
   Defines a state with transitions.
 
@@ -245,6 +266,7 @@ defmodule Accord.Protocol do
   end
 
   defmacro state(name, opts) when is_list(opts) do
+    validate_state_opts!(opts, __CALLER__)
     terminal = Keyword.get(opts, :terminal, false)
     span = span_ast(__CALLER__)
 
@@ -261,6 +283,7 @@ defmodule Accord.Protocol do
   Defines a state with options and a transitions block.
   """
   defmacro state(name, opts, do: block) when is_list(opts) do
+    validate_state_opts!(opts, __CALLER__)
     terminal = Keyword.get(opts, :terminal, false)
     span = span_ast(__CALLER__)
 
