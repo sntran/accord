@@ -214,11 +214,14 @@ states.
 and sets the sign as Elixir does. Probe:
 `Accord.Test.Probe.DivRem.Protocol`.
 
-### Two smaller defects
+### Three smaller defects
 
 - Unary minus (`-x`, and a negative literal such as `-2` in an
   expression) had no translation. It was a loud E041 error. It now
   translates to `-(x)`.
+- `Accord.TLA.TLCParser` read the first count line of TLC output. A long
+  run prints progress lines with interim counts first, so `mix
+  accord.check` could report too few states. It now reads the last line.
 - An unknown `state` option, such as `state :waiting, state_timeout: ...`,
   was dropped with no message. It is now a compile error that tells you
   to use `state_timeout ms, goto: :state` in the state block.

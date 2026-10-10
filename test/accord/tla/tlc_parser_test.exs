@@ -30,6 +30,21 @@ defmodule Accord.TLA.TLCParserTest do
       assert stats.depth == 5
     end
 
+    test "a long run reads the final counts, not a progress line" do
+      output = """
+      Starting... (2026-10-09 23:25:15)
+      Progress(12) at 2026-10-09 23:25:27: 222,723 states generated (222,723 s/min), 6,290 distinct states found (6,290 ds/min), 1,919 states left on queue.
+      Model checking completed. No error has been found.
+      613682 states generated, 11664 distinct states found, 0 states left on queue.
+      The depth of the complete state graph search is 17.
+      """
+
+      assert {:ok, stats} = TLCParser.parse(output)
+      assert stats.states_generated == 613_682
+      assert stats.distinct_states == 11_664
+      assert stats.depth == 17
+    end
+
     test "a clean run carries no warnings" do
       assert {:ok, stats} = TLCParser.parse(@success_output)
       assert stats.warnings == []

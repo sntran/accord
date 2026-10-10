@@ -43,6 +43,8 @@ match the monitor. All are fixed; probe protocols in
   spec rounded down.
 - Unary minus now translates. An unknown `state` option is now a compile
   error, not dropped.
+- `mix accord.check` reads the final TLC counts. Before, a long run could
+  report the counts of a progress line.
 
 ## 0.2.0 — 2026-09-11
 

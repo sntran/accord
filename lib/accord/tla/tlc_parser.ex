@@ -288,8 +288,12 @@ defmodule Accord.TLA.TLCParser do
     end)
   end
 
+  # The last match: a long run also prints progress lines with interim
+  # counts ("Progress(12) at ...: 6,290 distinct states found") before
+  # the final counts.
   defp extract_stat(lines, regex) do
     lines
+    |> Enum.reverse()
     |> Enum.find_value(fn line ->
       case Regex.run(regex, line) do
         [_, value] ->
