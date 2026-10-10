@@ -49,8 +49,48 @@ The search is breadth-first, and it follows the rules of TLC:
 
 The explorer checks `TypeInvariant`, invariants, local invariants,
 `forbidden`, `bounded`, unkeyed `correspondence`, `exclusive`,
-`distinct`, action properties, and deadlock. It does not check liveness
-yet.
+`distinct`, action properties, deadlock, and liveness.
+
+### Liveness
+
+A liveness property `liveness in_state(:a), leads_to: in_state(:b)` is
+checked for each session, under the fairness of that property, as in the
+TLA+ spec:
+
+- Without `assuming:`, weak fairness on all steps.
+- With `assuming: [:tag, ...]`, weak fairness (or strong, with
+  `fairness: :strong`) on each action of each named tag. Each branch of
+  a call is one action.
+- A state timeout is always weakly fair: a real timer always fires.
+
+Fairness is about steps that change the state. A behavior can stay in a
+state forever when no fair action can change it.
+
+The check runs after the search, on the full state graph inside the
+state constraint (`Accord.Explore.Liveness`). It looks for a fair
+behavior that reaches a state where the trigger holds and the target
+does not, and where the target then never holds. Such a behavior ends
+in a state where no fair action can run, or loops forever in a strongly
+connected set of states that satisfies each fairness condition. The
+check finds these sets with Tarjan's algorithm; for strong fairness, it
+removes the states where the action can run and searches again (the
+Emerson-Lei method).
+
+A violation is a lasso: `trace` is the path from the initial state, and
+`loop` is `:stutter` (the behavior stays in the last state forever) or
+`%{to: index, label: label}` (a step goes back to the state at `index`).
+`mix accord.explore` prints it like this:
+
+```
+✗ liveness property EventuallyDone is violated
+  1. initial [spinning %{flips: 0}]
+  2. :spin → :continue [spinning %{flips: 1}]
+  … :spin → :continue goes back to state 1, forever
+```
+
+Liveness is not checked when the search stops at `max_states`, stops at
+the first violation, or uses symmetry. The result then lists the
+property in `skipped`.
 
 ### Options
 
@@ -65,7 +105,8 @@ yet.
 
 ### Limits
 
-- No liveness.
+- Liveness supports `in_state` predicates only, as the TLA+ translation
+  does.
 - Symmetry reduction only over sessions, not over model-value symmetry
   sets. The full model is still correct, but larger.
 - A user `state_constraint` must be a conjunction of `track op integer`
@@ -102,6 +143,17 @@ For each protocol, the cross-check compares:
    - TLC must replay the explorer trace (a replay module that `EXTENDS`
      the spec), and its last step must violate the check.
 
+4. **Each liveness property.** TLC runs one time for each property, with
+   only that property. The verdicts must be the same. Two correct
+   checkers can find different lassos, so the lengths are not compared.
+   Instead, each lasso must replay in the other checker:
+   - the explorer replays the TLC lasso: each step must be an explorer
+     step, the loop must close, the trigger must hold and then the target
+     must never hold, and the loop must satisfy each fairness condition;
+   - TLC replays the explorer lasso: a replay spec follows the lasso with
+     weak fairness, so its only behavior is the lasso, and TLC must find
+     that it violates the property.
+
 A model larger than `--max-states` is not complete. Then the cross-check
 compares only the checks that the explorer finds violated, because TLC
 stops at the first violation. The other comparisons are inconclusive.
@@ -111,7 +163,7 @@ Each result is one of:
 - `✓` match
 - `✗` mismatch — a defect in one of the two checkers or in the translation
 - `?` inconclusive — for example, an infinite model or a TLC timeout
-- `-` skipped — liveness, and checks that are runtime-only
+- `-` skipped — checks that are runtime-only
 
 ### Mutants and random protocols
 

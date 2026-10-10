@@ -200,8 +200,8 @@ variable, place it at `~/.tla/tla2tools.jar`, or in the project root.
 `mix accord.explore` checks the same finite model without Java. The
 explorer (`Accord.Explore`) runs the guards, updates, and `where:`
 constraints of the protocol directly, with the rules of the monitor. It
-checks the safety properties and deadlock; it does not check liveness
-yet.
+checks the safety properties, deadlock, and liveness under the fairness
+of each property.
 
 `mix accord.crosscheck` runs the explorer and TLC on each protocol and
 compares the state graphs, the verdicts, and the counterexamples. A

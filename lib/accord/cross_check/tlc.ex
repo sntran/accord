@@ -20,6 +20,7 @@ defmodule Accord.CrossCheck.TLC do
           states: [map()] | nil,
           edges: [{map(), map()}] | nil,
           constant: boolean(),
+          loop: nil | :stutter | {:back_to, pos_integer()},
           output: String.t()
         }
 
@@ -97,6 +98,7 @@ defmodule Accord.CrossCheck.TLC do
       states: nil,
       edges: nil,
       constant: false,
+      loop: nil,
       output: output
     }
   end
@@ -131,6 +133,7 @@ defmodule Accord.CrossCheck.TLC do
               kind: violation.kind,
               property: violation.property,
               trace: parse_trace(lines),
+              loop: parse_loop(lines),
               distinct: stats.distinct_states,
               depth: stats.depth
           }
@@ -190,6 +193,7 @@ defmodule Accord.CrossCheck.TLC do
   def parse_trace(lines) do
     lines
     |> Enum.drop_while(&(not Regex.match?(~r/^State 1:/, &1)))
+    |> Enum.reject(&Regex.match?(~r/^(State \d+: Stuttering|Back to state \d+:)/, &1))
     |> chunk_states()
     |> Enum.map(fn [header | body] ->
       action =
@@ -200,6 +204,27 @@ defmodule Accord.CrossCheck.TLC do
         end
 
       %{action: action, vars: TLAValue.parse_assignments(body)}
+    end)
+  end
+
+  @doc """
+  Reads the end of a liveness counterexample: `{:back_to, n}` when the
+  behavior goes back to state `n`, `:stutter` when it stays in its last
+  state forever, or `nil` for a finite trace.
+  """
+  @spec parse_loop([String.t()]) :: nil | :stutter | {:back_to, pos_integer()}
+  def parse_loop(lines) do
+    Enum.find_value(lines, fn line ->
+      cond do
+        match = Regex.run(~r/^Back to state (\d+):/, line) ->
+          {:back_to, String.to_integer(Enum.at(match, 1))}
+
+        Regex.match?(~r/^State \d+: Stuttering/, line) ->
+          :stutter
+
+        true ->
+          nil
+      end
     end)
   end
 

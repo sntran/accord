@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
 
   TLC is the reference. For each protocol, the task runs `Accord.Explore`
   and TLC on the same finite model, and compares the state spaces and
-  the verdict of each safety check. See `Accord.CrossCheck` for the
+  the verdict of each safety and liveness check. See `Accord.CrossCheck` for the
   comparisons.
 
   ## Usage

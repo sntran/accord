@@ -27,8 +27,17 @@ defmodule Accord.CrossCheck do
      - TLC must replay the explorer trace, and the last step must
        violate the check.
 
-  Liveness properties are not compared. The report lists them as
-  skipped.
+  4. Each liveness property. TLC runs with only that property. The
+     verdicts must be the same. Two correct checkers can find different
+     lassos, so the lasso lengths are not compared. When both find a
+     violation, or when one does:
+     - the explorer replays the TLC lasso: each step must be an explorer
+       step, the loop must close, the trigger must hold and then the
+       target must never hold, and the loop must satisfy each fairness
+       condition;
+     - TLC replays the explorer lasso: a replay spec follows the lasso
+       with weak fairness, so its only behavior is the lasso, and TLC
+       must find that it violates the property.
 
   A model with more states than `:max_states` is not complete. Then the
   cross-check compares only the checks that the explorer finds violated,
@@ -337,9 +346,10 @@ defmodule Accord.CrossCheck do
   defp compare_checks(ctx, native) do
     native_checks =
       Enum.map(ctx.model.invariants, &{&1.name, :invariant}) ++
-        Enum.map(ctx.model.action_checks, &{&1.name, :action})
+        Enum.map(ctx.model.action_checks, &{&1.name, :action}) ++
+        Enum.map(ctx.model.liveness, &{&1.name, :liveness})
 
-    tla_checks = tla_safety_checks(ctx.compiled)
+    tla_checks = tla_checks(ctx.compiled)
 
     missing =
       for {name, kind} <- tla_checks, not List.keymember?(native_checks, name, 0) do
@@ -359,38 +369,24 @@ defmodule Accord.CrossCheck do
     compared ++ [compare_check(ctx, native, "Deadlock", :deadlock)] ++ missing ++ extra
   end
 
-  defp tla_safety_checks(compiled) do
+  defp tla_checks(compiled) do
     [{"TypeInvariant", :invariant}] ++
       for prop <- compiled.properties,
-          kind = safety_kind(prop),
+          kind = check_kind(prop),
           kind != nil,
           do: {prop.name, kind}
   end
 
-  defp safety_kind(%{kind: :invariant}), do: :invariant
+  defp check_kind(%{kind: :invariant}), do: :invariant
 
-  defp safety_kind(%{kind: :temporal, formula: formula}) do
-    if String.contains?(formula, "~>"), do: nil, else: :action
+  defp check_kind(%{kind: :temporal, formula: formula}) do
+    if String.contains?(formula, "~>"), do: :liveness, else: :action
   end
 
-  defp safety_kind(_), do: nil
+  defp check_kind(_), do: nil
 
   defp skipped(ctx) do
-    liveness =
-      for prop <- ctx.compiled.properties,
-          prop.kind == :temporal,
-          String.contains?(prop.formula, "~>") do
-        outcome(prop.name, :skipped, "liveness is not compared yet")
-      end
-
-    liveness_names = MapSet.new(liveness, & &1.check)
-
-    others =
-      for {name, why} <- ctx.model.skipped, not MapSet.member?(liveness_names, name) do
-        outcome(name, :skipped, why)
-      end
-
-    liveness ++ others
+    for {name, why} <- ctx.model.skipped, do: outcome(name, :skipped, why)
   end
 
   defp compare_check(ctx, native, name, kind) do
@@ -416,6 +412,9 @@ defmodule Accord.CrossCheck do
   defp run_check(ctx, name, :action),
     do: tlc(ctx, ["PROPERTY #{name}"], deadlock: false, name: "check_#{name}")
 
+  defp run_check(ctx, name, :liveness),
+    do: tlc(ctx, ["PROPERTY #{name}"], deadlock: false, name: "check_#{name}")
+
   defp run_check(ctx, _name, :deadlock), do: tlc(ctx, [], deadlock: true, name: "check_deadlock")
 
   defp verdict_outcome(ctx, name, kind, violation, tlc) do
@@ -430,7 +429,7 @@ defmodule Accord.CrossCheck do
         outcome(name, :match, "holds")
 
       {nil, :violated} ->
-        replay = replay_in_explorer(ctx, name, kind, tlc.trace)
+        replay = replay_tlc_trace(ctx, name, kind, tlc)
 
         outcome(
           name,
@@ -440,7 +439,7 @@ defmodule Accord.CrossCheck do
         )
 
       {violation, :ok} ->
-        replay = replay_in_tlc(ctx, name, kind, violation.trace)
+        replay = replay_native_trace(ctx, name, kind, violation)
 
         outcome(
           name,
@@ -472,6 +471,23 @@ defmodule Accord.CrossCheck do
 
       true ->
         outcome(name, :match, "constant FALSE, violated in the initial state")
+    end
+  end
+
+  # A liveness counterexample is a lasso. Two correct checkers can find
+  # different lassos, so only the replays are compared.
+  defp both_violated(ctx, name, :liveness, violation, tlc) do
+    in_explorer = replay_tlc_trace(ctx, name, :liveness, tlc)
+    in_tlc = replay_native_trace(ctx, name, :liveness, violation)
+
+    problems =
+      if(in_explorer != :ok, do: ["explorer replay: #{replay_text(in_explorer)}"], else: []) ++
+        if in_tlc != :ok, do: ["TLC replay: #{replay_text(in_tlc)}"], else: []
+
+    if problems == [] do
+      outcome(name, :match, "violated, both lassos replay")
+    else
+      outcome(name, :mismatch, "violated in both, but " <> Enum.join(problems, "; "))
     end
   end
 
@@ -529,6 +545,17 @@ defmodule Accord.CrossCheck do
   defp first_line(text), do: text |> String.split("\n") |> hd()
 
   defp outcome(check, status, detail), do: %Outcome{check: check, status: status, detail: detail}
+
+  defp replay_tlc_trace(ctx, name, :liveness, tlc),
+    do: replay_lasso_in_explorer(ctx, name, tlc.trace, tlc.loop)
+
+  defp replay_tlc_trace(ctx, name, kind, tlc), do: replay_in_explorer(ctx, name, kind, tlc.trace)
+
+  defp replay_native_trace(ctx, name, :liveness, violation),
+    do: replay_lasso_in_tlc(ctx, name, violation)
+
+  defp replay_native_trace(ctx, name, kind, violation),
+    do: replay_in_tlc(ctx, name, kind, violation.trace)
 
   # -- Replay of a TLC trace in the explorer --
 
@@ -682,6 +709,186 @@ defmodule Accord.CrossCheck do
 
   defp constant_lines(cfg) do
     cfg |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "CONSTANT"))
+  end
+
+  # -- Lassos --
+
+  @doc false
+  # Replays a TLC liveness counterexample in the explorer. Each step must
+  # be an explorer step, the loop must close, the trigger must hold and
+  # the target must then never hold, and the loop must satisfy each
+  # fairness condition of the property.
+  @spec replay_lasso_in_explorer(map(), String.t(), [map()], term()) :: :ok | {:error, String.t()}
+  def replay_lasso_in_explorer(_ctx, _name, [], _loop), do: {:error, "empty TLC trace"}
+
+  def replay_lasso_in_explorer(_ctx, _name, _trace, nil),
+    do: {:error, "the TLC trace has no loop"}
+
+  def replay_lasso_in_explorer(ctx, name, [first | rest], loop) do
+    model = ctx.model
+    check = Enum.find(model.liveness, &(&1.name == name))
+
+    with {:ok, init} <- find_state(model, Model.init_states(model), first.vars, 1),
+         {:ok, path} <- follow_or_stutter(model, [init], rest, 2) do
+      states = Enum.reverse(path)
+
+      with {:ok, start, edges} <- close_loop(model, states, loop) do
+        loop_states = Enum.drop(states, start - 1)
+
+        cond do
+          not violates_leads_to?(check, states, start) ->
+            {:error, "the lasso does not violate #{check.trigger} ~> #{check.target}"}
+
+          (unfair = unfair_condition(model, check, loop_states, edges)) != nil ->
+            {:error, "the loop is not fair for #{inspect(unfair)}"}
+
+          true ->
+            :ok
+        end
+      end
+    end
+  rescue
+    e -> {:error, "explorer error: #{Exception.message(e)}"}
+  end
+
+  # A liveness trace can have a stuttering step: the same state again.
+  defp follow_or_stutter(_model, path, [], _index), do: {:ok, path}
+
+  defp follow_or_stutter(model, [current | _] = path, [step | rest], index) do
+    candidates = [current | model |> Model.successors(current) |> Enum.map(&elem(&1, 1))]
+
+    case find_state(model, candidates, step.vars, index) do
+      {:ok, next} -> follow_or_stutter(model, [next | path], rest, index + 1)
+      error -> error
+    end
+  end
+
+  # Gives the 1-based index where the loop starts, and the steps of the
+  # loop as {from, to} pairs.
+  defp close_loop(_model, states, :stutter), do: {:ok, length(states), []}
+
+  defp close_loop(model, states, {:back_to, k}) do
+    last = List.last(states)
+    target = Enum.at(states, k - 1)
+
+    if target == last or Enum.any?(Model.successors(model, last), &(elem(&1, 1) == target)) do
+      loop = Enum.drop(states, k - 1)
+      {:ok, k, Enum.zip(loop, tl(loop) ++ [target])}
+    else
+      {:error, "no explorer step goes from the last state back to state #{k}"}
+    end
+  end
+
+  defp violates_leads_to?(check, states, start) do
+    n = length(states)
+
+    Enum.any?(1..check_sessions(states), fn session ->
+      at = fn idx -> states |> Enum.at(idx - 1) |> elem(0) |> elem(session - 1) |> elem(0) end
+
+      Enum.any?(1..n, fn p ->
+        at.(p) == check.trigger and Enum.all?(min(p, start)..n, &(at.(&1) != check.target))
+      end)
+    end)
+  end
+
+  defp check_sessions([{sessions, _} | _]), do: tuple_size(sessions)
+
+  defp unfair_condition(model, check, loop_states, edges) do
+    real_edges = Enum.reject(edges, fn {a, b} -> a == b end)
+
+    Enum.find(check.fairness, fn {strength, key} ->
+      taken =
+        Enum.any?(real_edges, fn {a, b} ->
+          Enum.any?(Model.successors(model, a), fn {label, next} ->
+            next == b and fairness_match?(label, key)
+          end)
+        end)
+
+      enabled = fn v ->
+        Enum.any?(Model.successors(model, v), fn {label, next} ->
+          next != v and fairness_match?(label, key)
+        end)
+      end
+
+      ok =
+        case strength do
+          :weak -> taken or Enum.any?(loop_states, &(not enabled.(&1)))
+          :strong -> taken or Enum.all?(loop_states, &(not enabled.(&1)))
+        end
+
+      not ok
+    end)
+  end
+
+  defp fairness_match?(_label, :next), do: true
+  defp fairness_match?(label, key), do: Map.get(label, :action) == key
+
+  @doc false
+  # Replays an explorer lasso in TLC. The replay spec follows the lasso
+  # with weak fairness, so its only behavior is the lasso itself. TLC must
+  # find that it violates the property.
+  @spec replay_lasso_in_tlc(map(), String.t(), map()) :: :ok | {:error, String.t()}
+  def replay_lasso_in_tlc(ctx, name, violation) do
+    replay = ctx.module <> "Lasso"
+    states = Enum.map(violation.trace, &TLAValue.from_state(ctx.model, &1.state))
+    vars = Enum.map(ctx.compiled.state_space.variables, & &1.name)
+
+    records =
+      Enum.map_join(states, ",\n    ", fn state ->
+        "[" <>
+          Enum.map_join(vars, ", ", &"#{&1} |-> #{TLAValue.render(Map.fetch!(state, &1))}") <> "]"
+      end)
+
+    set = fn index -> Enum.map_join(vars, " /\\ ", &"#{&1}' = ReplayTrace[#{index}].#{&1}") end
+
+    back =
+      case violation.loop do
+        %{to: to} ->
+          "\n    \\/ /\\ replay_i = Len(ReplayTrace)\n       /\\ Next\n       /\\ replay_i' = #{to}\n       /\\ " <>
+            set.(to)
+
+        :stutter ->
+          ""
+      end
+
+    module = """
+    ---- MODULE #{replay} ----
+    EXTENDS #{ctx.module}, Integers, Sequences, TLC
+
+    VARIABLE replay_i
+
+    ReplayTrace == <<
+        #{records}
+    >>
+
+    ReplayInit == Init /\\ replay_i = 1 /\\ #{Enum.map_join(vars, " /\\ ", &"#{&1} = ReplayTrace[1].#{&1}")}
+
+    ReplayNext ==
+        \\/ /\\ replay_i < Len(ReplayTrace)
+           /\\ Next
+           /\\ replay_i' = replay_i + 1
+           /\\ #{set.("replay_i + 1")}#{back}
+
+    ReplaySpec == ReplayInit /\\ [][ReplayNext]_<<vars, replay_i>> /\\ WF_<<vars, replay_i>>(ReplayNext)
+    ====
+    """
+
+    File.write!(Path.join(ctx.dir, replay <> ".tla"), module)
+    cfg = ["SPECIFICATION ReplaySpec", "PROPERTY #{name}"] ++ constant_lines(ctx.compiled.cfg)
+
+    run =
+      TLC.run(ctx.dir, replay <> ".tla", Enum.join(cfg, "\n") <> "\n",
+        jar: ctx.tlc_opts[:jar],
+        timeout: ctx.tlc_opts[:timeout],
+        deadlock: false,
+        name: "lasso_#{name}"
+      )
+
+    case run do
+      %{status: :violated, kind: :temporal} -> :ok
+      %{status: :ok} -> {:error, "TLC finds that the lasso does not violate #{name}"}
+      other -> {:error, "TLC: #{tlc_summary(other)}"}
+    end
   end
 
   defp replay_text(:ok), do: "ok"

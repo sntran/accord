@@ -10,13 +10,15 @@ All notable changes to this project are documented in this file.
   protocol functions on the finite model, with the rules of the monitor
   and the search rules of TLC. It checks `TypeInvariant`, invariants,
   action properties, and deadlock, and gives minimum-length traces. It
-  does not check liveness yet.
+  also checks liveness under the fairness of each property (weak or
+  strong, on all steps or on the `assuming:` tags, and the fairness of
+  state timeouts), and gives a lasso counterexample.
 - `mix accord.explore` — checks protocols with the explorer. Java is not
   necessary.
 - `Accord.CrossCheck` and `mix accord.crosscheck` — compare the explorer
   with TLC: the state graph, the symmetry-reduced count, the verdict of
-  each safety check, and the replay of each counterexample in the other
-  checker. `--mutants N` adds IR mutants (`Accord.CrossCheck.Mutant`);
+  each safety and liveness check, and the replay of each counterexample
+  (or lasso) in the other checker. `--mutants N` adds IR mutants (`Accord.CrossCheck.Mutant`);
   `--random N` checks random protocols
   (`Accord.CrossCheck.RandomProtocol`).
 - Each protocol module has `__model_config__/0`: the resolved model

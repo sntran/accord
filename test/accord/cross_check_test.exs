@@ -3,10 +3,14 @@ defmodule Accord.CrossCheckTest do
 
   @moduletag :tlc
   @moduletag :tmp_dir
+  # Each test starts several TLC processes, each with JVM startup.
+  @moduletag timeout: 600_000
 
   alias Accord.CrossCheck
-  alias Accord.CrossCheck.{Mutant, RandomProtocol, Report, TLAValue}
+  alias Accord.CrossCheck.{Mutant, RandomProtocol, Report, TLAValue, TLC}
+  alias Accord.Explore
   alias Accord.Explore.Model
+  alias Accord.TLA.Compiler
 
   defp run(protocol, tmp_dir, opts \\ []) do
     CrossCheck.run(protocol, Keyword.merge([dir: tmp_dir, timeout: 60], opts))
@@ -87,6 +91,65 @@ defmodule Accord.CrossCheckTest do
     end
   end
 
+  describe "liveness" do
+    for {name, protocol} <- [
+          {"each property with its own fairness", Accord.Test.FairnessLeak.Protocol},
+          {"weak and strong fairness", Accord.Test.Probe.StrongFairness.Protocol},
+          {"the fairness of a state timeout", Accord.Test.Probe.TimeoutFairness.Protocol},
+          {"a lasso that stutters", Accord.Test.LivenessFail.Protocol}
+        ] do
+      @protocol protocol
+      test name, %{tmp_dir: tmp_dir} do
+        report = run(@protocol, tmp_dir)
+        assert Report.ok?(report), Report.format(report)
+      end
+    end
+
+    test "the replays reject a loop that is not fair", %{tmp_dir: tmp_dir} do
+      protocol = Accord.Test.FairnessLeak.Protocol
+      model = Model.build(protocol)
+      {:ok, compiled} = Compiler.compile(protocol.__ir__(), model.config)
+      module = compiled.state_space.module_name
+      File.write!(Path.join(tmp_dir, module <> ".tla"), compiled.tla)
+
+      ctx = %{
+        model: model,
+        compiled: compiled,
+        module: module,
+        dir: tmp_dir,
+        tlc_opts: [jar: TLC.find_jar(), timeout: 60]
+      }
+
+      # The retry loop violates the property that assumes fair retries,
+      # but under fair finishes the loop is not fair: :finish is always
+      # enabled and never runs.
+      lasso = Explore.run(model).violations["FinishesWhenRetryIsFair"]
+      assert :ok = CrossCheck.replay_lasso_in_tlc(ctx, "FinishesWhenRetryIsFair", lasso)
+      assert {:error, _} = CrossCheck.replay_lasso_in_tlc(ctx, "FinishesWhenFinishIsFair", lasso)
+
+      tlc_trace =
+        Enum.map(lasso.trace, &%{action: nil, vars: TLAValue.from_state(model, &1.state)})
+
+      loop = {:back_to, lasso.loop.to}
+
+      assert :ok =
+               CrossCheck.replay_lasso_in_explorer(
+                 ctx,
+                 "FinishesWhenRetryIsFair",
+                 tlc_trace,
+                 loop
+               )
+
+      assert {:error, "the loop is not fair" <> _} =
+               CrossCheck.replay_lasso_in_explorer(
+                 ctx,
+                 "FinishesWhenFinishIsFair",
+                 tlc_trace,
+                 loop
+               )
+    end
+  end
+
   # Each probe uses a form where the TLA+ translation once differed from
   # the runtime monitor. The cross-check found each difference; the
   # translation now makes the same choices as the monitor.
@@ -116,7 +179,7 @@ defmodule Accord.CrossCheckTest do
     setup %{tmp_dir: tmp_dir} do
       protocol = Accord.Examples.JobQueue.ProtocolLeakyLease
       config = Model.model_config(protocol)
-      {:ok, compiled} = Accord.TLA.Compiler.compile(protocol.__ir__(), config)
+      {:ok, compiled} = Compiler.compile(protocol.__ir__(), config)
       model = Model.build(protocol)
       module = compiled.state_space.module_name
       File.write!(Path.join(tmp_dir, module <> ".tla"), compiled.tla)
@@ -126,10 +189,10 @@ defmodule Accord.CrossCheckTest do
         compiled: compiled,
         module: module,
         dir: tmp_dir,
-        tlc_opts: [jar: Accord.CrossCheck.TLC.find_jar(), timeout: 60]
+        tlc_opts: [jar: TLC.find_jar(), timeout: 60]
       }
 
-      %{"LeaseIffWorkingIdle" => violation} = Accord.Explore.run(model).violations
+      %{"LeaseIffWorkingIdle" => violation} = Explore.run(model).violations
       %{ctx: ctx, trace: violation.trace}
     end
 

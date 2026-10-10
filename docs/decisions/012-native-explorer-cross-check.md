@@ -32,8 +32,10 @@ cross-check (`Accord.CrossCheck`) that compares it with TLC.**
 - `Accord.Explore` does a breadth-first search with the rules of TLC: a
   state outside the state constraint is not explored but is checked; an
   action property is checked on all steps; a deadlock is a state with no
-  successor. It checks the safety properties of the spec. It does not
-  check liveness yet.
+  successor. It checks the safety properties of the spec, and then each
+  liveness property on the full state graph, under the fairness of that
+  property (Tarjan's algorithm, with the Emerson-Lei method for strong
+  fairness).
 - The explorer does not depend on the TLA+ passes. The boundary test
   pins this. So a defect in the translation makes the two checkers
   disagree.
@@ -62,7 +64,10 @@ cross-check (`Accord.CrossCheck`) that compares it with TLC.**
 - The explorer follows the monitor. If the spec differs from the monitor
   again, `mix accord.explore` and `mix accord.check` give different
   results, and the cross-check shows where.
-- The explorer does not check liveness. Its symmetry reduction is only
+- Two correct checkers can find different liveness counterexamples, so
+  the cross-check does not compare lasso lengths. It replays each lasso
+  in the other checker instead.
+- The explorer's symmetry reduction is only
   over sessions, not over model-value symmetry sets (the full model is
   still correct, but larger). It supports a user state constraint
   only as a conjunction of `track op integer` terms. It reports a model

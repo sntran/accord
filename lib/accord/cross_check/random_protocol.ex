@@ -319,9 +319,11 @@ defmodule Accord.CrossCheck.RandomProtocol do
           ["      branch :#{literal}, goto: :#{target(ctx)}"]
       end)
 
-    {update_val, _} = gen_update(%{env | ints: [value | env.ints]})
-    {update_pair, _} = gen_update(%{env | ints: [pa, pb | env.ints]})
-    {update_lit, bounds_lit} = gen_update(env)
+    has_values = Enum.any?(kinds, &(&1 in [:val, :pair]))
+    reply_env = Map.put(env, :no_bounds, has_values)
+    {update_val, _} = gen_update(%{reply_env | ints: [value | env.ints]})
+    {update_pair, _} = gen_update(%{reply_env | ints: [pa, pb | env.ints]})
+    {update_lit, bounds_lit} = gen_update(reply_env)
 
     arms =
       (if(:val in kinds and update_val,
@@ -357,7 +359,7 @@ defmodule Accord.CrossCheck.RandomProtocol do
     guard =
       combine_guard(
         maybe_bool(env),
-        if(Enum.any?(kinds, &(&1 in [:val, :pair])), do: [], else: bounds_lit)
+        if(has_values, do: [], else: bounds_lit)
       )
 
     lines =
@@ -430,7 +432,15 @@ defmodule Accord.CrossCheck.RandomProtocol do
   defp gen_assignment(env, %{kind: :int, name: name, hi: hi}) do
     bound = fn expr -> if chance(0.9), do: expr end
 
-    case pick([:inc, :inc, :dec, :const, :value]) do
+    # Where the guard cannot hold a bound (an update of a call with reply
+    # values), an increment is rare: without a bound, the model has no
+    # end, and liveness needs a finite model.
+    kinds =
+      if Map.get(env, :no_bounds, false) and not chance(0.1),
+        do: [:const, :value, :value],
+        else: [:inc, :inc, :dec, :const, :value]
+
+    case pick(kinds) do
       :inc ->
         {"#{name}: tracks.#{name} + 1", bound.("tracks.#{name} < #{hi}")}
 
@@ -537,6 +547,11 @@ defmodule Accord.CrossCheck.RandomProtocol do
             [open, close] = ctx.tags |> Enum.uniq() |> Enum.sort() |> Enum.take(2)
             "    correspondence :#{open}, [:#{close}]"
 
+          :liveness ->
+            [trigger, target] = ctx.states |> Enum.shuffle() |> Enum.take(2)
+
+            "    liveness in_state(:#{trigger}), leads_to: in_state(:#{target})#{fairness_opts(ctx)}"
+
           :exclusive ->
             "    exclusive :#{pick(ctx.states -- ctx.terminal)}"
 
@@ -548,6 +563,18 @@ defmodule Accord.CrossCheck.RandomProtocol do
       "  property :p#{i} do\n#{body}\n  end\n"
     end)
     |> Enum.uniq()
+  end
+
+  # Fairness for a liveness property: none (weak fairness on all steps),
+  # or weak or strong fairness on some message tags.
+  defp fairness_opts(ctx) do
+    if chance(0.6) do
+      tags = ctx.tags |> Enum.uniq() |> Enum.shuffle() |> Enum.take(between(1, 2))
+      strong = if chance(0.3), do: ", fairness: :strong", else: ""
+      ", assuming: [" <> Enum.map_join(tags, ", ", &":#{&1}") <> "]" <> strong
+    else
+      ""
+    end
   end
 
   defp empty(%{kind: :int}), do: "0"
@@ -564,6 +591,6 @@ defmodule Accord.CrossCheck.RandomProtocol do
         do: [:exclusive] ++ if(own, do: [:distinct], else: []),
         else: []
 
-    [:invariant, :invariant, :local, :forbidden] ++ ints ++ corr ++ multi
+    [:invariant, :invariant, :local, :forbidden, :liveness, :liveness] ++ ints ++ corr ++ multi
   end
 end
