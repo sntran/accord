@@ -19,7 +19,6 @@ defmodule Mix.Tasks.Accord.Crosscheck do
       mix accord.crosscheck --mutants 5 --seed 7 # another set of mutants
       mix accord.crosscheck --random 50          # 50 random protocols
       mix accord.crosscheck --random 50 --seed 9 # 50 other random protocols
-      mix accord.crosscheck --random 50 --known  # also use known divergences
 
   ## Mutants
 
@@ -35,9 +34,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
   `Accord.CrossCheck.RandomProtocol`), from the seeds `--seed` to
   `--seed + N - 1`, and checks them instead of the project protocols.
   The source of each random protocol goes into the work directory. Use
-  `--keep` to keep it. By default the random protocols do not use the
-  known divergences of the TLA+ translation. Use `--known` to include
-  them.
+  `--keep` to keep it.
 
   The task also checks protocols with `tla: :off`. It makes their spec
   from the IR, as `Accord.Test.TLACheck` does.
@@ -69,8 +66,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
           keep: :boolean,
           mutants: :integer,
           seed: :integer,
-          random: :integer,
-          known: :boolean
+          random: :integer
         ]
       )
 
@@ -128,7 +124,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
     File.mkdir_p!(dir)
 
     Enum.flat_map(first..(first + count - 1)//1, fn seed ->
-      case RandomProtocol.compile(seed, known: Keyword.get(opts, :known, false)) do
+      case RandomProtocol.compile(seed) do
         {:ok, module, code} ->
           File.write!(Path.join(dir, "p#{seed}.ex"), code)
           [module]

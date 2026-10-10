@@ -9,36 +9,24 @@ defmodule Accord.CrossCheck.RandomProtocol do
   always gives the same source.
 
   The expressions use only forms that the TLA+ translation supports:
-  integer literals, track fields, message arguments, the reply value,
-  `+`, `-`, `*`, `div/2`, `rem/2`, comparisons, `and`, `or`, and `not`.
+  integer literals, track fields, message arguments, reply values, `+`,
+  `-`, `*`, `div/2`, `rem/2`, comparisons, `and`, `or`, and `not`.
 
-  By default, the generator does not use forms where the translation is
-  known to differ from the monitor (see `known_divergences/0`). With
-  `known: true`, it can use them, so that the cross-check finds them.
+  The generator also uses the forms where the translation once differed
+  from the monitor:
+
+  - branches that accept the same reply or message (first-match
+    selection);
+  - `div/2` and `rem/2` on negative values;
+  - function heads that ignore an argument (`_a`) before one they read;
+  - replies with two values, `{:pair, a, b}`, read in an update `case`.
   """
-
-  @doc """
-  The forms where the TLA+ translation is known to differ from the
-  runtime monitor. With `known: true`, the generator uses the first two.
-
-  - `:overlap_branches` — two branches that accept the same reply or
-    message. The monitor takes the first; the spec takes either.
-  - `:negative_div` — `div/2` or `rem/2` with a negative operand. Elixir
-    rounds toward zero; TLA+ rounds down.
-  - `:underscore_args` — an update or `where:` head that ignores an
-    argument (`_a`) before an argument that it reads. The spec reads
-    the wrong argument.
-  - `:tagged_pairs` — a reply with two values, `{:tag, a, b}`, read in an
-    update `case`. The spec drops the update.
-  """
-  @spec known_divergences() :: [atom()]
-  def known_divergences, do: [:overlap_branches, :negative_div, :underscore_args, :tagged_pairs]
 
   @doc """
   Gives the source code of the random protocol for `seed`.
   """
   @spec source(integer(), keyword()) :: String.t()
-  def source(seed, opts \\ []) do
+  def source(seed, _opts \\ []) do
     :rand.seed(:exsss, {seed, 101, 7})
     module = module_name(seed)
     sessions = if chance(0.25), do: 2, else: 1
@@ -49,7 +37,6 @@ defmodule Accord.CrossCheck.RandomProtocol do
       terminal: if(chance(0.4), do: [List.last(states)], else: []),
       tracks: gen_tracks(sessions),
       sessions: sessions,
-      known: Keyword.get(opts, :known, false),
       domains: [],
       tags: []
     }
@@ -175,8 +162,13 @@ defmodule Accord.CrossCheck.RandomProtocol do
         count = if name == :s0, do: between(2, 3), else: between(1, 3)
         tags = [:m1, :m2, :m3, :m4, :m5] |> Enum.shuffle() |> Enum.take(count)
         {blocks, ctx} = Enum.map_reduce(tags, ctx, &gen_transition(&2, &1))
-        timeout = if chance(0.15), do: ", state_timeout: {100, :#{pick(ctx.states -- [name])}}"
-        {"  state :#{name}#{timeout} do\n#{Enum.join(blocks)}  end\n", ctx}
+
+        timeout =
+          if chance(0.15),
+            do: "    state_timeout 100, goto: :#{pick(ctx.states -- [name])}\n",
+            else: ""
+
+        {"  state :#{name} do\n#{timeout}#{Enum.join(blocks)}  end\n", ctx}
       end
     end)
   end
@@ -187,13 +179,12 @@ defmodule Accord.CrossCheck.RandomProtocol do
     {args, ctx} = gen_args(ctx, tag)
     ctx = %{ctx | tags: [tag | ctx.tags]}
     env = %{ctx: ctx, ints: for(%{type: :int, name: n} <- args, do: n), terms: terms(args)}
-    msg = message_pattern(tag, args)
 
     case pick([:call, :call, :call, :event, :cast_goto, :cast_branches, :cast]) do
-      :call -> gen_call(env, tag, args, msg)
-      :event -> {gen_step(env, "event", tag, args, msg), ctx}
-      :cast_goto -> {gen_step(env, "cast", tag, args, msg), ctx}
-      :cast_branches -> {gen_cast_branches(env, tag, args, msg), ctx}
+      :call -> gen_call(env, tag, args)
+      :event -> {gen_step(env, "event", tag, args), ctx}
+      :cast_goto -> {gen_step(env, "cast", tag, args), ctx}
+      :cast_branches -> {gen_cast_branches(env, tag, args), ctx}
       :cast -> {"    cast #{message_head(tag, args)}\n", ctx}
     end
   end
@@ -226,65 +217,86 @@ defmodule Accord.CrossCheck.RandomProtocol do
   defp arg_type(%{type: :int}), do: "non_neg_integer()"
   defp arg_type(%{type: :term}), do: "term()"
 
-  defp message_pattern(tag, []), do: ":#{tag}"
-  defp message_pattern(tag, args), do: "{:#{tag}, " <> Enum.map_join(args, ", ", & &1.name) <> "}"
+  # A function head for a message. An argument that the body does not
+  # read is sometimes ignored (`_name`), so that the names after it are
+  # not at the position of their list index.
+  defp head(tag, args, body) do
+    names =
+      Enum.map(args, fn %{name: name} ->
+        if body =~ ~r/\b#{name}\b/ or not chance(0.5), do: "#{name}", else: "_#{name}"
+      end)
 
-  defp gen_step(env, keyword, tag, args, msg) do
+    case names do
+      [] -> ":#{tag}"
+      names -> "{:#{tag}, " <> Enum.join(names, ", ") <> "}"
+    end
+  end
+
+  defp gen_step(env, keyword, tag, args) do
     {update, bounds} = gen_update(env)
     guard = combine_guard(maybe_bool(env), bounds)
 
     lines =
       ["    #{keyword} #{message_head(tag, args)} do"] ++
-        guard_line(guard, msg) ++
+        guard_line(guard, tag, args) ++
         ["      goto :#{target(env.ctx)}"] ++
-        update_line(update, "fn #{msg}, tracks ->") ++ ["    end"]
+        update_line(update, tag, args, "tracks") ++ ["    end"]
 
     Enum.join(lines, "\n") <> "\n"
   end
 
-  defp gen_cast_branches(env, tag, args, msg) do
+  defp gen_cast_branches(env, tag, args) do
     {update, bounds} = gen_update(env)
     guard = combine_guard(maybe_bool(env), bounds)
 
-    # Two branches with exclusive predicates, `c` and `not c`. With known
-    # divergences, the second branch can accept every message.
-    cond_expr = gen_bool(env, 2)
-    second = if env.ctx.known and chance(0.5), do: "true", else: "not (#{cond_expr})"
+    # Two branches. The second predicate is sometimes `not c` (no overlap)
+    # and sometimes an independent predicate or `true` (overlap: the
+    # monitor takes the first branch whose `where:` holds).
+    first = gen_bool(env, 2)
+    second = pick(["not (#{first})", gen_bool(env, 2), "true"])
 
     lines =
       ["    cast #{message_head(tag, args)} do"] ++
-        guard_line(guard, msg) ++
+        guard_line(guard, tag, args) ++
         [
-          "      branch goto: :#{target(env.ctx)}, where: fn #{msg}, tracks -> #{cond_expr} end",
-          "      branch goto: :#{target(env.ctx)}, where: fn #{msg}, tracks -> #{second} end"
+          "      branch goto: :#{target(env.ctx)}, where: fn #{head(tag, args, first)}, tracks -> #{first} end",
+          "      branch goto: :#{target(env.ctx)}, where: fn #{head(tag, args, second)}, tracks -> #{second} end"
         ] ++
-        update_line(update, "fn #{msg}, tracks ->") ++ ["    end"]
+        update_line(update, tag, args, "tracks") ++ ["    end"]
 
     Enum.join(lines, "\n") <> "\n"
   end
 
-  defp gen_call(env, tag, args, msg) do
+  defp gen_call(env, tag, args) do
     ctx = env.ctx
-    value = :"#{tag}_v#{length(ctx.domains)}"
-    ctx = %{ctx | domains: [{value, 0..between(1, 3)} | ctx.domains]}
+    n = length(ctx.domains)
+    value = :"#{tag}_v#{n}"
+    pa = :"#{tag}_pa#{n}"
+    pb = :"#{tag}_pb#{n}"
+
+    ctx = %{
+      ctx
+      | domains:
+          [{pb, 0..between(1, 2)}, {pa, 0..between(1, 3)}, {value, 0..between(1, 3)}] ++
+            ctx.domains
+    }
+
     env = %{env | ctx: ctx}
-    reply_env = %{env | ints: [value | env.ints]}
     # A `where:` sees only the reply and the tracks.
     where_env = %{env | ints: [value], terms: []}
+    pair_where_env = %{env | ints: [pa, pb], terms: []}
 
-    kinds = [:ok, :err, :val] |> Enum.shuffle() |> Enum.take(between(1, 3))
+    kinds = [:ok, :err, :val, :pair] |> Enum.shuffle() |> Enum.take(between(1, 4))
 
     branch_lines =
       Enum.flat_map(kinds, fn
         :val ->
           where =
-            if chance(0.5),
-              do:
-                ",\n        where: fn {:val, #{value}}, tracks -> #{gen_bool(where_env, 2)} end",
-              else: ""
+            maybe_where(where_env, fn body -> "{:val, #{value}}" |> keep_used(body, [value]) end)
 
+          # Sometimes a second branch accepts the same replies.
           overlap =
-            if ctx.known and chance(0.4),
+            if chance(0.3),
               do: ["      branch({:val, #{value} :: non_neg_integer()}, goto: :#{target(ctx)})"],
               else: []
 
@@ -293,49 +305,96 @@ defmodule Accord.CrossCheck.RandomProtocol do
             | overlap
           ]
 
+        :pair ->
+          where =
+            maybe_where(pair_where_env, fn body ->
+              "{:pair, #{pa}, #{pb}}" |> keep_used(body, [pa, pb])
+            end)
+
+          [
+            "      branch({:pair, #{pa} :: non_neg_integer(), #{pb} :: non_neg_integer()},\n        goto: :#{target(ctx)}#{where}\n      )"
+          ]
+
         literal ->
           ["      branch :#{literal}, goto: :#{target(ctx)}"]
       end)
 
-    {update_val, bounds_val} = gen_update(reply_env)
+    {update_val, _} = gen_update(%{env | ints: [value | env.ints]})
+    {update_pair, _} = gen_update(%{env | ints: [pa, pb | env.ints]})
     {update_lit, bounds_lit} = gen_update(env)
+
+    arms =
+      (if(:val in kinds and update_val,
+         do: ["          #{keep_used("{:val, #{value}}", update_val, [value])} -> #{update_val}"],
+         else: []
+       ) ++
+         if(:pair in kinds and update_pair,
+           do: [
+             "          #{keep_used("{:pair, #{pa}, #{pb}}", update_pair, [pa, pb])} -> #{update_pair}"
+           ],
+           else: []
+         )) ++ ["          _ -> #{update_lit || "tracks"}"]
+
+    update_body = Enum.join(arms, " ")
 
     update =
       cond do
-        update_val == nil and update_lit == nil ->
+        length(arms) == 1 and update_lit == nil ->
           []
 
-        :val in kinds ->
+        length(arms) > 1 ->
           [
-            "      update fn #{msg}, reply, tracks ->",
-            "        case reply do",
-            "          {:val, #{value}} -> #{update_val || "tracks"}",
-            "          _ -> #{update_lit || "tracks"}",
-            "        end",
-            "      end"
-          ]
+            "      update fn #{head(tag, args, update_body)}, reply, tracks ->",
+            "        case reply do"
+          ] ++ arms ++ ["        end", "      end"]
 
         true ->
-          ["      update fn #{msg}, _reply, tracks -> #{update_lit || "tracks"} end"]
+          ["      update fn #{head(tag, args, update_lit)}, _reply, tracks -> #{update_lit} end"]
       end
 
-    # A bound from the reply update reads the reply value, which a guard
-    # cannot see. That update has no bound.
-    _ = bounds_val
-    guard = combine_guard(maybe_bool(env), if(:val in kinds, do: [], else: bounds_lit))
+    # A bound from a reply update reads the reply, which a guard cannot
+    # see. Those updates have no bound.
+    guard =
+      combine_guard(
+        maybe_bool(env),
+        if(Enum.any?(kinds, &(&1 in [:val, :pair])), do: [], else: bounds_lit)
+      )
 
     lines =
       ["    on #{message_head(tag, args)} do"] ++
-        guard_line(guard, msg) ++ branch_lines ++ update ++ ["    end"]
+        guard_line(guard, tag, args) ++ branch_lines ++ update ++ ["    end"]
 
     {Enum.join(lines, "\n") <> "\n", ctx}
   end
 
-  defp guard_line(nil, _msg), do: []
-  defp guard_line(expr, msg), do: ["      guard fn #{msg}, tracks -> #{expr} end"]
+  defp maybe_where(env, pattern) do
+    if chance(0.5) do
+      body = gen_bool(env, 2)
+      ",\n        where: fn #{pattern.(body)}, tracks -> #{body} end"
+    else
+      ""
+    end
+  end
 
-  defp update_line(nil, _head), do: []
-  defp update_line(expr, head), do: ["      update #{head} #{expr} end"]
+  # Ignores (`_name`) each name in a reply pattern that the body does not
+  # read, sometimes.
+  defp keep_used(pattern, body, names) do
+    Enum.reduce(names, pattern, fn name, acc ->
+      if body =~ ~r/\b#{name}\b/ or not chance(0.6),
+        do: acc,
+        else: String.replace(acc, ~r/\b#{name}\b/, "_#{name}")
+    end)
+  end
+
+  defp guard_line(nil, _tag, _args), do: []
+
+  defp guard_line(expr, tag, args),
+    do: ["      guard fn #{head(tag, args, expr)}, tracks -> #{expr} end"]
+
+  defp update_line(nil, _tag, _args, _tracks), do: []
+
+  defp update_line(expr, tag, args, tracks),
+    do: ["      update fn #{head(tag, args, expr)}, #{tracks} -> #{expr} end"]
 
   # Most transitions have no guard. Many random guards are false in the
   # initial state, and a model that cannot leave its initial state is a
@@ -407,16 +466,9 @@ defmodule Accord.CrossCheck.RandomProtocol do
           "(#{gen_int(env, depth - 1)} * #{between(0, 2)})"
 
         op when op in [:div, :rem] ->
-          # Without known divergences, the left operand is a literal or a
-          # message value (never negative), and the right operand is a
-          # positive literal. A track is not safe: an update without a
-          # bound can make it negative.
-          left =
-            if env.ctx.known,
-              do: gen_int(env, depth - 1),
-              else: pick(["#{between(0, 3)}" | Enum.map(env.ints, &to_string/1)])
-
-          "#{op}(#{left}, #{between(1, 3)})"
+          # The left operand can be negative. The right operand is a
+          # literal that is not zero, positive or negative.
+          "#{op}(#{gen_int(env, depth - 1)}, #{pick([1, 2, 3, -2])})"
 
         op ->
           "(#{gen_int(env, depth - 1)} #{op} #{gen_int(env, depth - 1)})"

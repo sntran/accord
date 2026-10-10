@@ -53,15 +53,15 @@ cross-check (`Accord.CrossCheck`) that compares it with TLC.**
 ## Consequences
 
 - The first runs found five differences between the monitor and the
-  TLA+ spec. `test/support/probes/` has one protocol for each, and
-  `test/accord/cross_check_test.exs` pins each difference. See
+  TLA+ spec. Two of them made TLC miss real bugs: an update that ignored
+  an earlier argument read the wrong argument in the spec, and an update
+  arm for a two-value reply was dropped from the spec. All five are now
+  fixed. `test/support/probes/` has one protocol for each, and the
+  cross-check tests check that the two checkers agree on them. See
   `docs/cross-check.md`.
-- Two of the differences make TLC miss real bugs: an update that ignores
-  an earlier argument reads the wrong argument in the spec, and an update
-  arm for a two-value reply is dropped from the spec.
-- The explorer follows the monitor where the spec differs from it. So
-  `mix accord.explore` and `mix accord.check` can give different results
-  on a protocol that uses one of these forms.
+- The explorer follows the monitor. If the spec differs from the monitor
+  again, `mix accord.explore` and `mix accord.check` give different
+  results, and the cross-check shows where.
 - The explorer does not check liveness. Its symmetry reduction is only
   over sessions, not over model-value symmetry sets (the full model is
   still correct, but larger). It supports a user state constraint

@@ -208,8 +208,8 @@ compares the state graphs, the verdicts, and the counterexamples. A
 difference shows a defect in the explorer or in the TLA+ translation.
 With `--mutants N` and `--random N`, it also checks mutants and random
 protocols. See [`docs/cross-check.md`](docs/cross-check.md), which also
-lists the differences between the monitor and the spec that the first
-runs found.
+describes the differences between the monitor and the spec that the
+first runs found, and their fixes.
 
 ```
 mix accord.explore                     # check all protocols, no Java

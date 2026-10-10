@@ -87,35 +87,27 @@ defmodule Accord.CrossCheckTest do
     end
   end
 
-  # Each probe uses a form where the TLA+ translation differs from the
-  # runtime monitor. These tests pin the differences: when the translation
-  # is fixed, the state spaces match and the test must change.
-  describe "known differences in the TLA+ translation" do
-    test "div/2 and rem/2 on negative numbers", %{tmp_dir: tmp_dir} do
-      assert_state_space_differs(Accord.Test.Probe.DivRem.Protocol, tmp_dir)
+  # Each probe uses a form where the TLA+ translation once differed from
+  # the runtime monitor. The cross-check found each difference; the
+  # translation now makes the same choices as the monitor.
+  describe "probes for fixed translation defects" do
+    for {name, protocol} <- [
+          {"div/2 and rem/2 on negative numbers", Accord.Test.Probe.DivRem.Protocol},
+          {"an update that ignores an earlier message argument",
+           Accord.Test.Probe.UnderscoreArgs.Protocol},
+          {"a reply with two values in an update case", Accord.Test.Probe.TripleReply.Protocol},
+          {"two call branches that accept the same reply",
+           Accord.Test.Probe.OverlapBranches.Protocol},
+          {"two cast branches whose where: predicates overlap",
+           Accord.Test.Probe.OverlapCast.Protocol}
+        ] do
+      @protocol protocol
+      test name, %{tmp_dir: tmp_dir} do
+        report = run(@protocol, tmp_dir)
+        assert Report.ok?(report), Report.format(report)
+        assert %{status: :match} = outcome(report, "state space")
+      end
     end
-
-    test "an update that ignores an earlier message argument", %{tmp_dir: tmp_dir} do
-      assert_state_space_differs(Accord.Test.Probe.UnderscoreArgs.Protocol, tmp_dir)
-    end
-
-    test "a reply with two values in an update case", %{tmp_dir: tmp_dir} do
-      assert_state_space_differs(Accord.Test.Probe.TripleReply.Protocol, tmp_dir)
-    end
-
-    test "two call branches that accept the same reply", %{tmp_dir: tmp_dir} do
-      assert_state_space_differs(Accord.Test.Probe.OverlapBranches.Protocol, tmp_dir)
-    end
-
-    test "two cast branches whose where: predicates overlap", %{tmp_dir: tmp_dir} do
-      assert_state_space_differs(Accord.Test.Probe.OverlapCast.Protocol, tmp_dir)
-    end
-  end
-
-  defp assert_state_space_differs(protocol, tmp_dir) do
-    report = run(protocol, tmp_dir)
-    refute Report.ok?(report)
-    assert %{status: :mismatch} = outcome(report, "state space")
   end
 
   # A replay that accepts every trace would make each "both traces

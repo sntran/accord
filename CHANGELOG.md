@@ -21,9 +21,28 @@ All notable changes to this project are documented in this file.
   (`Accord.CrossCheck.RandomProtocol`).
 - Each protocol module has `__model_config__/0`: the resolved model
   config of its spec.
-- The first cross-check runs found five differences between the monitor
-  and the TLA+ spec. Probe protocols in `test/support/probes/` pin them.
-  See `docs/cross-check.md` and ADR-012.
+
+### TLA+ translation fixes
+
+The first cross-check runs found five places where the TLA+ spec did not
+match the monitor. All are fixed; probe protocols in
+`test/support/probes/` check them. See `docs/cross-check.md`.
+
+- A function head that ignores an argument (`fn {:put, _a, b}, ...`) now
+  binds `b` to its own position. Before, the spec read `a`. Guard and
+  `where:` heads can now also use names that differ from the declared
+  argument names.
+- An update `case` arm for a reply with two or more values
+  (`{:ok, a, _b} -> ...`) is now translated. Before, it was dropped and
+  the track was `UNCHANGED`. Arms are tried in order, as in Elixir. An
+  arm that matches only some replies of a branch is an E042 error.
+- Call branches and cast branches now select the first branch that
+  accepts the reply or message, as the monitor does. Before, the spec let
+  any accepting branch run.
+- `div/2` and `rem/2` now round toward zero, as in Elixir. Before, the
+  spec rounded down.
+- Unary minus now translates. An unknown `state` option is now a compile
+  error, not dropped.
 
 ## 0.2.0 — 2026-09-11
 

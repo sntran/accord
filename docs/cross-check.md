@@ -125,18 +125,19 @@ make more test cases:
 - `Accord.CrossCheck.RandomProtocol` writes random protocol source from a
   seed: states, tracks, calls, casts, events, state timeouts, guards,
   updates, `where:` constraints, properties, and sometimes two sessions
-  with shared tracks. The same seed gives the same source. By default it
-  does not use the forms in the next section. Use `--known` to include
-  some of them.
+  with shared tracks. The same seed gives the same source. It also uses
+  the forms in the next section.
 
-## Known differences between the monitor and the TLA+ spec
+## Differences that the cross-check found, and their fixes
 
-The first cross-check runs found these differences. Each has a probe
-protocol in `test/support/probes/`, and a test in
-`test/accord/cross_check_test.exs` that pins it. When the translation is
-fixed, the probe state graphs match, and the test must change.
+The first cross-check runs found five differences between the monitor
+and the TLA+ spec. All five are now fixed in `Accord.Pass.TLA.BuildActions`
+and `Accord.TLA.GuardCompiler`. Each has a probe protocol in
+`test/support/probes/`, and `test/accord/cross_check_test.exs` checks that
+its state graph is the same in the explorer and in TLC. The random
+protocols also use all five forms.
 
-### 1. An update reads the wrong message argument (TLC can miss bugs)
+### 1. An update read the wrong message argument (TLC could miss bugs)
 
 ```elixir
 on {:put, a :: non_neg_integer(), b :: non_neg_integer()} do
@@ -144,12 +145,17 @@ on {:put, a :: non_neg_integer(), b :: non_neg_integer()} do
 end
 ```
 
-The spec has `x' = msg_a`. `BuildActions` drops the underscore names from
-the update head and then binds the other names by position, so `b` gets
-the position of `a`. The same occurs for event updates. Probe:
+The spec had `x' = msg_a`. The translation dropped the underscore names
+from the update head and then bound the other names by position, so `b`
+got the position of `a`. The same occurred for event updates.
+
+**Fix:** a name in a function head binds to the argument at its own
+position. An ignored position binds nothing. This also applies to guard
+heads and cast `where:` heads, so a head can use a name that is
+different from the declared name. Probe:
 `Accord.Test.Probe.UnderscoreArgs.Protocol`.
 
-### 2. An update arm for a two-value reply is dropped (TLC can miss bugs)
+### 2. An update arm for a reply with two values was dropped (TLC could miss bugs)
 
 ```elixir
 branch {:ok, a :: non_neg_integer(), b :: non_neg_integer()}, goto: :ready
@@ -162,39 +168,60 @@ update fn :get, reply, tracks ->
 end
 ```
 
-The spec has `UNCHANGED x` for both branches. The case-arm match in
-`BuildActions` knows only two-element patterns (`{tag, value}`), so it
-falls to the `_` arm. An invariant over `x` then holds in TLC for no
-reason. This is a silent drop, which ADR-007 forbids. Probe:
-`Accord.Test.Probe.TripleReply.Protocol`.
+The spec had `UNCHANGED x` for both branches. The case-arm match knew
+only two-element patterns (`{tag, value}`), so it fell to the `_` arm,
+and an invariant over `x` held in TLC for no reason.
 
-### 3. Two call branches that accept the same reply
+**Fix:** a reply pattern has one existential for each position that is
+read, and the case-arm match compares the tag and the size. The arms are
+tried in their order, as in Elixir. An arm that matches only some replies
+of a branch (a literal against a general type, such as `{:ok, 0}` against
+`{:ok, n :: integer()}`) cannot be selected statically, so it is an E042
+error, not a guess. Probe: `Accord.Test.Probe.TripleReply.Protocol`.
+
+### 3. Two call branches that accepted the same reply
 
 ```elixir
 branch({:ok, n :: pos_integer()}, goto: :high, where: fn {:ok, n}, _ -> n > 1 end)
 branch({:ok, n :: pos_integer()}, goto: :low)
 ```
 
-The monitor gives `{:ok, 2}` to the first branch only. The spec makes one
-action for each branch, so `{:ok, 2}` can also go to `:low`. TLC then
-explores steps that the monitor does not allow. This can give a false
-counterexample. It cannot hide an invariant violation, but it can hide a
-deadlock: a state with no monitor step can have a step in the spec.
-Probe:
-`Accord.Test.Probe.OverlapBranches.Protocol`.
+The monitor gives `{:ok, 2}` to the first branch only. The spec made one
+action for each branch, so `{:ok, 2}` could also go to `:low`. TLC then
+explored steps that the monitor does not allow. This could give a false
+counterexample, or hide a deadlock.
 
-### 4. Two cast branches whose `where:` predicates overlap
+**Fix:** a branch action has a first-match precondition: for each
+earlier branch that can accept the same reply, the reply fails that
+branch's type or its `where:`. The action for `:low` has
+`~((reply_n > 1))`. A branch after an equal branch without `where:`
+never runs (`FALSE`). Probe: `Accord.Test.Probe.OverlapBranches.Protocol`.
 
-The same as 3, for `cast` branches. Probe:
-`Accord.Test.Probe.OverlapCast.Protocol`. Mutants that remove a `where:`
-often make this case.
+### 4. Two cast branches whose `where:` predicates overlapped
+
+The same as 3, for `cast` branches. **Fix:** a cast branch action has
+the negation of each earlier `where:` as a precondition. Probe:
+`Accord.Test.Probe.OverlapCast.Protocol`.
 
 ### 5. `div/2` and `rem/2` on negative numbers
 
 Elixir rounds toward zero: `div(-1, 2) == 0` and `rem(-1, 2) == -1`. The
-spec uses `\div` and `%`, which round down: `-1 \div 2 = -1` and
-`-1 % 2 = 1`. The two models have the same number of states but
-different states. Probe: `Accord.Test.Probe.DivRem.Protocol`.
+spec used `\div` and `%`, which round down: `-1 \div 2 = -1` and
+`-1 % 2 = 1`. The two models had the same number of states but different
+states.
+
+**Fix:** the translation computes `\div` and `%` on the absolute values
+and sets the sign as Elixir does. Probe:
+`Accord.Test.Probe.DivRem.Protocol`.
+
+### Two smaller defects
+
+- Unary minus (`-x`, and a negative literal such as `-2` in an
+  expression) had no translation. It was a loud E041 error. It now
+  translates to `-(x)`.
+- An unknown `state` option, such as `state :waiting, state_timeout: ...`,
+  was dropped with no message. It is now a compile error that tells you
+  to use `state_timeout ms, goto: :state` in the state block.
 
 ## TLC notes
 
