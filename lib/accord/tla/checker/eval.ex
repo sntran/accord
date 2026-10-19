@@ -761,7 +761,8 @@ defmodule Accord.TLA.Checker.Eval do
 
   # -- LET --
 
-  defp let_env(defs, env) do
+  @doc false
+  def let_env(defs, env) do
     ref = if env.gen, do: nil, else: make_ref()
 
     Enum.reduce(defs, env, fn

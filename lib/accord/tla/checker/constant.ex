@@ -31,6 +31,12 @@ defmodule Accord.TLA.Checker.Constant do
     end
   end
 
+  @doc """
+  Tells if an expression of scope `sid` is of constant level. `local`:
+  the bound names (they have constant values).
+  """
+  def expression?(e, ctx, sid, local), do: expr?(e, ctx, sid, MapSet.new(local))
+
   # `local`: the names that the expression binds (quantifiers, LET, the
   # parameters of a definition).
   defp expr?(e, ctx, sid, local) do

@@ -184,6 +184,7 @@ defmodule Accord.TLA.Checker.Search do
       ctx: ctx,
       init: spec.init,
       next: spec.next,
+      actions_next: if(spec.next, do: Spec.actions(ctx, spec.next, config.next || "Next")),
       fairness: spec.fairness,
       invariants:
         Enum.map(config.invariants, &{&1, root.(&1)}) ++
@@ -418,44 +419,52 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
+  # The steps from a state: the actions of the next-state relation (see
+  # `Spec.actions/3`), one after the other, as TLC does. The count of
+  # generated states grows by the steps of each action before their check.
   defp expand(base, model, st, id) do
     {state, _parent, _label, depth} = Map.fetch!(st.nodes, id)
     Eval.reset_cache()
     Process.put(:tla_stats_distinct, map_size(st.seen))
-    Process.put(:tla_stats_generated, st.generated)
     Process.put(:tla_stats_queue, :queue.len(st.queue))
-    {e, scope, bound, frames} = model.next
-
-    env = %{
-      Eval.new(model.ctx)
-      | scope: scope,
-        bound: bound,
-        frames: frames,
-        state: state,
-        next: %{},
-        label: "Next",
-        label_mode: true,
-        level: depth
-    }
-
-    Process.put(:tla_extra_generated, 0)
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace(st, id)) end)
 
-    successors =
-      try do
-        Eval.gen(e, env, :next)
-      rescue
-        err in Value.Error ->
-          raise Stop,
-            result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st)
-      end
+    {st, any?} =
+      Enum.reduce(model.actions_next, {st, false}, fn {{e, scope, bound, frames}, name}, {st, any?} ->
+        Process.put(:tla_stats_generated, st.generated)
+        Process.put(:tla_extra_generated, 0)
 
-    st = %{
-      st
-      | generated: st.generated + length(successors) + Process.get(:tla_extra_generated, 0)
-    }
+        env = %{
+          Eval.new(model.ctx)
+          | scope: scope,
+            bound: bound,
+            frames: frames,
+            state: state,
+            next: %{},
+            label: name,
+            level: depth
+        }
 
-    if successors == [] and base.deadlock do
+        successors =
+          try do
+            Eval.gen(e, env, :next)
+          rescue
+            err in Value.Error ->
+              raise Stop, result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st)
+          end
+
+        st = %{st | generated: st.generated + length(successors) + Process.get(:tla_extra_generated, 0)}
+
+        st =
+          Enum.reduce(successors, st, fn {p, label}, st ->
+            next_state = complete!(model, p, "the action #{label}", trace(st, id), base, st)
+            step(base, model, st, id, state, next_state, label, depth)
+          end)
+
+        {st, any? or successors != []}
+      end)
+
+    if not any? and base.deadlock do
       raise Stop,
         result: %{
           result(model.ctx)
@@ -467,10 +476,7 @@ defmodule Accord.TLA.Checker.Search do
         }
     end
 
-    Enum.reduce(successors, st, fn {p, label}, st ->
-      next_state = complete!(model, p, "the action #{label}", trace(st, id), base, st)
-      step(base, model, st, id, state, next_state, label, depth)
-    end)
+    st
   end
 
   defp step(base, model, st, id, state, next_state, label, depth),

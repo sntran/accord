@@ -73,6 +73,73 @@ defmodule Accord.TLA.Checker.Spec do
     end
   end
 
+  @doc """
+  Splits the next-state action into the actions of TLC: the disjuncts,
+  one action for each value of a `\\E` over a constant set, and the body
+  of a definition applied to constant arguments. Gives
+  `[{closure, name}]`; the name is the name of the last definition (or
+  `default`). TLC generates the steps of one action after the other.
+  """
+  def actions(ctx, {e, scope, bound, frames}, default) do
+    env = %{Eval.new(ctx) | scope: scope, bound: bound, frames: frames}
+    split(e, env, default)
+  end
+
+  defp split(e, env, name) do
+    case e do
+      {:or, items} ->
+        Enum.flat_map(items, &split(&1, env, name))
+
+      {:label, _, inner} ->
+        split(inner, env, name)
+
+      {:let, defs, body} ->
+        split(body, Eval.let_env(defs, %{env | gen: true}), name)
+
+      {:exists, binds, body} ->
+        case constant_bindings(binds, env) do
+          {:ok, envs} -> Enum.flat_map(envs, &split(body, &1, name))
+          :error -> [{closure(e, env), name}]
+        end
+
+      {:name, n, _} ->
+        split_call(e, n, [], env, name)
+
+      {:app, n, args, _} ->
+        split_call(e, n, args, env, name)
+
+      _ ->
+        [{closure(e, env), name}]
+    end
+  end
+
+  # The values of the bound variables, when the sets are constant.
+  defp constant_bindings(binds, env) do
+    if Enum.all?(binds, fn {_, set} -> set != nil and constant?(set, env) end),
+      do: {:ok, bindings(env, binds)},
+      else: :error
+  rescue
+    Value.Error -> :error
+  end
+
+  defp constant?(e, env), do: Accord.TLA.Checker.Constant.expression?(e, env.ctx, env.scope, Map.keys(env.bound))
+
+  defp split_call(e, n, args, env, name) do
+    with false <- Map.has_key?(env.bound, n),
+         {:def, %{kind: :op} = d, sid} <- Context.lookup(env.ctx, env.scope, n),
+         true <- length(d.params) == length(args),
+         true <- Enum.all?(d.params, fn {_, arity} -> arity == 0 end),
+         true <- Enum.all?(args, &constant?(&1, env)) do
+      values = Enum.map(args, &Eval.eval(&1, env))
+      bound = d.params |> Enum.map(&elem(&1, 0)) |> Enum.zip(values) |> Map.new()
+      split(d.body, %{env | scope: sid, bound: bound}, n)
+    else
+      _ -> [{closure(e, env), name}]
+    end
+  rescue
+    Value.Error -> [{closure(e, env), name}]
+  end
+
   defp ref(name, env) do
     if Context.lookup(env.ctx, env.scope, name) == nil,
       do: error("#{name} is not defined in the root module")
