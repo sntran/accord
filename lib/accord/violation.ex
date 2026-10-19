@@ -33,6 +33,8 @@ defmodule Accord.Violation do
   - `:precedence_violated` — entered a state without required predecessor.
   - `:ordering_violated` — a monotonicity check on message fields failed.
   - `:correspondence_violated` — a close event fired without a matching open.
+  - `:spec_error` — a TLA+ contract (`Accord.Spec`) cannot be evaluated
+    for a message.
   """
 
   @type blame :: :client | :server | :property
@@ -53,6 +55,7 @@ defmodule Accord.Violation do
           | :precedence_violated
           | :ordering_violated
           | :correspondence_violated
+          | :spec_error
 
   @type t :: %__MODULE__{
           blame: blame(),
