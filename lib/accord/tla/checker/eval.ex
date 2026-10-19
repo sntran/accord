@@ -35,7 +35,7 @@ defmodule Accord.TLA.Checker.Eval do
   names the actions of `Next`.
   """
 
-  alias Accord.TLA.Checker.{Community, Context, Stdlib, Value}
+  alias Accord.TLA.Checker.{Community, Constant, Context, Stdlib, Value}
   import Value, only: [error: 1]
 
   defstruct [
@@ -50,7 +50,10 @@ defmodule Accord.TLA.Checker.Eval do
     gen: false,
     label: nil,
     label_mode: false,
-    level: 1
+    level: 1,
+    # In ENABLED: a variable of an instance that a substitution replaces
+    # with an expression can take a value as a pseudo variable, as in TLC.
+    pseudo: false
   ]
 
   @core ~w(= /= \\in \\notin \\subseteq \\cup \\cap \\ SUBSET UNION DOMAIN)
@@ -383,6 +386,13 @@ defmodule Accord.TLA.Checker.Eval do
   # `env` is where the entry is (for an instance path, the instance).
   defp invoke_entry(entry, name, args, caller, env) do
     case entry do
+      # A definition of constant level: one evaluation (as TLC, which
+      # evaluates them before the search).
+      {:def, %{kind: :op, params: []} = d, sid} when args == [] ->
+        if Constant.definition?(env.ctx, sid, d),
+          do: constant_value(d, sid, env),
+          else: eval(d.body, %{env | scope: sid, bound: %{}})
+
       {:def, %{kind: :op} = d, sid} ->
         values = prepare(args, d.params, caller)
         eval(d.body, %{env | scope: sid, bound: param_map(d, values)})
@@ -432,7 +442,12 @@ defmodule Accord.TLA.Checker.Eval do
 
         case {args, expr} do
           {[], _} ->
-            eval(expr, outer_env)
+            # A pseudo variable (see `:pseudo`) that ENABLED gave a value.
+            key = {:pseudo, env.scope, name}
+
+            if env.primed and is_map(env.next) and Map.has_key?(env.next, key),
+              do: Map.fetch!(env.next, key),
+              else: eval(expr, outer_env)
 
           {_, {:name, g, _}} ->
             invoke_named(g, args, caller, outer_env)
@@ -449,6 +464,20 @@ defmodule Accord.TLA.Checker.Eval do
 
       {:instance, _, _, _} ->
         error("the instance #{name} is used without `!`")
+    end
+  end
+
+  defp constant_value(d, sid, env) do
+    key = {env.ctx.id, sid, d.name}
+
+    case Map.fetch(Process.get(:tla_constants) || %{}, key) do
+      {:ok, v} ->
+        v
+
+      :error ->
+        v = eval(d.body, %{env | scope: sid, bound: %{}, state: nil, next: nil, primed: false, gen: false})
+        Process.put(:tla_constants, Map.put(Process.get(:tla_constants) || %{}, key, v))
+        v
     end
   end
 
@@ -494,7 +523,23 @@ defmodule Accord.TLA.Checker.Eval do
   defp prepare(args, params, _env),
     do: error("wrong number of arguments: #{length(args)} for #{length(params)}")
 
-  defp prepare_native(op, args, env, mod \\ nil) do
+  defp prepare_native(op, args, env, mod \\ nil)
+
+  # AssertError(msg, e) is true when e fails to evaluate; the checker does
+  # not compare its error text with the text of TLC.
+  defp prepare_native("AssertError", [msg, e], env, _mod) do
+    failed =
+      try do
+        eval(e, env)
+        false
+      rescue
+        Value.Error -> true
+      end
+
+    [eval(msg, env), failed]
+  end
+
+  defp prepare_native(op, args, env, mod) do
     case Community.op_params(mod, op) || Stdlib.op_params(op) do
       nil -> eval_all(args, env)
       arities -> native_args(args, arities, env)
@@ -852,7 +897,7 @@ defmodule Accord.TLA.Checker.Eval do
   @doc "`ENABLED a` in the current state."
   def enabled?(a, env) do
     if env.primed, do: error("ENABLED inside a primed expression")
-    env = %{env | next: %{}, gen: true, label_mode: false}
+    env = %{env | next: %{}, gen: true, label_mode: false, pseudo: true}
     gen(a, env, :next) != []
   end
 
@@ -1020,7 +1065,11 @@ defmodule Accord.TLA.Checker.Eval do
     case unchanged_vars(e, env) do
       {:ok, vars} ->
         Enum.reduce_while(vars, leaf(env, :next), fn i, [{p, label}] ->
-          current = read_var(i, %{env | primed: false})
+          current =
+            case i do
+              {:pseudo, sid, n} -> eval({:name, n, nil}, %{env | scope: sid, primed: false})
+              _ -> read_var(i, %{env | primed: false})
+            end
 
           case Map.fetch(p, i) do
             {:ok, v} -> if v == current, do: {:cont, [{p, label}]}, else: {:halt, []}
@@ -1143,6 +1192,12 @@ defmodule Accord.TLA.Checker.Eval do
   # the name.
   defp gen_entry(entry, n, args, e, caller, env, mode) do
     case entry do
+      # A constant definition is a value for TLC: a condition.
+      {:def, %{kind: :op, params: []} = d, sid} when args == [] and not is_nil(d) ->
+        if Constant.definition?(env.ctx, sid, d),
+          do: guard(e, caller, mode),
+          else: do_gen(d.body, %{caller | scope: sid, bound: %{}, frames: env.frames, label: label(caller, n)}, mode)
+
       {:def, %{kind: :op} = d, sid} ->
         values = prepare(args, d.params, caller)
 
@@ -1203,11 +1258,15 @@ defmodule Accord.TLA.Checker.Eval do
   # (TLC does this in the next-state relation only with warnings on, its
   # default; `-nowarning` turns it off.)
   defp gen_item(item, env, mode) do
-    if map_size(partial(env, mode)) == tuple_size(env.ctx.variables) and
+    if all_assigned?(partial(env, mode), tuple_size(env.ctx.variables)) and
          (mode == :init or Process.get(:tla_warn, true)),
        do: guard(item, env, mode),
        else: do_gen(item, env, mode)
   end
+
+  defp all_assigned?(p, n) when map_size(p) < n, do: false
+  defp all_assigned?(p, n) when map_size(p) == n, do: Enum.all?(Map.keys(p), &is_integer/1)
+  defp all_assigned?(p, n), do: Enum.count(Map.keys(p), &is_integer/1) == n
 
   # The bound variables and the body of `f` when it is a function
   # definition (or a function constructor).
@@ -1292,7 +1351,10 @@ defmodule Accord.TLA.Checker.Eval do
         {:ok, i}
 
       {:subst, expr, outer, frame} ->
-        var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
+        case var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
+          :no when env.pseudo -> {:ok, {:pseudo, env.scope, n}}
+          other -> other
+        end
 
       _ ->
         :no
@@ -1350,7 +1412,10 @@ defmodule Accord.TLA.Checker.Eval do
         unchanged_vars(d.body, %{env | scope: sid, bound: %{}})
 
       {:subst, expr, outer, frame} ->
-        unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
+        case unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
+          :complex when env.pseudo -> {:ok, [{:pseudo, env.scope, n}]}
+          other -> other
+        end
 
       _ ->
         :complex

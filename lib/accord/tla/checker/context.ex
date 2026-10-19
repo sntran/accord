@@ -97,7 +97,7 @@ defmodule Accord.TLA.Checker.Context do
       var_index: var_index,
       config: config,
       modules: state.modules,
-      assumes: Enum.reverse(state.assumes),
+      assumes: state.assumes,
       paths: paths,
       root_scopes: state.root_scopes,
       let_instances: state.let_instances
@@ -233,7 +233,7 @@ defmodule Accord.TLA.Checker.Context do
         {:root, _} ->
           %{
             state
-            | assumes: Enum.map(mod.assumes, fn {e, pos} -> {e, id, pos} end) ++ state.assumes
+            | assumes: state.assumes ++ Enum.map(mod.assumes, fn {e, pos} -> {e, id, pos} end)
           }
 
         _ ->

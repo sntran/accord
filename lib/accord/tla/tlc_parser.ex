@@ -87,7 +87,7 @@ defmodule Accord.TLA.TLCParser do
         String.contains?(line, "Error: Deadlock reached.") ->
           {:halt, :deadlock}
 
-        match = Regex.run(~r/^Error: Temporal property (.+) is violated/, line) ->
+        match = Regex.run(~r/^Error: Temporal property (.+?) (?:is|was) violated/, line) ->
           {:halt, {:temporal, Enum.at(match, 1)}}
 
         String.contains?(line, "Error: Temporal properties were violated.") ->

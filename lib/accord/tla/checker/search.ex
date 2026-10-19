@@ -37,6 +37,8 @@ defmodule Accord.TLA.Checker.Search do
   def run(%Context{} = ctx, opts \\ []) do
     config = ctx.config
     Eval.reset_cache()
+    # The memos of an earlier run (in the same process) are of no use.
+    Enum.each([:tla_constants, :tla_constant_defs, :tla_levels], &Process.delete/1)
     Process.put(:tla_registers, %{})
     Process.put(:tla_properties, Keyword.get(opts, :properties, %{}))
     Process.put(:tla_warn, Keyword.get(opts, :warn, true))
@@ -61,6 +63,7 @@ defmodule Accord.TLA.Checker.Search do
         %{result(ctx) | status: :ok}
       else
         model = setup(ctx, base, fn -> model(ctx, spec, config) end)
+      constant_invariants(model, base)
 
         extra =
           for {text, e} <- Keyword.get(opts, :invariant_exprs, []),
@@ -107,6 +110,24 @@ defmodule Accord.TLA.Checker.Search do
                 :config
               )
           )
+    end)
+  end
+
+  # An invariant that is a constant FALSE: TLC reports it as a config
+  # error, before the search.
+  defp constant_invariants(model, base) do
+    Enum.each(model.invariants, fn {name, {e, scope, bound, frames}} ->
+      env = %{Eval.new(model.ctx) | scope: scope, bound: bound, frames: frames, state: nil, level: 0}
+
+      constant_false =
+        try do
+          Eval.bool(e, env) == false
+        rescue
+          Value.Error -> false
+        end
+
+      if constant_false,
+        do: raise(Stop, result: error_result(model.ctx, "The invariant of #{name} is equal to FALSE", [], base, nil, :config))
     end)
   end
 
@@ -344,9 +365,6 @@ defmodule Accord.TLA.Checker.Search do
     end)
   end
 
-  # TLC counts a new state before it checks the invariants.
-  defp stats_with_new(st), do: %{stats(st) | distinct: map_size(st.seen) + 1}
-
   defp stats(st),
     do: %{
       generated: st.generated,
@@ -374,7 +392,7 @@ defmodule Accord.TLA.Checker.Search do
 
     Enum.reduce(partials, st, fn {p, _label}, st ->
       state = complete!(model, p, "the initial predicate", [], base, st)
-      add_state(base, model, st, state, nil, nil, 1)
+      visit(base, model, st, state, nil, nil, 1)
     end)
   end
 
@@ -455,32 +473,8 @@ defmodule Accord.TLA.Checker.Search do
     end)
   end
 
-  defp step(base, model, st, id, state, next_state, label, depth) do
-    env = %{Eval.new(model.ctx) | state: state, next: next_state, level: depth}
-
-    witness(model, :action, env)
-
-    if Enum.all?(model.action_constraints, &holds?(&1, env, model, st, id, base)) do
-      Enum.each(model.actions, fn {name, a, sub} ->
-        unless action_holds?(a, sub, env, model, st, id, base) do
-          raise Stop,
-            result: %{
-              result(model.ctx)
-              | status: :violated,
-                kind: :action_property,
-                property: name,
-                trace: trace(st, id) ++ [%{state: next_state, action: label}],
-                stats: stats(st),
-                warnings: base.warnings
-            }
-        end
-      end)
-
-      add_state(base, model, st, next_state, id, label, depth + 1)
-    else
-      st
-    end
-  end
+  defp step(base, model, st, id, state, next_state, label, depth),
+    do: visit(base, model, st, next_state, {id, state}, label, depth + 1)
 
   defp action_holds?(
          {a, scope, bound, frames},
@@ -504,76 +498,104 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
-  # Adds a state that a step (or the initial predicate) gives.
-  defp add_state(base, model, st, state, parent, label, depth) do
+  # Visits a state that the initial predicate (`from` is nil) or a step
+  # from `{id, state}` gives, in the order of TLC:
+  #
+  # 1. The state is in the model when it satisfies the state constraints
+  #    and the step satisfies the action constraints.
+  # 2. A state in the model goes in the set of seen states (when it is
+  #    new) and in the queue.
+  # 3. A new state (or one that is not in the model) must satisfy the
+  #    invariants (and, for an initial state, the state predicates of the
+  #    properties).
+  # 4. Each step must satisfy the action properties.
+  defp visit(base, model, st, state, from, label, depth) do
+    parent = if from, do: elem(from, 0)
+
+    partial_trace = fn ->
+      if(parent, do: trace(st, parent), else: []) ++ [%{state: state, action: label}]
+    end
+
+    Process.put(:tla_trace_fun, fn _ -> trace_value(model, partial_trace.()) end)
+    # TLC checks a new state with the level of its predecessor (0 for an
+    # initial state).
+    env = %{Eval.new(model.ctx) | state: state, level: depth - 1}
+    step_env = if from, do: %{Eval.new(model.ctx) | state: elem(from, 1), next: state, level: depth - 1}
+
+    # The _POSSIBLE predicates go after the constraints, as in TLC: a
+    # state predicate is a state constraint, an action is an action
+    # constraint (both always true).
+    in_model =
+      Enum.all?(model.constraints, &holds?(&1, env, model, st, nil, base, partial_trace)) and
+        witness(model, :state, env) == :ok and
+        (from == nil or
+           (Enum.all?(model.action_constraints, &holds?(&1, step_env, model, st, parent, base)) and
+              witness(model, :action, step_env) == :ok))
+
     key = fingerprint(model, state)
 
-    case Map.fetch(st.seen, key) do
-      {:ok, existing} ->
-        record_edge(st, parent, existing, label)
+    {st, unseen} =
+      cond do
+        not in_model ->
+          {st, :outside}
 
-      :error ->
-        partial_trace = fn ->
-          if(parent, do: trace(st, parent), else: []) ++ [%{state: state, action: label}]
-        end
+        Map.has_key?(st.seen, key) ->
+          {record_edge(st, parent, Map.fetch!(st.seen, key), label), nil}
 
-        Process.put(:tla_trace_fun, fn _ -> trace_value(model, partial_trace.()) end)
-        # TLC checks a new state with the level of its predecessor (0 for
-        # an initial state).
-        env = %{Eval.new(model.ctx) | state: state, level: depth - 1}
-
-        if parent == nil do
-          Enum.each(model.init_props, fn {name, closure} ->
-            unless holds?(closure, env, model, st, nil, base, partial_trace) do
-              raise Stop,
-                result: %{
-                  result(model.ctx)
-                  | status: :violated,
-                    kind: :init_property,
-                    property: name,
-                    trace: partial_trace.(),
-                    stats: stats_with_new(st),
-                    warnings: base.warnings
-                }
-            end
-          end)
-        end
-
-        Enum.each(model.invariants, fn {name, closure} ->
-          unless holds?(closure, env, model, st, nil, base, partial_trace, :safety_eval) do
-            raise Stop,
-              result: %{
-                result(model.ctx)
-                | status: :violated,
-                  kind: :invariant,
-                  property: name,
-                  trace: partial_trace.(),
-                  stats: stats_with_new(st),
-                  warnings: base.warnings
-              }
-          end
-        end)
-
-        witness(model, :state, env)
-
-        if Enum.all?(model.constraints, &holds?(&1, env, model, st, nil, base, partial_trace)) do
+        true ->
           id = st.next_id
 
           st = %{
             st
             | seen: Map.put(st.seen, key, id),
               nodes: Map.put(st.nodes, id, {state, parent, label, depth}),
-              queue: :queue.in(id, st.queue),
               next_id: id + 1,
               depth: max(st.depth, depth),
               init_ids: if(parent == nil, do: [id | st.init_ids], else: st.init_ids)
           }
 
-          record_edge(st, parent, id, label)
-        else
-          st
-        end
+          {record_edge(st, parent, id, label), {:new, id}}
+      end
+
+    if unseen != nil do
+      if from == nil do
+        Enum.each(model.init_props, fn {name, closure} ->
+          unless holds?(closure, env, model, st, nil, base, partial_trace),
+            do: violation(model, base, st, :init_property, name, partial_trace.())
+        end)
+      end
+
+      Enum.each(model.invariants, fn {name, closure} ->
+        unless holds?(closure, env, model, st, nil, base, partial_trace, :safety_eval),
+          do: violation(model, base, st, :invariant, name, partial_trace.())
+      end)
     end
+
+    if from do
+      Enum.each(model.actions, fn {name, a, sub} ->
+        unless action_holds?(a, sub, step_env, model, st, parent, base),
+          do: violation(model, base, st, :action_property, name, partial_trace.())
+      end)
+    end
+
+    # A new state goes in the queue after the checks, as in TLC.
+    case unseen do
+      {:new, id} -> %{st | queue: :queue.in(id, st.queue)}
+      _ -> st
+    end
+  end
+
+  defp violation(model, base, st, kind, name, trace) do
+    raise Stop,
+      result: %{
+        result(model.ctx)
+        | status: :violated,
+          kind: kind,
+          property: name,
+          trace: trace,
+          stats: stats(st),
+          warnings: base.warnings
+      }
   end
 
   defp record_edge(%{edges: nil} = st, _from, _to, _label), do: st
@@ -850,7 +872,8 @@ defmodule Accord.TLA.Checker.Search do
         next: %{},
         scope: scope,
         bound: bound,
-        frames: frames
+        frames: frames,
+        pseudo: true
     }
 
     current = sub_value.(state, nil)

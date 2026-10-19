@@ -174,8 +174,17 @@ defmodule Accord.TLA.Checker.Stdlib do
   # -- Sequences --
 
   defp op("Seq", [s], _), do: {:seq_set, s}
+  # A string is also a sequence (of characters) for Len, \o and SubSeq,
+  # as in TLC.
+  defp op("Len", [s], _) when is_binary(s), do: String.length(s)
   defp op("Len", [s], _), do: s |> seq() |> tuple_size()
+  defp op("\\o", [a, b], _) when is_binary(a) and is_binary(b), do: a <> b
   defp op("\\o", [a, b], _), do: {:seq, List.to_tuple(Value.seq_list(a) ++ Value.seq_list(b))}
+
+  defp op("SubSeq", [s, m, n], _) when is_binary(s) do
+    {m, n} = {int(m), int(n)}
+    if m > n, do: "", else: String.slice(s, (m - 1)..(n - 1)//1)
+  end
 
   defp op("Append", [s, e], _),
     do: {:seq, s |> Value.seq_list() |> Kernel.++([Value.canon(e)]) |> List.to_tuple()}
@@ -435,7 +444,7 @@ defmodule Accord.TLA.Checker.Stdlib do
     |> Value.tuple()
   end
 
-  defp op("AssertError", [_msg, _expr], _), do: true
+  defp op("AssertError", [_msg, _failed], _), do: true
   defp op("TLCModelValue", [name], _), do: {:mv, name}
   defp op("TLCNoOp", [v], _), do: v
   defp op("TLCDefer", [v], _), do: v

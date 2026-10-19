@@ -237,28 +237,31 @@ defmodule Accord.TLA.Checker.Community do
   end
 
   # -- Json --
+  # As TLC's Json module: a record (or a function with strings in its
+  # domain) is an object, a sequence or a set is an array.
 
-  defp op("Json", "ToJson", [v], _env), do: JSON.encode!(to_json(v))
-  defp op("Json", "ToJsonArray", [v], _env), do: JSON.encode!(json_list(v))
-  defp op("Json", "ToJsonObject", [v], _env), do: JSON.encode!(json_object(v))
+  defp op("Json", "ToJson", [v], _env), do: v |> json_node() |> json_text()
+  defp op("Json", "ToJsonArray", [v], _env), do: v |> json_array() |> json_text()
+  defp op("Json", "ToJsonObject", [v], _env), do: v |> json_object() |> json_text()
 
   defp op("Json", "JsonSerialize", [path, v], _env) do
-    File.write!(path, JSON.encode!(to_json(v)))
+    write!(path, v |> json_node() |> json_text())
     true
   end
 
   defp op("Json", "ndJsonSerialize", [path, v], _env) do
-    File.write!(path, v |> Value.seq_list() |> Enum.map_join("\n", &JSON.encode!(to_json(&1))))
+    write!(path, v |> Value.seq_list() |> Enum.map_join("", &(json_text(json_node(&1)) <> "\n")))
     true
   end
 
-  defp op("Json", "JsonDeserialize", [path], _env),
-    do: path |> read!() |> JSON.decode!() |> from_json()
+  defp op("Json", "JsonDeserialize", [path], _env), do: path |> read!() |> JSON.decode!() |> from_json()
 
   defp op("Json", "ndJsonDeserialize", [path], _env) do
     path
     |> read!()
-    |> String.split("\n", trim: true)
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
     |> Enum.map(&(&1 |> JSON.decode!() |> from_json()))
     |> Value.tuple()
   end
@@ -418,25 +421,51 @@ defmodule Accord.TLA.Checker.Community do
   defp permutations([]), do: [[]]
   defp permutations(list), do: for(x <- list, rest <- permutations(list -- [x]), do: [x | rest])
 
-  defp to_json(v) when is_integer(v) or is_boolean(v) or is_binary(v), do: v
-  defp to_json({:mv, n}), do: n
-  defp to_json({:seq, _} = s), do: json_list(s)
-  defp to_json(%MapSet{} = s), do: json_list(s)
-
-  defp to_json({:fun, m} = f) do
-    if Enum.all?(Map.keys(m), &is_binary/1), do: json_object(f), else: json_list(f)
+  defp write!(path, text) do
+    dir = Path.dirname(path)
+    if dir != ".", do: File.mkdir_p!(dir)
+    File.write!(path, text)
   end
 
-  defp to_json(v), do: v |> Value.canon() |> to_json()
+  # JSON values: {:obj, [{key, value}]}, {:arr, [value]}, or a scalar.
+  defp json_node(v) when is_integer(v) or is_boolean(v) or is_binary(v), do: v
+  defp json_node({:mv, n}), do: n
+  defp json_node({:seq, _} = s), do: json_array(s)
+  defp json_node({:fun, _} = f), do: json_object(f)
+  defp json_node(%MapSet{} = s), do: json_array(s)
+  defp json_node({:lazy_fun, _, _} = f), do: f |> Value.canon() |> json_node()
 
-  defp json_list({:seq, t}), do: t |> Tuple.to_list() |> Enum.map(&to_json/1)
-  defp json_list(%MapSet{} = s), do: s |> MapSet.to_list() |> Value.sort() |> Enum.map(&to_json/1)
-  defp json_list({:fun, m}), do: m |> Map.values() |> Enum.map(&to_json/1)
-  defp json_list(v), do: error("cannot convert #{Value.show(v)} to a JSON array")
+  defp json_node(v) do
+    if Value.set?(v), do: v |> Value.canon() |> json_node(), else: error("cannot convert #{Value.show(v)} to JSON")
+  end
 
-  defp json_object({:fun, m}), do: Map.new(m, fn {k, v} -> {to_string(k), to_json(v)} end)
-  defp json_object({:seq, {}}), do: %{}
+  defp json_array({:seq, t}), do: {:arr, t |> Tuple.to_list() |> Enum.map(&json_node/1)}
+  defp json_array({:fun, _} = f), do: json_object(f)
+  defp json_array(%MapSet{} = s), do: {:arr, s |> MapSet.to_list() |> Value.sort() |> Enum.map(&json_node/1)}
+  defp json_array({:lazy_fun, _, _} = f), do: f |> Value.canon() |> json_array()
+
+  defp json_array(v) do
+    if Value.set?(v), do: v |> Value.canon() |> json_array(), else: error("cannot convert #{Value.show(v)} to a JSON array")
+  end
+
+  defp json_object({:seq, _} = s), do: json_array(s)
+
+  defp json_object({:fun, m}) do
+    {:obj,
+     m
+     |> Enum.map(fn {k, v} -> {if(is_binary(k), do: k, else: Value.show(k)), json_node(v)} end)
+     |> Enum.sort_by(&elem(&1, 0))}
+  end
+
+  defp json_object({:lazy_fun, _, _} = f), do: f |> Value.canon() |> json_object()
   defp json_object(v), do: error("cannot convert #{Value.show(v)} to a JSON object")
+
+  defp json_text(true), do: "true"
+  defp json_text(false), do: "false"
+  defp json_text(n) when is_integer(n), do: Integer.to_string(n)
+  defp json_text(s) when is_binary(s), do: JSON.encode!(s)
+  defp json_text({:arr, items}), do: "[" <> Enum.map_join(items, ",", &json_text/1) <> "]"
+  defp json_text({:obj, fields}), do: "{" <> Enum.map_join(fields, ",", fn {k, v} -> JSON.encode!(k) <> ":" <> json_text(v) end) <> "}"
 
   defp from_json(v) when is_integer(v) or is_boolean(v) or is_binary(v), do: v
   defp from_json(v) when is_float(v), do: error("JSON number #{v} is not an integer")
