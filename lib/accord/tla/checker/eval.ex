@@ -86,15 +86,17 @@ defmodule Accord.TLA.Checker.Eval do
   def eval({:app, "\\cdot", [a, b], _}, env) do
     nvars = tuple_size(env.ctx.variables)
 
+    # As TLC, the middle state can be partial (B fails when it reads a
+    # variable that A did not assign).
     a
     |> gen(%{env | next: %{}}, :next)
     |> Enum.any?(fn {m, _} ->
-      map_size(m) == nvars and
-        bool(b, %{
-          env
-          | state: List.to_tuple(for(i <- 0..(nvars - 1)//1, do: Map.fetch!(m, i))),
-            gen: false
-        })
+      middle =
+        if map_size(m) == nvars,
+          do: List.to_tuple(for(i <- 0..(nvars - 1)//1, do: Map.fetch!(m, i))),
+          else: m
+
+      bool(b, %{env | state: middle, gen: false})
     end)
   end
 
@@ -1078,13 +1080,24 @@ defmodule Accord.TLA.Checker.Eval do
         if Map.has_key?(p, i) do
           guard(e, env, mode)
         else
-          v = env |> rhs_env() |> then(&eval(rhs, &1)) |> Value.canon()
+          v = env |> rhs_env() |> then(&eval(rhs, &1)) |> state_value()
           leaf(with_partial(env, mode, Map.put(p, i, v)), mode)
         end
 
       :no ->
         guard(e, env, mode)
     end
+  end
+
+  # The canonical form of a value for a state. TLC fails when it computes
+  # the fingerprint of the state (for example for a set that is too large):
+  # the error is marked `fingerprint`.
+  defp state_value(v) do
+    v = Value.canon(v)
+    # A lazy set in a state: TLC enumerates it for the fingerprint.
+    if Value.lazy?(v), do: MapSet.new(Value.enum(v)), else: v
+  rescue
+    e in Value.Error -> reraise %{e | fingerprint: true}, __STACKTRACE__
   end
 
   defp do_gen({:app, "\\in", [lhs, set], _} = e, env, mode) do

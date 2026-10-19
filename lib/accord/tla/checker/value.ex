@@ -96,7 +96,7 @@ defmodule Accord.TLA.Checker.Value do
   def canon(%MapSet{} = s), do: s
   def canon({:seq, _} = s), do: s
   def canon({:fun, _} = f), do: f
-  def canon({:interval, a, b}), do: MapSet.new(a..b)
+  def canon({:interval, a, b} = s), do: if(b - a >= 100_000, do: s, else: MapSet.new(a..b))
 
   def canon({:lazy_fun, domain, f}) do
     keys = enum(domain)
@@ -109,6 +109,9 @@ defmodule Accord.TLA.Checker.Value do
     cond do
       not lazy_set?(v) -> error("not a value: #{inspect(v)}")
       infinite?(v) -> v
+      # A large set with a known size stays lazy (TLC enumerates it only
+      # when it must).
+      large?(v) -> v
       true -> MapSet.new(enum(v))
     end
   end
@@ -117,6 +120,9 @@ defmodule Accord.TLA.Checker.Value do
   def set?(%MapSet{}), do: true
   def set?(v), do: lazy_set?(v)
 
+  @doc "Tells if a value is a lazy set."
+  def lazy?(v), do: lazy_set?(v)
+
   defp lazy_set?({:interval, _, _}), do: true
   defp lazy_set?(atom) when atom in [:nat, :int, :string, :any], do: true
 
@@ -124,6 +130,7 @@ defmodule Accord.TLA.Checker.Value do
     do: true
 
   defp lazy_set?({:fun_set, _, _}), do: true
+  defp lazy_set?({:ksubset, _, _}), do: true
   defp lazy_set?({kind, _, _}) when kind in [:diff, :cap, :filter], do: true
   defp lazy_set?({:cup, _}), do: true
   defp lazy_set?(_), do: false
@@ -141,6 +148,7 @@ defmodule Accord.TLA.Checker.Value do
   def infinite?({:filter, s, _}), do: infinite?(s)
   def infinite?({:subset, s}), do: infinite?(s)
   def infinite?({:union, s}), do: s |> enum() |> Enum.any?(&infinite?/1)
+  def infinite?({:ksubset, _, _} = s), do: not finite?(s)
 
   # An empty domain gives {<<>>}; an empty range (with a domain that is
   # not empty) gives {}; a range of one element gives one function.
@@ -211,6 +219,7 @@ defmodule Accord.TLA.Checker.Value do
       else: true
   end
 
+  def finite?({:ksubset, k, s}), do: k <= 0 or finite?(s)
   def finite?({:cup, sets}), do: Enum.all?(sets, &finite?/1)
   def finite?({:union, s}), do: s |> enum() |> Enum.all?(&finite?/1)
 
@@ -248,6 +257,7 @@ defmodule Accord.TLA.Checker.Value do
   def empty?(s) when s in [:nat, :int, :string], do: false
   def empty?(:any), do: error("Shouldn't call isEmpty() on value ANY")
   def empty?({:subset, _}), do: false
+  def empty?({:ksubset, _, _} = s), do: ksubset_none?(s)
   def empty?({:seq_set, _}), do: false
   def empty?({:fun_set, d, r}), do: not empty?(d) and empty?(r)
   def empty?({:record_set, fields}), do: Enum.any?(fields, fn {_, s} -> empty?(s) end)
@@ -413,6 +423,24 @@ defmodule Accord.TLA.Checker.Value do
       true -> Enum.zip(s1, s2) |> Enum.all?(fn {x, y} -> eq?(x, y) end)
     end
   end
+
+  defp set_eq?({:ksubset, k1, s1} = a, {:ksubset, k2, s2} = b) do
+    cond do
+      ksubset_none?(a) or ksubset_none?(b) -> ksubset_none?(a) and ksubset_none?(b)
+      k1 == 0 and k2 == 0 -> true
+      true -> k1 == k2 and eq?(s1, s2)
+    end
+  end
+
+  defp set_eq?({:ksubset, _, _} = a, b) do
+    cond do
+      finite?(a) and not infinite?(b) -> elements_eq?(canon(a), canon(b))
+      not infinite?(b) -> false
+      true -> error("cannot enumerate the infinite set #{show(a)}")
+    end
+  end
+
+  defp set_eq?(a, {:ksubset, _, _} = b), do: set_eq?(b, a)
 
   defp set_eq?({:seq_set, s1}, {:seq_set, s2}), do: eq?(s1, s2)
   defp set_eq?({:subset, s1}, {:subset, s2}), do: eq?(s1, s2)
@@ -660,6 +688,15 @@ defmodule Accord.TLA.Checker.Value do
     end
   end
 
+  def member?(x, {:ksubset, k, s} = set) do
+    cond do
+      ksubset_none?(set) -> false
+      not set?(x) -> false
+      size(x) != k -> false
+      true -> Enum.all?(enum(x), &member?(&1, s))
+    end
+  end
+
   def member?(x, {:union, s}), do: Enum.any?(enum(s), &member?(x, &1))
   def member?(x, {:diff, a, b}), do: member?(x, a) and not member?(x, b)
   def member?(x, {:cap, a, b}), do: member?(x, a) and member?(x, b)
@@ -769,6 +806,14 @@ defmodule Accord.TLA.Checker.Value do
 
   def enum({:union, s}), do: s |> enum() |> Enum.flat_map(&enum/1) |> Enum.uniq()
 
+  def enum({:ksubset, k, s} = set) do
+    cond do
+      ksubset_none?(set) -> []
+      k == 0 -> [MapSet.new()]
+      true -> s |> enum() |> sort() |> combinations(k) |> Enum.map(&MapSet.new/1)
+    end
+  end
+
   def enum({:filter, s, pred}) do
     if infinite?(s), do: error("cannot enumerate the infinite set #{show(s)}")
     s |> enum() |> Enum.filter(pred)
@@ -864,10 +909,70 @@ defmodule Accord.TLA.Checker.Value do
   def size({:record_set, fields} = s),
     do: if(empty?(s), do: 0, else: checked_product(Enum.map(fields, &size(elem(&1, 1))), s))
 
+  def size({:ksubset, k, s} = set) do
+    cond do
+      ksubset_none?(set) ->
+        0
+
+      k == 0 ->
+        1
+
+      true ->
+        n = size(s)
+        c = binomial(n, k)
+        if c > 2_147_483_647, do: error("k=#{k} and n=#{n}")
+        c
+    end
+  end
+
   def size({:seq_set, _} = set),
     do: error("Attempted to compute cardinality of the value\n#{show(set)}")
 
   def size(s), do: length(enum(s))
+
+  defp large?({kind, _, _} = v) when kind in [:ksubset, :fun_set], do: big_size?(v)
+  defp large?({kind, _} = v) when kind in [:subset, :record_set, :times], do: big_size?(v)
+  defp large?(_), do: false
+
+  defp big_size?(v) do
+    case safe_size(v) do
+      n when is_integer(n) -> n > 100_000
+      _ -> true
+    end
+  end
+
+  # The checker keeps a small interval as a set of integers: print it as
+  # an interval again (TLC keeps the interval).
+  defp show_base(%MapSet{} = s) do
+    l = s |> MapSet.to_list() |> Enum.sort()
+
+    case l do
+      [a | _] when is_integer(a) ->
+        b = List.last(l)
+        if is_integer(b) and l == Enum.to_list(a..b), do: "#{a}..#{b}", else: show(s)
+
+      _ ->
+        show(s)
+    end
+  end
+
+  defp show_base(s), do: show(s)
+
+  defp ksubset_none?({:ksubset, k, s}), do: k < 0 or (finite?(s) and size(s) < k)
+
+  defp binomial(n, k) when k > n, do: 0
+
+  defp binomial(n, k),
+    do: Enum.reduce(1..min(k, n - k)//1, 1, fn i, acc -> div(acc * (n - i + 1), i) end)
+
+  defp combinations(list, k), do: combinations(list, length(list), k)
+
+  defp combinations(_, _, 0), do: [[]]
+  defp combinations(_, n, k) when k > n, do: []
+  defp combinations(list, n, n), do: [list]
+
+  defp combinations([x | rest], n, k),
+    do: Enum.map(combinations(rest, n - 1, k - 1), &[x | &1]) ++ combinations(rest, n - 1, k)
 
   # TLC has 32-bit sizes.
   defp check_interval_size!({:interval, a, b}) do
@@ -1153,6 +1258,16 @@ defmodule Accord.TLA.Checker.Value do
       end
 
     show_sized(s, sz)
+  end
+
+  def show({:ksubset, k, s} = set) do
+    n = size(set)
+
+    cond do
+      n == 0 -> "{}"
+      n < 64 -> set |> enum() |> MapSet.new() |> show()
+      true -> "{s \\in SUBSET (#{show_base(s)}) : Cardinality(s) = #{k}}"
+    end
   end
 
   def show({:subset, s}), do: "SUBSET #{show(s)}"

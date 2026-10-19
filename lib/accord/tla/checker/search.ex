@@ -640,6 +640,8 @@ defmodule Accord.TLA.Checker.Search do
             # error; an error of the core semantics is an error of the spec.
             err in Value.Error ->
               kind = if err.module, do: :error, else: :spec_eval
+              # The state that TLC cannot fingerprint counts as generated.
+              st = if err.fingerprint, do: %{st | generated: st.generated + 1}, else: st
 
               raise Stop,
                 result:
@@ -821,6 +823,8 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
+  # TLC reports an error in the evaluation of a property on an initial
+  # state as an error of the initial state (a config error).
   defp safety_init(base, model, st, id) do
     if safety_active?(st) do
       {:ok, safety} = SafetyTableau.init(st.safety, id, safety_literal(model, st))
@@ -830,7 +834,7 @@ defmodule Accord.TLA.Checker.Search do
     end
   rescue
     err in Value.Error ->
-      raise Stop, result: error_result(model.ctx, Exception.message(err), [], base, st, :error)
+      raise Stop, result: error_result(model.ctx, Exception.message(err), [], base, st, :config)
   end
 
   defp safety_step(base, model, st, id) do
@@ -1176,7 +1180,17 @@ defmodule Accord.TLA.Checker.Search do
       try do
         not Value.eq?(sub_value.(state, p), current)
       rescue
-        Value.Error -> true
+        # TLC: the step of A does not give a value to a variable of the
+        # subscript (TLC_STATE_NOT_COMPLETELY_SPECIFIED_LIVE).
+        e in Value.Error ->
+          if e.message =~ ~r/' has no value yet/,
+            do:
+              raise(Value.Error,
+                message:
+                  "In evaluation of the fairness condition, the step of the action does not give a value to all the variables of the subscript: " <>
+                    e.message
+              ),
+            else: true
       end
     end)
   end

@@ -134,16 +134,21 @@ defmodule Accord.TLA.Checker.Community do
   defp op("FiniteSetsExt", "Quantify", [set, test], env),
     do: set |> Value.enum() |> Enum.count(&(Eval.apply_op(test, [&1], env) == true))
 
+  # A lazy set, as TLC's KSubsetValue (see Value).
   defp op("FiniteSetsExt", "kSubset", [k, set], _env) do
-    unless is_integer(k) and k >= 0,
-      do: error("the first argument of kSubset must be a natural number")
+    unless is_integer(k),
+      do:
+        error(
+          "The first argument of kSubset should be an integer, but instead it is:\n#{Value.show(k)}"
+        )
 
-    set
-    |> Value.enum()
-    |> Value.sort()
-    |> combinations(k)
-    |> Enum.map(&MapSet.new/1)
-    |> MapSet.new()
+    unless Value.set?(set),
+      do:
+        error(
+          "The second argument of kSubset should be a set, but instead it is:\n#{Value.show(set)}"
+        )
+
+    {:ksubset, k, set}
   end
 
   defp op("Functions", "FoldFunction", [opv, base, f], env),
