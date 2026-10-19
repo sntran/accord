@@ -1,8 +1,9 @@
 defmodule Accord.CrossCheck do
   @moduledoc """
-  Compares the native explorer (`Accord.Explore`) with TLC.
+  Compares the native explorer (`Accord.Explore`) with a TLA+ checker:
+  the native TLA+ checker (`Accord.TLA.Checker`, the default) or TLC.
 
-  TLC is the reference. For each protocol, the cross-check runs both
+  The checker is the reference (the text says "TLC" for it). For each protocol, the cross-check runs both
   checkers on the same finite model and compares the results. A
   difference shows a defect in one of the two: in the explorer, or in
   the translation from the protocol to TLA+.
@@ -121,12 +122,14 @@ defmodule Accord.CrossCheck do
 
   ## Options
 
-  - `:jar` — the path of `tla2tools.jar`. Default: the same places as
-    `mix accord.check`.
+  - `:reference` — `:native` (`Accord.TLA.Checker`) or `:tlc`. Default:
+    `Accord.TLA.Engine.engine/0` (native, unless ACCORD_TLA_ENGINE=tlc).
+  - `:jar` — the path of `tla2tools.jar`, for `:tlc`. Default: the same
+    places as `mix accord.check`.
   - `:dir` — the work directory. Default: a new temporary directory.
   - `:config` — a `%Accord.TLA.ModelConfig{}` to use.
   - `:max_states` — the state limit of the explorer. Default: 200_000.
-  - `:timeout` — the time limit of one TLC run, in seconds. Default: 120.
+  - `:timeout` — the time limit of one reference run, in seconds. Default: 120.
   - `:label` — a text that the report shows after the protocol name.
   """
   @spec run(module() | Accord.IR.t(), keyword()) :: Report.t()
@@ -143,7 +146,11 @@ defmodule Accord.CrossCheck do
   end
 
   defp run_ir(protocol, ir, config, opts) do
-    jar = Keyword.get_lazy(opts, :jar, &TLC.find_jar/0) || raise "tla2tools.jar not found"
+    reference = reference(opts)
+
+    jar =
+      if reference == :tlc,
+        do: Keyword.get_lazy(opts, :jar, &TLC.find_jar/0) || raise("tla2tools.jar not found")
 
     with {:ok, compiled} <- compile(ir, config),
          {:ok, model} <- build_model(ir, config) do
@@ -159,7 +166,7 @@ defmodule Accord.CrossCheck do
         module: module,
         dir: dir,
         base_cfg: base_cfg(compiled.cfg),
-        tlc_opts: [jar: jar, timeout: Keyword.get(opts, :timeout, 120)]
+        tlc_opts: [jar: jar, timeout: Keyword.get(opts, :timeout, 120), reference: reference]
       }
 
       native =
@@ -216,7 +223,23 @@ defmodule Accord.CrossCheck do
 
   defp tlc(ctx, cfg_lines, opts) do
     cfg = ctx.base_cfg <> "\n" <> Enum.join(cfg_lines, "\n") <> "\n"
-    TLC.run(ctx.dir, ctx.module <> ".tla", cfg, Keyword.merge(ctx.tlc_opts, opts))
+    reference_run(ctx, ctx.module <> ".tla", cfg, Keyword.merge(ctx.tlc_opts, opts))
+  end
+
+  # The reference checker: `:native` (`Accord.TLA.Checker`, the default)
+  # or `:tlc` (with the option, or ACCORD_TLA_ENGINE=tlc).
+  defp reference(opts) do
+    case Keyword.get(opts, :reference) do
+      nil -> Accord.TLA.Engine.engine()
+      r -> r
+    end
+  end
+
+  defp reference_run(ctx, spec_file, cfg, opts) do
+    case ctx.tlc_opts[:reference] || reference([]) do
+      :tlc -> TLC.run(ctx.dir, spec_file, cfg, opts)
+      :native -> Accord.CrossCheck.Native.run(ctx.dir, spec_file, cfg, opts)
+    end
   end
 
   defp native_error(native), do: Map.get(native.violations, "Error")
@@ -631,7 +654,7 @@ defmodule Accord.CrossCheck do
           ["INIT ReplayInit", "NEXT ReplayNext", cfg_line] ++ constant_lines(ctx.compiled.cfg)
 
         run =
-          TLC.run(ctx.dir, replay <> ".tla", Enum.join(cfg, "\n") <> "\n",
+          reference_run(ctx, replay <> ".tla", Enum.join(cfg, "\n") <> "\n",
             jar: ctx.tlc_opts[:jar],
             timeout: ctx.tlc_opts[:timeout],
             deadlock: false,
@@ -877,7 +900,7 @@ defmodule Accord.CrossCheck do
     cfg = ["SPECIFICATION ReplaySpec", "PROPERTY #{name}"] ++ constant_lines(ctx.compiled.cfg)
 
     run =
-      TLC.run(ctx.dir, replay <> ".tla", Enum.join(cfg, "\n") <> "\n",
+      reference_run(ctx, replay <> ".tla", Enum.join(cfg, "\n") <> "\n",
         jar: ctx.tlc_opts[:jar],
         timeout: ctx.tlc_opts[:timeout],
         deadlock: false,

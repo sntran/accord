@@ -47,9 +47,9 @@ defmodule Accord.Test.ProtocolExerciser do
     `Accord.Test.TraceCheck.assert_replays/3` (must include `:tmp_dir`).
     When set, every run captures a trace of applied transitions and the
     longest one is replayed against the generated TLA+ spec after the
-    property passes — one TLC run per `run/1` call, not per iteration,
-    so the JVM cost stays bounded (ADR-010). Requires `tla2tools.jar`;
-    gate the test with `@tag :tlc`. Payload and track values must be
+    property passes — one check per `run/1` call, not per iteration,
+    so the cost stays bounded (ADR-010). The check runs on the native
+    checker (see `Accord.TLA.Engine`). Payload and track values must be
     renderable as TLA+ literals (integers, atoms, strings — see
     `Accord.TLA.TraceSpec`). Default `nil` (off).
   """
@@ -185,7 +185,7 @@ defmodule Accord.Test.ProtocolExerciser do
 
   # Rejected messages apply no transition and emit no event, so every
   # captured trace is a genuine behavior of the protocol; the longest
-  # one covers the most translated guards and updates per TLC run.
+  # one covers the most translated guards and updates per check.
   defp start_trace_capture(false), do: {nil, nil}
 
   defp start_trace_capture(true) do

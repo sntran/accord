@@ -1,10 +1,12 @@
 defmodule Mix.Tasks.Accord.Crosscheck do
   @moduledoc """
-  Compares the native explorer with TLC on each protocol.
+  Compares the native explorer with a TLA+ checker on each protocol.
 
-  TLC is the reference. For each protocol, the task runs `Accord.Explore`
-  and TLC on the same finite model, and compares the state spaces and
-  the verdict of each safety and liveness check. See `Accord.CrossCheck` for the
+  The checker is the reference: the native TLA+ checker
+  (`Accord.TLA.Checker`) by default, or TLC with `--reference tlc`. For
+  each protocol, the task runs `Accord.Explore` and the checker on the
+  same finite model, and compares the state spaces and the verdict of
+  each safety and liveness check. See `Accord.CrossCheck` for the
   comparisons.
 
   ## Usage
@@ -13,8 +15,9 @@ defmodule Mix.Tasks.Accord.Crosscheck do
       mix accord.crosscheck MyApp.Protocol       # one protocol
       mix accord.crosscheck --jobs 4             # protocols in parallel
       mix accord.crosscheck --max-states 50000   # explorer state limit
-      mix accord.crosscheck --timeout 60         # TLC time limit (seconds)
-      mix accord.crosscheck --keep               # keep the TLC files and output
+      mix accord.crosscheck --reference tlc      # TLC as the reference (needs Java)
+      mix accord.crosscheck --timeout 60         # reference time limit (seconds)
+      mix accord.crosscheck --keep               # keep the TLA+ files and output
       mix accord.crosscheck --mutants 5          # also 5 mutants of each protocol
       mix accord.crosscheck --mutants 5 --seed 7 # another set of mutants
       mix accord.crosscheck --random 50          # 50 random protocols
@@ -43,7 +46,8 @@ defmodule Mix.Tasks.Accord.Crosscheck do
   has no TLA+ spec, or that uses a feature that the explorer does not
   support, is reported but does not make the task fail.
 
-  TLC must be available, as for `mix accord.check`.
+  With `--reference tlc`, TLC must be available, as for
+  `mix accord.check --engine tlc`.
   """
 
   use Mix.Task
@@ -51,7 +55,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
   alias Accord.CrossCheck
   alias Accord.CrossCheck.{Mutant, RandomProtocol, Report, TLC}
 
-  @shortdoc "Compare the native explorer with TLC"
+  @shortdoc "Compare the native explorer with a TLA+ checker"
 
   @impl Mix.Task
   def run(args) do
@@ -66,11 +70,22 @@ defmodule Mix.Tasks.Accord.Crosscheck do
           keep: :boolean,
           mutants: :integer,
           seed: :integer,
-          random: :integer
+          random: :integer,
+          reference: :string
         ]
       )
 
-    jar = TLC.find_jar() || Mix.raise("tla2tools.jar not found (see mix help accord.check)")
+    reference =
+      case opts[:reference] do
+        nil -> Accord.TLA.Engine.engine()
+        "tlc" -> :tlc
+        "native" -> :native
+        other -> Mix.raise("unknown reference #{other} (native or tlc)")
+      end
+
+    jar =
+      if reference == :tlc,
+        do: TLC.find_jar() || Mix.raise("tla2tools.jar not found (see mix help accord.check)")
 
     root = Path.join(System.tmp_dir!(), "accord_crosscheck_#{System.os_time()}")
 
@@ -82,6 +97,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
       end
 
     run_opts = [
+      reference: reference,
       jar: jar,
       max_states: Keyword.get(opts, :max_states, 200_000),
       timeout: Keyword.get(opts, :timeout, 120)

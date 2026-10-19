@@ -48,22 +48,26 @@ defmodule Accord.TLA.CheckCache do
 
   @doc """
   The cache key for a protocol's current inputs: spec content, cfg
-  content, the TLC jar (path, size, mtime — a TLC upgrade invalidates),
-  and whether deadlock checking is enabled.
+  content, the engine, and whether deadlock checking is enabled.
+
+  The engine is the path of a TLC jar (its path, size and mtime go in
+  the key — a TLC upgrade invalidates), or an engine identity from
+  `Accord.TLA.Engine.identity/1` (a new checker build invalidates).
   """
-  @spec key(Path.t(), Path.t(), Path.t(), boolean()) :: String.t()
-  def key(tla_path, cfg_path, tlc_jar, deadlock?) do
-    jar_stat = File.stat!(tlc_jar, time: :posix)
+  @spec key(Path.t(), Path.t(), String.t(), boolean()) :: String.t()
+  def key(tla_path, cfg_path, engine, deadlock?) do
+    engine_parts =
+      if File.regular?(engine) do
+        stat = File.stat!(engine, time: :posix)
+        [engine, Integer.to_string(stat.size), Integer.to_string(stat.mtime)]
+      else
+        [engine]
+      end
 
     :sha256
-    |> :crypto.hash([
-      File.read!(tla_path),
-      File.read!(cfg_path),
-      tlc_jar,
-      Integer.to_string(jar_stat.size),
-      Integer.to_string(jar_stat.mtime),
-      to_string(deadlock?)
-    ])
+    |> :crypto.hash(
+      [File.read!(tla_path), File.read!(cfg_path)] ++ engine_parts ++ [to_string(deadlock?)]
+    )
     |> Base.encode16()
   end
 

@@ -2,12 +2,14 @@ defmodule Accord.Test.TLACheck do
   @moduledoc """
   Test assertions for TLA+ model checking.
 
-  Provides helpers for running TLC against protocol modules and asserting
-  that model checking either passes or fails with the expected violation kind.
+  Provides helpers for model checking protocol modules and asserting that
+  the check either passes or fails with the expected violation kind.
+
+  The check runs on `Accord.TLA.Engine`: the native checker by default (no
+  Java), or TLC with `engine: :tlc` (or `ACCORD_TLA_ENGINE=tlc`).
 
   ## Usage in tests
 
-      @moduletag :tlc
       @moduletag :tmp_dir
 
       test "counter passes", %{tmp_dir: tmp_dir} do
@@ -18,43 +20,40 @@ defmodule Accord.Test.TLACheck do
         assert_fails(Accord.Test.InvariantFail.Protocol, :invariant, tmp_dir: tmp_dir)
       end
 
-  ## TLC discovery
+  ## TLC
 
-  Looks for `tla2tools.jar` in the same locations as `mix accord.check`:
-
-  1. `TLA2TOOLS_JAR` environment variable
-  2. `~/.tla/tla2tools.jar`
-  3. `tla2tools.jar` in the current directory
+  `tlc_available?/0` tells if TLC can run (Java and `tla2tools.jar`, in
+  the same locations as `mix accord.check`). Only tests that compare with
+  TLC need it.
   """
 
-  alias Accord.TLA.{Compiler, ModelConfig, TLCParser}
+  alias Accord.TLA.{Compiler, Engine, ModelConfig}
 
   @doc """
   Returns `true` if Java and `tla2tools.jar` are both available.
   """
   @spec tlc_available?() :: boolean()
-  def tlc_available? do
-    java_available?() and find_tlc_jar() != nil
-  end
+  def tlc_available?, do: Engine.tlc_available?()
 
   @doc """
-  Compiles TLA+ from the protocol's IR, runs TLC, and asserts success.
+  Compiles TLA+ from the protocol's IR, checks it, and asserts success.
 
   Raises `ExUnit.AssertionError` if model checking finds any violation.
 
   ## Options
 
-  - `:tmp_dir` (required) — working directory for TLA+ files and TLC state
+  - `:tmp_dir` (required) — working directory for TLA+ files
+  - `:engine` — `:native` (default) or `:tlc`
   - `:model_config` — a `%ModelConfig{}` struct (overrides file-based config)
   - `:model_config_path` — path to a model config file
-  - `:check_deadlock` — when `false`, disables TLC deadlock checking
+  - `:check_deadlock` — when `false`, disables deadlock checking
     (default: `true` — generated specs give terminal states a
     `Terminating` self-stutter, so reported deadlocks are real)
   """
   @spec assert_passes(module(), keyword()) :: :ok
   def assert_passes(protocol_mod, opts) do
     tmp_dir = Keyword.fetch!(opts, :tmp_dir)
-    result = run_tlc(protocol_mod, tmp_dir, opts)
+    result = run_check(protocol_mod, tmp_dir, opts)
 
     case result do
       {:ok, _stats} ->
@@ -70,7 +69,7 @@ defmodule Accord.Test.TLACheck do
   end
 
   @doc """
-  Compiles TLA+ from the protocol's IR, runs TLC, and asserts failure
+  Compiles TLA+ from the protocol's IR, checks it, and asserts failure
   with the expected violation kind.
 
   Raises `ExUnit.AssertionError` if model checking passes or fails with
@@ -83,7 +82,7 @@ defmodule Accord.Test.TLACheck do
   @spec assert_fails(module(), atom(), keyword()) :: :ok
   def assert_fails(protocol_mod, expected_kind, opts) do
     tmp_dir = Keyword.fetch!(opts, :tmp_dir)
-    result = run_tlc(protocol_mod, tmp_dir, opts)
+    result = run_check(protocol_mod, tmp_dir, opts)
 
     case result do
       {:ok, _stats} ->
@@ -104,7 +103,7 @@ defmodule Accord.Test.TLACheck do
 
   # -- Internals --
 
-  defp run_tlc(protocol_mod, tmp_dir, opts) do
+  defp run_check(protocol_mod, tmp_dir, opts) do
     ir = protocol_mod.__ir__()
     config = protocol_mod |> resolve_config(opts) |> ModelConfig.apply_inline(ir)
     {:ok, result} = Compiler.compile(ir, config)
@@ -117,17 +116,12 @@ defmodule Accord.Test.TLACheck do
     File.write!(Path.join(tmp_dir, tla_file), result.tla)
     File.write!(Path.join(tmp_dir, cfg_file), result.cfg)
 
-    tlc_jar = find_tlc_jar() || raise "tla2tools.jar not found"
     check_deadlock = Keyword.get(opts, :check_deadlock, true)
 
-    args =
-      ["-jar", tlc_jar, "-config", cfg_file] ++
-        if(check_deadlock, do: [], else: ["-deadlock"]) ++
-        ["-cleanup", tla_file]
-
-    case System.cmd("java", args, cd: tmp_dir, stderr_to_stdout: true) do
-      {output, _exit_code} -> TLCParser.parse(output)
-    end
+    Engine.check(Path.join(tmp_dir, tla_file), Path.join(tmp_dir, cfg_file),
+      deadlock: check_deadlock,
+      engine: Keyword.get(opts, :engine)
+    )
   end
 
   defp resolve_config(_protocol_mod, opts) do
@@ -140,31 +134,6 @@ defmodule Accord.Test.TLACheck do
 
       true ->
         ModelConfig.load()
-    end
-  end
-
-  defp java_available? do
-    case System.cmd("java", ["-version"], stderr_to_stdout: true) do
-      {_, 0} -> true
-      _ -> false
-    end
-  rescue
-    ErlangError -> false
-  end
-
-  defp find_tlc_jar do
-    cond do
-      env = System.get_env("TLA2TOOLS_JAR") ->
-        if File.exists?(env), do: env
-
-      File.exists?(Path.expand("~/.tla/tla2tools.jar")) ->
-        Path.expand("~/.tla/tla2tools.jar")
-
-      File.exists?("tla2tools.jar") ->
-        Path.expand("tla2tools.jar")
-
-      true ->
-        nil
     end
   end
 

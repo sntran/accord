@@ -224,7 +224,6 @@ defmodule Accord.Property.ExerciserTest do
   # -- Trace sampling --
 
   describe "trace sampling" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     @tag :property

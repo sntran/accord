@@ -207,7 +207,6 @@ defmodule Accord.Monitor.StateTimeoutTest do
   end
 
   describe "model checking" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "the timeout's fairness proves the liveness property", %{tmp_dir: tmp_dir} do

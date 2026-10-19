@@ -11,15 +11,15 @@ defmodule Accord.Test.TraceCheck do
 
       TraceCheck.assert_replays(MyProtocol, events, tmp_dir: tmp_dir)
 
-  Requires `tla2tools.jar` (same lookup as `Accord.Test.TLACheck`);
-  gate tests with `@tag :tlc`.
+  The replay runs on `Accord.TLA.Engine` (the native checker by default;
+  `engine: :tlc` for TLC).
   """
 
-  alias Accord.TLA.{TLCParser, TraceSpec}
+  alias Accord.TLA.{Engine, TraceSpec}
   alias Accord.Trace.Event
 
   @doc """
-  Asserts TLC replays the whole trace as a behavior of the spec.
+  Asserts the checker replays the whole trace as a behavior of the spec.
   """
   @spec assert_replays(module(), [Event.t()], keyword()) :: :ok
   def assert_replays(protocol_mod, events, opts) do
@@ -72,19 +72,9 @@ defmodule Accord.Test.TraceCheck do
     File.write!(Path.join(tmp_dir, "#{spec.module_name}.tla"), spec.trace_tla)
     File.write!(Path.join(tmp_dir, "#{spec.module_name}.cfg"), spec.trace_cfg)
 
-    tlc_jar = find_tlc_jar() || raise "tla2tools.jar not found"
-
-    args = [
-      "-jar",
-      tlc_jar,
-      "-config",
-      "#{spec.module_name}.cfg",
-      "-cleanup",
-      "#{spec.module_name}.tla"
-    ]
-
-    {output, _exit} = System.cmd("java", args, cd: tmp_dir, stderr_to_stdout: true)
-    TLCParser.parse(output)
+    Engine.check(
+      Path.join(tmp_dir, "#{spec.module_name}.tla"),
+      Path.join(tmp_dir, "#{spec.module_name}.cfg"), engine: Keyword.get(opts, :engine))
   end
 
   # The deadlock trace's last state carries the failing index in ti.
@@ -94,15 +84,6 @@ defmodule Accord.Test.TraceCheck do
     |> case do
       %{assignments: %{"ti" => ti}} -> String.to_integer(ti)
       _ -> :unknown
-    end
-  end
-
-  defp find_tlc_jar do
-    cond do
-      jar = System.get_env("TLA2TOOLS_JAR") -> if File.exists?(jar), do: jar
-      File.exists?(Path.expand("~/.tla/tla2tools.jar")) -> Path.expand("~/.tla/tla2tools.jar")
-      File.exists?("tla2tools.jar") -> Path.expand("tla2tools.jar")
-      true -> nil
     end
   end
 end

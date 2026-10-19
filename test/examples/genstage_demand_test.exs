@@ -73,7 +73,6 @@ defmodule Accord.Examples.GenstageDemandTest do
   end
 
   describe "model checking" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "the guarded contract verifies", %{tmp_dir: tmp_dir} do

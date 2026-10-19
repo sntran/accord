@@ -103,6 +103,14 @@ defmodule Accord.CrossCheck.TLC do
     }
   end
 
+  @doc """
+  Reads the output of a run (and the graph dump, with `dump?`). The
+  native reference (`Accord.CrossCheck.Native`) writes the same output,
+  so it uses this reader too.
+  """
+  @spec read_output(String.t(), Path.t(), String.t(), boolean()) :: run()
+  def read_output(output, dir, dump_file, dump?), do: parse_output(output, dir, dump_file, dump?)
+
   defp parse_output(output, dir, dump_file, dump?) do
     lines = String.split(output, "\n")
     base = empty_run(output)

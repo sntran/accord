@@ -101,7 +101,6 @@ defmodule Accord.Examples.JobQueueTest do
   end
 
   describe "model checking" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "the correct protocol verifies", %{tmp_dir: tmp_dir} do

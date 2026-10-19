@@ -1,30 +1,35 @@
 defmodule Mix.Tasks.Accord.Check do
   @moduledoc """
-  Runs TLC model checking against generated TLA+ specs.
+  Runs model checking against generated TLA+ specs.
 
   Discovers protocol modules (those defining `__tla_span__/1`), locates
-  their generated `.tla` and `.cfg` files in `_build/accord/`, shells out
-  to TLC, parses results, and maps counterexamples back to Elixir source
-  using `__tla_span__/1`.
+  their generated `.tla` and `.cfg` files in `_build/accord/`, checks
+  them, and maps counterexamples back to Elixir source using
+  `__tla_span__/1`.
+
+  The checker is `Accord.TLA.Checker`, a TLA+ model checker in Elixir: it
+  needs no Java. `--engine tlc` runs TLC instead (see
+  `Accord.TLA.Engine`), for a comparison with the reference checker.
 
   ## Usage
 
       mix accord.check                          # check all protocols
       mix accord.check Lock.Protocol            # check a specific protocol
+      mix accord.check --engine tlc             # run TLC (needs Java)
       mix accord.check --workers 4              # TLC parallelism
       mix accord.check --strict                 # fail protocols with tla: :off
       mix accord.check --no-deadlock            # disable deadlock checking
-      mix accord.check --dump                   # write raw TLC output on failure
+      mix accord.check --dump                   # write the raw checker output on failure
       mix accord.check --force                  # ignore the pass cache
       mix accord.check --extra test/tla/LockProtocolChecks.tla
 
-  Passing results are cached by content hash (spec, cfg, TLC jar,
-  deadlock setting) in `_build/accord/.check_cache`; unchanged protocols
-  skip TLC entirely. Failures are never cached.
+  Passing results are cached by content hash (spec, cfg, engine and its
+  version, deadlock setting) in `_build/accord/.check_cache`; unchanged
+  protocols skip the check entirely. Failures are never cached.
 
   ## Unsound-verdict warnings
 
-  TLC can report "no error found" while also warning that the verdict may
+  The checker (as TLC) can report "no error found" while also warning that the verdict may
   be unsound — a state constraint or a symmetry set declared alongside a
   liveness property lets it miss violations (TLC's own §14.3.5 caveat).
   Such a run is reported with `⚠` and its warnings, and is **not** cached
@@ -64,7 +69,8 @@ defmodule Mix.Tasks.Accord.Check do
 
   ## Requirements
 
-  TLC must be available. The task looks for `tla2tools.jar` at:
+  Nothing for the native checker. For `--engine tlc` (or the environment
+  variable `ACCORD_TLA_ENGINE=tlc`), Java and `tla2tools.jar`, at:
 
   1. `TLA2TOOLS_JAR` environment variable
   2. `~/.tla/tla2tools.jar`
@@ -75,9 +81,9 @@ defmodule Mix.Tasks.Accord.Check do
 
   use Mix.Task
 
-  alias Accord.TLA.{CheckCache, Files, TLCParser, ViolationReport}
+  alias Accord.TLA.{CheckCache, Engine, Files, ViolationReport}
 
-  @shortdoc "Run TLC model checking on Accord protocols"
+  @shortdoc "Model check Accord protocols"
 
   @impl Mix.Task
   def run(args) do
@@ -87,6 +93,7 @@ defmodule Mix.Tasks.Accord.Check do
       OptionParser.parse(args,
         strict: [
           workers: :integer,
+          engine: :string,
           strict: :boolean,
           deadlock: :boolean,
           dump: :boolean,
@@ -95,7 +102,12 @@ defmodule Mix.Tasks.Accord.Check do
         ]
       )
 
-    workers = Keyword.get(opts, :workers)
+    # The engine options: `:engine` and the TLC `:workers`.
+    engine_opts = [
+      engine: Engine.engine(engine: Keyword.get(opts, :engine)),
+      workers: Keyword.get(opts, :workers)
+    ]
+
     strict? = Keyword.get(opts, :strict, false)
     deadlock? = Keyword.get(opts, :deadlock, true)
     dump? = Keyword.get(opts, :dump, false)
@@ -134,13 +146,13 @@ defmodule Mix.Tasks.Accord.Check do
 
       {results, cache} =
         Enum.map_reduce(protocols, cache, fn mod, cache ->
-          {result, cache} = check_protocol(mod, workers, strict?, deadlock?, dump?, cache)
+          {result, cache} = check_protocol(mod, engine_opts, strict?, deadlock?, dump?, cache)
           {{mod, result}, cache}
         end)
 
       extra_results =
         Enum.map(extras, fn path ->
-          check_extra(path, protocols, workers, strict?, deadlock?, dump?)
+          check_extra(path, protocols, engine_opts, strict?, deadlock?, dump?)
         end)
 
       CheckCache.save(cache)
@@ -155,7 +167,7 @@ defmodule Mix.Tasks.Accord.Check do
   # default) is merged with the generated module's CONSTANT/SYMMETRY/
   # CONSTRAINT lines, and violations are mapped through the extended
   # protocol's spans where possible. Extras are never cached.
-  defp check_extra(path, protocols, workers, strict?, deadlock?, dump?) do
+  defp check_extra(path, protocols, engine_opts, strict?, deadlock?, dump?) do
     with {:ok, content} <- File.read(path),
          module_name = Path.basename(path, ".tla"),
          {:ok, protocol_mod} <- resolve_extended_protocol(content, protocols) do
@@ -168,13 +180,14 @@ defmodule Mix.Tasks.Accord.Check do
         File.write!(dest_cfg, merged_extra_cfg(path, proto_cfg))
 
         result =
-          case require_tlc() do
-            {:ok, tlc_jar} ->
+          case require_engine(engine_opts) do
+            :ok ->
               # The merged cfg inherits SYMMETRY/CONSTRAINT from the
-              # generated module; if the user's module adds liveness, TLC
-              # warns the verdict is unsound — surface it like any other run.
+              # generated module; if the user's module adds liveness, the
+              # checker warns the verdict is unsound — surface it like any
+              # other run.
               classify_tlc_run(
-                run_tlc(protocol_mod, dest_tla, dest_cfg, tlc_jar, workers, deadlock?, dump?),
+                run_check(dest_tla, dest_cfg, engine_opts, deadlock?, dump?),
                 strict?
               )
 
@@ -287,22 +300,22 @@ defmodule Mix.Tasks.Accord.Check do
 
   # -- Protocol Checking --
 
-  defp check_protocol(mod, workers, strict?, deadlock?, dump?, cache) do
+  defp check_protocol(mod, engine_opts, strict?, deadlock?, dump?, cache) do
     with :ok <- ensure_loaded(mod),
          :ok <- ensure_protocol(mod),
          :ok <- ensure_tla_generated(mod, strict?),
          {tla_path, cfg_path} <- Files.paths(mod),
          :ok <- ensure_file(tla_path, :tla_not_found),
          :ok <- ensure_file(cfg_path, :cfg_not_found),
-         {:ok, tlc_jar} <- require_tlc() do
+         :ok <- require_engine(engine_opts) do
       module_name = Files.tla_module_name(mod)
-      key = CheckCache.key(tla_path, cfg_path, tlc_jar, deadlock?)
+      key = CheckCache.key(tla_path, cfg_path, Engine.identity(engine_opts), deadlock?)
 
       if CheckCache.hit?(cache, module_name, key) do
         {{:cached, key}, cache}
       else
         case classify_tlc_run(
-               run_tlc(mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?),
+               run_check(tla_path, cfg_path, engine_opts, deadlock?, dump?),
                strict?
              ) do
           # Only a clean pass — no TLC warnings — is cached. A warned or
@@ -360,73 +373,35 @@ defmodule Mix.Tasks.Accord.Check do
     if File.exists?(path), do: :ok, else: {:error, error_tag}
   end
 
-  defp require_tlc do
-    case find_tlc() do
-      nil -> {:error, :tlc_not_found}
-      jar -> {:ok, jar}
-    end
+  # The native engine is always there; TLC needs its jar.
+  defp require_engine(engine_opts) do
+    if engine_opts[:engine] == :tlc and Engine.find_jar() == nil,
+      do: {:error, :tlc_not_found},
+      else: :ok
   end
 
-  defp find_tlc do
-    cond do
-      env = System.get_env("TLA2TOOLS_JAR") ->
-        if File.exists?(env), do: env
-
-      File.exists?(Path.expand("~/.tla/tla2tools.jar")) ->
-        Path.expand("~/.tla/tla2tools.jar")
-
-      File.exists?("tla2tools.jar") ->
-        Path.expand("tla2tools.jar")
-
-      true ->
-        nil
-    end
-  end
-
-  defp run_tlc(_mod, tla_path, cfg_path, tlc_jar, workers, deadlock?, dump?) do
-    tla_dir = Path.dirname(tla_path)
-    tla_file = Path.basename(tla_path)
-
-    base_args = [
-      "-jar",
-      tlc_jar,
-      "-config",
-      Path.basename(cfg_path)
-    ]
-
-    # TLC's -deadlock flag DISABLES deadlock checking. Generated specs
-    # give terminal states a Terminating self-stutter, so deadlock
-    # checking stays on by default; --no-deadlock is the escape hatch.
-    disable_deadlock = if deadlock?, do: [], else: ["-deadlock"]
-
-    # -cleanup removes TLC's states/ metadata directories, which would
-    # otherwise accumulate in _build/accord/ across runs.
-    args = base_args ++ disable_deadlock ++ ["-cleanup", tla_file]
-    args = if workers, do: args ++ ["-workers", Integer.to_string(workers)], else: args
-
-    started = System.monotonic_time(:millisecond)
-    # TLC returns non-zero on violations; both paths parse the output.
-    {output, _exit_code} = System.cmd("java", args, cd: tla_dir, stderr_to_stdout: true)
-    duration_ms = System.monotonic_time(:millisecond) - started
-
-    case TLCParser.parse(output) do
+  defp run_check(tla_path, cfg_path, engine_opts, deadlock?, dump?) do
+    # Generated specs give terminal states a Terminating self-stutter, so
+    # deadlock checking stays on by default; --no-deadlock is the escape
+    # hatch.
+    case Engine.check(tla_path, cfg_path, Keyword.put(engine_opts, :deadlock, deadlock?)) do
       {:ok, stats} ->
-        {:ok, Map.put(stats, :duration_ms, duration_ms)}
+        {:ok, stats}
 
       {:error, violation, stats} ->
-        if dump?, do: dump_tlc_output(tla_path, output)
-        {:error, violation, Map.put(stats, :duration_ms, duration_ms)}
+        if dump?, do: dump_tlc_output(tla_path, stats.output)
+        {:error, violation, stats}
+
+      {:error, :tlc_not_found} ->
+        {:error, :tlc_not_found}
     end
-  rescue
-    e in ErlangError ->
-      {:error, :java_not_found, inspect(e)}
   end
 
-  # Raw TLC output next to the spec, for digging past the parsed report.
+  # Raw checker output next to the spec, for digging past the parsed report.
   defp dump_tlc_output(tla_path, output) do
     log_path = Path.rootname(tla_path) <> ".tlc.log"
     File.write!(log_path, output)
-    Mix.shell().info("#{IO.ANSI.faint()}  raw TLC output: #{log_path}#{IO.ANSI.reset()}")
+    Mix.shell().info("#{IO.ANSI.faint()}  raw checker output: #{log_path}#{IO.ANSI.reset()}")
     :ok
   end
 
@@ -507,7 +482,7 @@ defmodule Mix.Tasks.Accord.Check do
 
   defp report_warned(mod, stats) do
     Mix.shell().info(
-      "#{IO.ANSI.yellow()}⚠#{IO.ANSI.reset()} #{display_name(mod)} — passed, but TLC warns the " <>
+      "#{IO.ANSI.yellow()}⚠#{IO.ANSI.reset()} #{display_name(mod)} — passed, but the checker warns the " <>
         "verdict may be unsound (#{stats.distinct_states} states explored)"
     )
 
@@ -556,7 +531,7 @@ defmodule Mix.Tasks.Accord.Check do
           "TLA+ generation disabled (tla: :off) — failing under --strict"
 
         {:tlc_warnings, warnings} ->
-          "TLC reported the verdict may be unsound — failing under --strict:\n" <>
+          "the checker reported the verdict may be unsound — failing under --strict:\n" <>
             Enum.map_join(warnings, "\n", &"      #{&1}")
 
         :tla_not_found ->
@@ -645,5 +620,5 @@ defmodule Mix.Tasks.Accord.Check do
 
   defp violation_label(%{kind: :deadlock}), do: "deadlock reached"
   defp violation_label(%{kind: :temporal}), do: "temporal property violated"
-  defp violation_label(%{kind: :error}), do: "TLC error"
+  defp violation_label(%{kind: :error}), do: "checker error"
 end

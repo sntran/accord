@@ -137,7 +137,6 @@ defmodule Accord.Examples.PhoenixChannelsTest do
   end
 
   describe "model checking" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "the channel lifecycle verifies", %{tmp_dir: tmp_dir} do

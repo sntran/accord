@@ -154,7 +154,6 @@ defmodule Accord.Examples.Http2Test do
   end
 
   describe "model checking" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "the stream FSM verifies (§5.1)", %{tmp_dir: tmp_dir} do

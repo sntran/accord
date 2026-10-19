@@ -3,7 +3,6 @@ defmodule Accord.TLA.CheckTest do
 
   import Accord.Test.TLACheck
 
-  @moduletag :tlc
   @moduletag :tmp_dir
 
   describe "passing protocols" do

@@ -1,7 +1,6 @@
 defmodule Accord.CrossCheckTest do
   use ExUnit.Case, async: true
 
-  @moduletag :tlc
   @moduletag :tmp_dir
   # Each test starts several TLC processes, each with JVM startup.
   @moduletag timeout: 600_000

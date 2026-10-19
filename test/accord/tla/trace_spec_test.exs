@@ -76,7 +76,6 @@ defmodule Accord.TLA.TraceSpecTest do
   end
 
   describe "replay against real TLC" do
-    @describetag :tlc
     @describetag :tmp_dir
 
     test "a real session's trace is a behavior of the spec", %{tmp_dir: tmp_dir} do
