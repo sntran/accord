@@ -47,17 +47,26 @@ defmodule Accord.TLA.Checker.Search do
       deadlock: Keyword.get(opts, :deadlock, config.check_deadlock),
       max_states: Keyword.get(opts, :max_states, :infinity),
       generated: 0,
-      warnings: []
+      warnings: [],
+      graph: Keyword.get(opts, :graph, false)
     }
 
     try do
       check_assumptions(ctx)
-      spec = Spec.analyze(ctx, config)
+      # An error in the analysis of the config is a config error in TLC.
+      spec = setup(ctx, base, fn -> Spec.analyze(ctx, config) end)
+      trivial_check(ctx, base, spec)
 
       if spec.init == nil do
         %{result(ctx) | status: :ok}
       else
-        search(base, ctx |> model(spec, config))
+        model = setup(ctx, base, fn -> model(ctx, spec, config) end)
+
+        extra =
+          for {text, e} <- Keyword.get(opts, :invariant_exprs, []),
+              do: {text, {e, ctx.root, %{}, %{}}}
+
+        search(base, %{model | invariants: model.invariants ++ extra})
       end
     rescue
       e in Stop ->
@@ -70,11 +79,63 @@ defmodule Accord.TLA.Checker.Search do
 
   # -- Setup --
 
+  # A conjunct of the initial predicate that is a constant FALSE makes the
+  # specification trivial: TLC reports a config error.
+  defp trivial_check(_ctx, _base, %{init: nil}), do: :ok
+
+  defp trivial_check(ctx, base, spec) do
+    Enum.each(spec.init, fn {e, scope, bound, frames} ->
+      env = %{Eval.new(ctx) | scope: scope, bound: bound, frames: frames, state: nil, level: 0}
+
+      constant_false =
+        try do
+          Eval.bool(e, env) == false
+        rescue
+          Value.Error -> false
+        end
+
+      if constant_false,
+        do:
+          raise(Stop,
+            result:
+              error_result(
+                ctx,
+                "the specification is trivial: a conjunct of it is a constant FALSE",
+                [],
+                base,
+                nil,
+                :config
+              )
+          )
+    end)
+  end
+
+  defp setup(ctx, base, fun) do
+    fun.()
+  rescue
+    e in Value.Error ->
+      raise Stop, result: error_result(ctx, Exception.message(e), [], base, nil, :config)
+  end
+
   defp check_assumptions(ctx) do
     Enum.each(ctx.assumes, fn {e, scope, {line, col}} ->
-      env = %{Eval.new(ctx) | scope: scope}
+      env = %{Eval.new(ctx) | scope: scope, level: 0}
 
-      if Eval.eval(e, env) != true do
+      value =
+        try do
+          Eval.eval(e, env)
+        rescue
+          err in Value.Error ->
+            raise Stop,
+              result: %{
+                result(ctx)
+                | status: :violated,
+                  kind: :assumption,
+                  message: "Evaluating an assumption: " <> Exception.message(err)
+              }
+        end
+
+      if value != true do
         raise Stop,
           result: %{
             result(ctx)
@@ -113,6 +174,11 @@ defmodule Accord.TLA.Checker.Search do
       action_constraints: Enum.map(config.action_constraints, root),
       perms: symmetry(env, config.symmetry),
       view: if(config.view, do: root.(config.view)),
+      possible:
+        Enum.map(config.possible, fn name ->
+          {name, root.(name),
+           if(Spec.action?({:name, name, nil}, env), do: :action, else: :state)}
+        end),
       nvars: tuple_size(ctx.variables)
     }
   end
@@ -194,7 +260,7 @@ defmodule Accord.TLA.Checker.Search do
       next_id: 0,
       depth: 0,
       generated: 0,
-      edges: if(live?, do: %{}, else: nil),
+      edges: if(live? or base.graph, do: %{}, else: nil),
       init_ids: []
     }
 
@@ -208,12 +274,59 @@ defmodule Accord.TLA.Checker.Search do
         do: check_liveness(base, model, st, stats),
         else: %{result(model.ctx) | status: :ok, stats: stats, warnings: base.warnings}
 
-    if result.status == :ok, do: check_postconditions(model, result), else: result
+    result = if result.status == :ok, do: check_postconditions(model, result), else: result
+    if base.graph, do: Map.put(result, :graph, graph(st)), else: result
+  end
+
+  # The state graph (option `:graph`): the states, and the steps as pairs
+  # of state indexes.
+  defp graph(st) do
+    states = for i <- 0..(st.next_id - 1)//1, do: st.nodes |> Map.fetch!(i) |> elem(0)
+    edges = for {from, tos} <- st.edges, {to, _label} <- tos, uniq: true, do: {from, to}
+    %{states: states, edges: edges}
+  end
+
+  # The _POSSIBLE predicates: each one must be true in some state (or on
+  # some step, for an action). The counts are in the named register
+  # "s:_possible", as in TLC.
+  defp witness(%{possible: []}, _kind, _env), do: :ok
+
+  defp witness(model, kind, env) do
+    for {name, {e, scope, bound, frames}, ^kind} <- model.possible do
+      holds =
+        try do
+          Eval.bool(e, %{env | scope: scope, bound: bound, frames: frames})
+        rescue
+          Value.Error -> false
+        end
+
+      registers = Process.get(:tla_registers) || %{}
+      {:fun, counts} = Map.get(registers, "s:_possible", {:fun, %{}})
+
+      counts =
+        Map.update(counts, name, if(holds, do: 1, else: 0), &(&1 + if(holds, do: 1, else: 0)))
+
+      Process.put(:tla_registers, Map.put(registers, "s:_possible", {:fun, counts}))
+    end
+
+    :ok
+  end
+
+  defp unwitnessed(model) do
+    {:fun, counts} = Map.get(Process.get(:tla_registers) || %{}, "s:_possible", {:fun, %{}})
+    Enum.find(model.possible, fn {name, _, _} -> Map.get(counts, name, 0) == 0 end)
   end
 
   # The POSTCONDITION predicates, after the search (TLCGet("stats") gives
   # the final counts).
   defp check_postconditions(model, result) do
+    case unwitnessed(model) do
+      {name, _, _} -> %{result | status: :violated, kind: :possible, property: name}
+      nil -> check_postconditions2(model, result)
+    end
+  end
+
+  defp check_postconditions2(model, result) do
     Process.put(:tla_stats_distinct, result.stats.distinct)
     Process.put(:tla_stats_generated, result.stats.generated)
     Process.put(:tla_stats_queue, 0)
@@ -345,6 +458,8 @@ defmodule Accord.TLA.Checker.Search do
   defp step(base, model, st, id, state, next_state, label, depth) do
     env = %{Eval.new(model.ctx) | state: state, next: next_state, level: depth}
 
+    witness(model, :action, env)
+
     if Enum.all?(model.action_constraints, &holds?(&1, env, model, st, id, base)) do
       Enum.each(model.actions, fn {name, a, sub} ->
         unless action_holds?(a, sub, env, model, st, id, base) do
@@ -438,6 +553,8 @@ defmodule Accord.TLA.Checker.Search do
               }
           end
         end)
+
+        witness(model, :state, env)
 
         if Enum.all?(model.constraints, &holds?(&1, env, model, st, nil, base, partial_trace)) do
           id = st.next_id

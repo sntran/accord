@@ -70,6 +70,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       "CounterExample",
       "ToTrace"
     ],
+    "_Possible" => ["_Counts", "_CheckName", "_PrintCounts"],
     "Json" => [
       "ToJson",
       "ToJsonArray",
@@ -322,6 +323,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       "duration" -> 0
       "diameter" -> env.level
       "config" -> config_record(env)
+      "all:named" -> named_registers()
       "stats" -> stats_record(env)
       "-D" <> property -> env.ctx.config |> system_property(property, key)
       other -> register(other)
@@ -395,6 +397,20 @@ defmodule Accord.TLA.Checker.Stdlib do
   end
 
   defp op("PickSuccessor", [_], _), do: true
+
+  defp op("_Counts", [], _),
+    do: Map.get(Process.get(:tla_registers) || %{}, "s:_possible", Value.fun(%{}))
+
+  defp op("_CheckName", [name], env) do
+    {:fun, counts} = op("_Counts", [], env)
+    Map.get(counts, name, 0) > 0
+  end
+
+  defp op("_PrintCounts", [], env) do
+    IO.puts(Value.show(op("_Counts", [], env)))
+    true
+  end
+
   defp op("TLCFP", [v], _), do: :erlang.phash2(Value.canon(v))
   defp op("TLCEvalDefinition", [name], env), do: Eval.eval({:name, name, nil}, env)
 
@@ -478,6 +494,15 @@ defmodule Accord.TLA.Checker.Stdlib do
   end
 
   defp register(key), do: error("TLCGet(#{Value.show(key)}) is not supported")
+
+  # The named registers ("s:..."), each as a sequence of one value (one
+  # worker).
+  defp named_registers do
+    (Process.get(:tla_registers) || %{})
+    |> Enum.filter(fn {k, _} -> is_binary(k) and String.starts_with?(k, "s:") end)
+    |> Map.new(fn {k, v} -> {k, Value.tuple([v])} end)
+    |> Value.fun()
+  end
 
   defp config_record(env) do
     deadlock = Process.get(:tla_deadlock, env.ctx.config.check_deadlock)

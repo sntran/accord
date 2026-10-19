@@ -150,6 +150,30 @@ defmodule Accord.TLA.Checker.Spec do
         bound = Map.merge(closure.bound, params(d, args, env))
         {:ok, {d.body, %{env | scope: closure.scope, bound: bound, frames: closure.frames}}}
 
+      # An operator parameter (`Op(F(_)) == F(...)`): the operator it has.
+      {:ok, {:op_value, _, _, impl}} ->
+        case impl do
+          {:named, name, scope} ->
+            expand_entry(Context.lookup(env.ctx, scope, name), name, args, env, %{
+              env
+              | scope: scope
+            })
+
+          {:let, d, closure} ->
+            bound = Map.merge(closure.bound, params(d, args, env))
+            {:ok, {d.body, %{env | scope: closure.scope, bound: bound, frames: closure.frames}}}
+
+          {:lambda, names, body, scope, bound, frames} ->
+            d = %{params: Enum.map(names, &{&1, 0})}
+
+            {:ok,
+             {body,
+              %{env | scope: scope, bound: Map.merge(bound, params(d, args, env)), frames: frames}}}
+
+          _ ->
+            :error
+        end
+
       {:ok, _} ->
         :error
 
@@ -314,9 +338,26 @@ defmodule Accord.TLA.Checker.Spec do
       {:def, %{kind: :op} = d, sid} ->
         key = {sid, d.name}
 
-        if MapSet.member?(seen, key),
-          do: :state,
-          else: level(d.body, %{env | scope: sid, bound: %{}}, MapSet.put(seen, key))
+        cond do
+          MapSet.member?(seen, key) ->
+            :state
+
+          # A memo: the level of a definition does not depend on where it
+          # is used (without the memo, shared definitions make the
+          # analysis exponential).
+          (cached = Map.get(Process.get(:tla_levels) || %{}, {env.ctx.id, key})) != nil ->
+            cached
+
+          true ->
+            l = level(d.body, %{env | scope: sid, bound: %{}}, MapSet.put(seen, key))
+
+            Process.put(
+              :tla_levels,
+              Map.put(Process.get(:tla_levels) || %{}, {env.ctx.id, key}, l)
+            )
+
+            l
+        end
 
       {:alias, sid, target} ->
         entry_level(Context.lookup(env.ctx, sid, target), %{env | scope: sid}, seen)

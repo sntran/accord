@@ -294,7 +294,11 @@ defmodule Accord.TLA.Checker.Lexer do
   defp lex(<<"\n", rest::binary>>, line, _col, open, acc), do: lex(rest, line + 1, 1, open, acc)
   defp lex(<<"\r", rest::binary>>, line, col, open, acc), do: lex(rest, line, col, open, acc)
 
-  defp lex(<<c, rest::binary>>, line, col, open, acc) when c in [?\s, ?\t, ?\f],
+  # A tab goes to the next column of 8 (as the JavaCC lexer of SANY).
+  defp lex(<<?\t, rest::binary>>, line, col, open, acc),
+    do: lex(rest, line, div(col - 1, 8) * 8 + 9, open, acc)
+
+  defp lex(<<c, rest::binary>>, line, col, open, acc) when c in [?\s, ?\f],
     do: lex(rest, line, col + 1, open, acc)
 
   defp lex(<<"\\*", rest::binary>>, line, _col, open, acc) do

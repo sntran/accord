@@ -81,7 +81,9 @@ defmodule Accord.TLA.Checker.Parser do
       units: [],
       assumes: [],
       submodules: [],
-      recursive: []
+      recursive: [],
+      # For a module inside another module: the name of the outer module.
+      outer: nil
     ]
   end
 
@@ -327,7 +329,7 @@ defmodule Accord.TLA.Checker.Parser do
 
       {:module_start, _, _, _} ->
         {sub, p} = module(p)
-        units(p, %{mod | submodules: [sub | mod.submodules]}, false)
+        units(p, %{mod | submodules: [%{sub | outer: mod.name} | mod.submodules]}, false)
 
       {:kw, "EXTENDS", _, _} ->
         {names, p} = name_list(advance(p))

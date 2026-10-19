@@ -78,6 +78,23 @@ defmodule Accord.TLA.Checker.Eval do
   def eval({:dec, d}, _env), do: error("real numbers are not supported: #{d}")
   def eval({:name, n, _}, env), do: name(n, env)
 
+  # `A \cdot B` on a step: some middle state that A reaches and from
+  # which B reaches the next state.
+  def eval({:app, "\\cdot", [a, b], _}, env) do
+    nvars = tuple_size(env.ctx.variables)
+
+    a
+    |> gen(%{env | next: %{}}, :next)
+    |> Enum.any?(fn {m, _} ->
+      map_size(m) == nvars and
+        bool(b, %{
+          env
+          | state: List.to_tuple(for(i <- 0..(nvars - 1)//1, do: Map.fetch!(m, i))),
+            gen: false
+        })
+    end)
+  end
+
   def eval({:app, op, args, _}, env) when op in @core, do: core(op, args, env)
   def eval({:app, op, args, _}, env), do: call(op, args, env)
 
@@ -379,9 +396,22 @@ defmodule Accord.TLA.Checker.Eval do
 
       {:const, c} ->
         case Map.fetch(env.ctx.constants, c) do
-          {:ok, v} when args == [] -> v
-          {:ok, _} -> error("the constant #{c} is not an operator")
-          :error -> error("the constant #{c} has no value in the config")
+          {:ok, {:op_table, table}} when args != [] ->
+            key = Value.tuple(Enum.map(args, &eval(&1, caller)))
+
+            case Map.fetch(table, key) do
+              {:ok, v} -> v
+              :error -> error("the config gives no value for #{c} at #{Value.show(key)}")
+            end
+
+          {:ok, v} when args == [] ->
+            v
+
+          {:ok, _} ->
+            error("the constant #{c} is not an operator")
+
+          :error ->
+            error("the constant #{c} has no value in the config")
         end
 
       {:var, i} ->
@@ -973,6 +1003,19 @@ defmodule Accord.TLA.Checker.Eval do
     end
   end
 
+  # `x' \subseteq S` assigns each subset of S (as `x' \in SUBSET S`).
+  defp do_gen({:app, "\\subseteq", [lhs, set], pos} = e, env, mode) do
+    case target(lhs, env, mode) do
+      {:ok, i} ->
+        if Map.has_key?(partial(env, mode), i),
+          do: guard(e, env, mode),
+          else: do_gen({:app, "\\in", [lhs, {:value, {:subset, eval(set, env)}}], pos}, env, mode)
+
+      :no ->
+        guard(e, env, mode)
+    end
+  end
+
   defp do_gen({:unchanged, e}, env, :next) do
     case unchanged_vars(e, env) do
       {:ok, vars} ->
@@ -1227,23 +1270,34 @@ defmodule Accord.TLA.Checker.Eval do
   defp target(lhs, env, :init), do: var_of(lhs, env)
 
   defp var_of({:name, n, _}, env) do
-    if Map.has_key?(env.bound, n) do
-      :no
-    else
-      case Context.lookup(env.ctx, env.scope, n) do
-        {:var, i} ->
-          {:ok, i}
+    case Map.fetch(env.bound, n) do
+      # An operator argument: `Op(v) == v' = 1` with `Op(x)` assigns x.
+      {:ok, {:thunk, _, te, scope, bound, frames, _}} ->
+        var_of(te, %{env | scope: scope, bound: bound, frames: frames})
 
-        {:subst, expr, outer, frame} ->
-          var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
+      {:ok, _} ->
+        :no
 
-        _ ->
-          :no
-      end
+      :error ->
+        var_of_entry(n, env)
     end
   end
 
+  defp var_of({:label, _, e}, env), do: var_of(e, env)
   defp var_of(_, _env), do: :no
+
+  defp var_of_entry(n, env) do
+    case Context.lookup(env.ctx, env.scope, n) do
+      {:var, i} ->
+        {:ok, i}
+
+      {:subst, expr, outer, frame} ->
+        var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
+
+      _ ->
+        :no
+    end
+  end
 
   # The variables of `UNCHANGED e`, when `e` is a variable, a tuple of
   # them, or a definition of such a tuple.
@@ -1257,22 +1311,15 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp unchanged_vars({:name, n, _}, env) do
-    if Map.has_key?(env.bound, n) do
-      :complex
-    else
-      case Context.lookup(env.ctx, env.scope, n) do
-        {:var, i} ->
-          {:ok, [i]}
+    case Map.fetch(env.bound, n) do
+      {:ok, {:thunk, _, te, scope, bound, frames, _}} ->
+        unchanged_vars(te, %{env | scope: scope, bound: bound, frames: frames})
 
-        {:def, %{kind: :op, params: []} = d, sid} ->
-          unchanged_vars(d.body, %{env | scope: sid, bound: %{}})
+      {:ok, _} ->
+        :complex
 
-        {:subst, expr, outer, frame} ->
-          unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
-
-        _ ->
-          :complex
-      end
+      :error ->
+        unchanged_entry(n, env)
     end
   end
 
@@ -1293,4 +1340,20 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp unchanged_vars(_e, _env), do: :complex
+
+  defp unchanged_entry(n, env) do
+    case Context.lookup(env.ctx, env.scope, n) do
+      {:var, i} ->
+        {:ok, [i]}
+
+      {:def, %{kind: :op, params: []} = d, sid} ->
+        unchanged_vars(d.body, %{env | scope: sid, bound: %{}})
+
+      {:subst, expr, outer, frame} ->
+        unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})})
+
+      _ ->
+        :complex
+    end
+  end
 end

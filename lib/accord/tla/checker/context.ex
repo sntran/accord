@@ -44,7 +44,8 @@ defmodule Accord.TLA.Checker.Context do
     defstruct [:id, :module, ops: %{}, public: %{}]
   end
 
-  defstruct scopes: %{},
+  defstruct id: nil,
+            scopes: %{},
             root: nil,
             root_module: nil,
             variables: {},
@@ -88,6 +89,7 @@ defmodule Accord.TLA.Checker.Context do
     {root_id, state} = build_scope(root_mod.name, {:root, var_index}, state)
 
     ctx = %__MODULE__{
+      id: make_ref(),
       scopes: state.scopes,
       root: root_id,
       root_module: root_mod.name,
@@ -194,16 +196,23 @@ defmodule Accord.TLA.Checker.Context do
   end
 
   defp subst_key({:root, _}), do: :root
-  defp subst_key({:inst, id, _}), do: id
+  defp subst_key({:inst, id, _, _}), do: id
 
   defp new_id(state), do: {state.next_id, %{state | next_id: state.next_id + 1}}
 
   defp put_scope(state, scope), do: %{state | scopes: Map.put(state.scopes, scope.id, scope)}
 
   defp module_scope(mod, id, subst, state) do
+    # 0. A module inside another module sees the names of the outer one.
+    inherited =
+      case subst do
+        {:inst, _, _, outer_ops} when mod.outer != nil -> outer_ops
+        _ -> %{}
+      end
+
     # 1. EXTENDS: the public names of each extended module.
     {ops, state} =
-      Enum.reduce(mod.extends, {%{}, state}, fn ext, {ops, state} ->
+      Enum.reduce(mod.extends, {inherited, state}, fn ext, {ops, state} ->
         {ext_id, state} = build_scope(ext, subst, state)
         {Map.merge(ops, Map.fetch!(state.scopes, ext_id).public), state}
       end)
@@ -261,7 +270,7 @@ defmodule Accord.TLA.Checker.Context do
   defp decl_entry(name, :const, {:root, _}), do: {:const, name}
   defp decl_entry(name, :var, {:root, index}), do: {:var, Map.fetch!(index, name)}
 
-  defp decl_entry(name, _kind, {:inst, _id, entries}) do
+  defp decl_entry(name, _kind, {:inst, _id, entries, _}) do
     Map.get(entries, name) || raise Error, message: "no substitution for #{name}"
   end
 
@@ -269,16 +278,23 @@ defmodule Accord.TLA.Checker.Context do
     entry = {:def, def, id}
     ops = Map.put(ops, def.name, entry)
     public = if def.local, do: public, else: Map.put(public, def.name, entry)
-    state = def.body |> let_instances([]) |> Enum.reduce(state, &let_instance(&1, id, &2))
+    state = def.body |> let_instances([]) |> Enum.reduce(state, &let_instance(&1, id, &2, ops))
     {ops, public, state}
   end
 
   defp unit_entries(%{kind: :instance} = inst, id, ops, public, state) do
-    {inst_id, frame, state} = instance_scope(inst, id, state)
+    {inst_id, frame, state} = instance_scope(inst, id, state, ops)
 
     case inst.name do
       nil ->
-        inst_public = Map.fetch!(state.scopes, inst_id).public
+        # `INSTANCE M` imports the definitions of M, not its constants
+        # and variables (the substitutions replace them).
+        inst_public =
+          state.scopes
+          |> Map.fetch!(inst_id)
+          |> Map.fetch!(:public)
+          |> Map.reject(fn {_, entry} -> match?({:subst, _, _, _}, entry) end)
+
         ops = Map.merge(ops, inst_public)
         public = if inst.local, do: public, else: Map.merge(public, inst_public)
         {ops, public, state}
@@ -313,12 +329,14 @@ defmodule Accord.TLA.Checker.Context do
 
   defp let_instances(_, acc), do: acc
 
-  defp let_instance(inst, id, state) do
-    {inst_id, frame, state} = instance_scope(inst, id, state)
+  defp let_instance(inst, id, state, ops) do
+    {inst_id, frame, state} = instance_scope(inst, id, state, ops)
     %{state | let_instances: Map.put(state.let_instances, {id, inst.pos}, {inst_id, frame})}
   end
 
-  defp instance_scope(inst, id, state) do
+  # `outer_ops`: the names of the module that has the INSTANCE. A module
+  # inside that module sees them (the names defined before it).
+  defp instance_scope(inst, id, state, outer_ops) do
     {target, state} = fetch_module(inst.module, state)
     {frame, state} = new_id(state)
 
@@ -338,7 +356,7 @@ defmodule Accord.TLA.Checker.Context do
           end)
       end
 
-    {inst_id, state} = build_scope(inst.module, {:inst, frame, entries}, state)
+    {inst_id, state} = build_scope(inst.module, {:inst, frame, entries, outer_ops}, state)
     {inst_id, frame, state}
   end
 
@@ -377,6 +395,21 @@ defmodule Accord.TLA.Checker.Context do
 
       {:replace, name, target}, ctx ->
         override(ctx, name, {:alias, ctx.root, target}, :root)
+
+      {:op_case, name, args, value}, ctx ->
+        key = Value.tuple(Enum.map(args, &config_value/1))
+
+        table =
+          case Map.get(ctx.constants, name) do
+            {:op_table, t} -> t
+            _ -> %{}
+          end
+
+        %{
+          ctx
+          | constants:
+              Map.put(ctx.constants, name, {:op_table, Map.put(table, key, config_value(value))})
+        }
 
       {:module_value, mod, name, value}, ctx ->
         override(ctx, name, {:value, config_value(value)}, {:module, mod})

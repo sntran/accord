@@ -29,6 +29,7 @@ defmodule Accord.TLA.Checker.Config do
             view: nil,
             alias: nil,
             postconditions: [],
+            possible: [],
             check_deadlock: true
 
   @type constant ::
@@ -36,6 +37,7 @@ defmodule Accord.TLA.Checker.Config do
           | {:replace, String.t(), String.t()}
           | {:module_replace, String.t(), String.t(), String.t()}
           | {:module_value, String.t(), String.t(), term()}
+          | {:op_case, String.t(), [term()], term()}
 
   @keywords %{
     "SPECIFICATION" => :specification,
@@ -56,6 +58,7 @@ defmodule Accord.TLA.Checker.Config do
     "ALIAS" => :alias,
     "POSTCONDITION" => :postconditions,
     "POSTCONDITIONS" => :postconditions,
+    "_POSSIBLE" => :possible,
     "CHECK_DEADLOCK" => :check_deadlock
   }
 
@@ -100,7 +103,7 @@ defmodule Accord.TLA.Checker.Config do
   end
 
   defp tokens(text) do
-    ~r/"(?:[^"\\]|\\.)*"|<-|-?\d+|[A-Za-z0-9_]+|[{}\[\],=]/
+    ~r/"(?:[^"\\]|\\.)*"|<-|-?\d+|[A-Za-z0-9_]+|[{}\[\](),=]/
     |> Regex.scan(text)
     |> List.flatten()
   end
@@ -127,6 +130,17 @@ defmodule Accord.TLA.Checker.Config do
 
   defp item(:constants, name, rest, cfg) do
     case rest do
+      ["(" | rest] ->
+        # `F(a, b) = v`: one value of a constant operator.
+        {args, ["=" | rest]} = op_args(rest, [])
+        {value, rest} = value(rest, name)
+
+        statements(
+          rest,
+          %{cfg | constants: [{:op_case, name, args, value} | cfg.constants]},
+          :constants
+        )
+
       ["=", "[", mod, "]" | rest] ->
         {value, rest} = value(rest, name)
 
@@ -157,11 +171,26 @@ defmodule Accord.TLA.Checker.Config do
   end
 
   defp item(key, name, rest, cfg)
-       when key in [:invariants, :properties, :constraints, :action_constraints, :postconditions] do
+       when key in [
+              :invariants,
+              :properties,
+              :constraints,
+              :action_constraints,
+              :postconditions,
+              :possible
+            ] do
     statements(rest, Map.update!(cfg, key, &[name | &1]), key)
   end
 
   defp item(nil, word, _rest, _cfg), do: raise(Error, message: "unexpected #{inspect(word)}")
+
+  defp op_args([")" | rest], acc), do: {Enum.reverse(acc), rest}
+  defp op_args(["," | rest], acc), do: op_args(rest, acc)
+
+  defp op_args(tokens, acc) do
+    {v, rest} = value(tokens, nil)
+    op_args(rest, [v | acc])
+  end
 
   defp value(["{" | rest], _name) do
     {elems, rest} = set_values(rest, [])
@@ -201,7 +230,8 @@ defmodule Accord.TLA.Checker.Config do
         constants: Enum.reverse(cfg.constants),
         constraints: Enum.reverse(cfg.constraints),
         action_constraints: Enum.reverse(cfg.action_constraints),
-        postconditions: Enum.reverse(cfg.postconditions)
+        postconditions: Enum.reverse(cfg.postconditions),
+        possible: Enum.reverse(cfg.possible)
     }
   end
 end

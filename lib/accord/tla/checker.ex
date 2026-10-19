@@ -44,6 +44,8 @@ defmodule Accord.TLA.Checker do
   - `:paths` — more directories to search for modules.
   - `:deadlock` — `false` to stop the deadlock check.
   - `:max_states` — stop after this number of distinct states.
+  - `:invariant_exprs` — more invariants, as TLA+ expressions (text).
+  - `:warn` — `false` for TLC's `-nowarning` (see `Accord.TLA.Checker.Eval`).
   """
   @spec check(Path.t(), keyword()) :: result()
   def check(path, opts \\ []) do
@@ -55,8 +57,9 @@ defmodule Accord.TLA.Checker do
   """
   def run(path, opts \\ []) do
     with {:ok, config} <- config(path, opts),
-         {:ok, ctx} <- load(path, config, opts) do
-      Search.run(ctx, opts)
+         {:ok, ctx} <- load(path, config, opts),
+         {:ok, invariants} <- invariant_exprs(opts) do
+      Search.run(ctx, Keyword.put(opts, :invariant_exprs, invariants))
     else
       {:error, kind, message} -> load_error(kind, message)
     end
@@ -68,7 +71,10 @@ defmodule Accord.TLA.Checker do
         {:ok, c}
 
       nil ->
-        read_config(Path.rootname(path) <> ".cfg")
+        cfg = Path.rootname(path) <> ".cfg"
+        # Without a .cfg file, the config can be a CONFIG section of the
+        # module file.
+        if File.exists?(cfg), do: read_config(cfg), else: read_config(path)
 
       cfg_path ->
         read_config(cfg_path)
@@ -77,11 +83,20 @@ defmodule Accord.TLA.Checker do
 
   defp read_config(path) do
     case File.read(path) do
-      {:ok, text} -> {:ok, Config.parse(text)}
+      {:ok, text} -> {:ok, text |> config_section() |> Config.parse()}
       {:error, reason} -> {:error, :config, "cannot read #{path}: #{:file.format_error(reason)}"}
     end
   rescue
     e in Config.Error -> {:error, :config, Exception.message(e)}
+  end
+
+  # A file with a `---- CONFIG Name ----` section (after a module) gives
+  # the text of that section.
+  defp config_section(text) do
+    case Regex.run(~r/^-{4,}[ \t]*CONFIG[ \t]+\w+[ \t]*-{4,}[^\n]*\n(.*?)^={4,}/ms, text) do
+      [_, section] -> section
+      nil -> if text =~ ~r/^-{4,}[ \t]*MODULE/m, do: "", else: text
+    end
   end
 
   defp load(path, config, opts) do
@@ -97,6 +112,14 @@ defmodule Accord.TLA.Checker do
 
     e in Value.Error ->
       {:error, :config, Exception.message(e)}
+  end
+
+  # `:invariant_exprs`: invariants as TLA+ text (as TLC's `-inv`).
+  defp invariant_exprs(opts) do
+    {:ok,
+     opts |> Keyword.get(:invariant_exprs, []) |> Enum.map(&{&1, Parser.parse_expression(&1)})}
+  rescue
+    e in [Parser.Error, Accord.TLA.Checker.Lexer.Error] -> {:error, :parse, Exception.message(e)}
   end
 
   defp load_error(kind, message) do
@@ -150,6 +173,7 @@ defmodule Accord.TLA.Checker do
 
   defp tlc_kind(:assumption), do: :error
   defp tlc_kind(:postcondition), do: :error
+  defp tlc_kind(:possible), do: :error
   defp tlc_kind(:init_property), do: :temporal
   defp tlc_kind(_), do: :error
 
