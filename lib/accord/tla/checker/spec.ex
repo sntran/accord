@@ -122,7 +122,8 @@ defmodule Accord.TLA.Checker.Spec do
     Value.Error -> :error
   end
 
-  defp constant?(e, env), do: Accord.TLA.Checker.Constant.expression?(e, env.ctx, env.scope, Map.keys(env.bound))
+  defp constant?(e, env),
+    do: Accord.TLA.Checker.Constant.expression?(e, env.ctx, env.scope, Map.keys(env.bound))
 
   defp split_call(e, n, args, env, name) do
     with false <- Map.has_key?(env.bound, n),

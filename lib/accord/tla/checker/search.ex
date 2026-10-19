@@ -63,7 +63,7 @@ defmodule Accord.TLA.Checker.Search do
         %{result(ctx) | status: :ok}
       else
         model = setup(ctx, base, fn -> model(ctx, spec, config) end)
-      constant_invariants(model, base)
+        constant_invariants(model, base)
 
         extra =
           for {text, e} <- Keyword.get(opts, :invariant_exprs, []),
@@ -117,7 +117,14 @@ defmodule Accord.TLA.Checker.Search do
   # error, before the search.
   defp constant_invariants(model, base) do
     Enum.each(model.invariants, fn {name, {e, scope, bound, frames}} ->
-      env = %{Eval.new(model.ctx) | scope: scope, bound: bound, frames: frames, state: nil, level: 0}
+      env = %{
+        Eval.new(model.ctx)
+        | scope: scope,
+          bound: bound,
+          frames: frames,
+          state: nil,
+          level: 0
+      }
 
       constant_false =
         try do
@@ -127,7 +134,18 @@ defmodule Accord.TLA.Checker.Search do
         end
 
       if constant_false,
-        do: raise(Stop, result: error_result(model.ctx, "The invariant of #{name} is equal to FALSE", [], base, nil, :config))
+        do:
+          raise(Stop,
+            result:
+              error_result(
+                model.ctx,
+                "The invariant of #{name} is equal to FALSE",
+                [],
+                base,
+                nil,
+                :config
+              )
+          )
     end)
   end
 
@@ -430,7 +448,8 @@ defmodule Accord.TLA.Checker.Search do
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace(st, id)) end)
 
     {st, any?} =
-      Enum.reduce(model.actions_next, {st, false}, fn {{e, scope, bound, frames}, name}, {st, any?} ->
+      Enum.reduce(model.actions_next, {st, false}, fn {{e, scope, bound, frames}, name},
+                                                      {st, any?} ->
         Process.put(:tla_stats_generated, st.generated)
         Process.put(:tla_extra_generated, 0)
 
@@ -450,10 +469,14 @@ defmodule Accord.TLA.Checker.Search do
             Eval.gen(e, env, :next)
           rescue
             err in Value.Error ->
-              raise Stop, result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st)
+              raise Stop,
+                result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st)
           end
 
-        st = %{st | generated: st.generated + length(successors) + Process.get(:tla_extra_generated, 0)}
+        st = %{
+          st
+          | generated: st.generated + length(successors) + Process.get(:tla_extra_generated, 0)
+        }
 
         st =
           Enum.reduce(successors, st, fn {p, label}, st ->
@@ -526,7 +549,9 @@ defmodule Accord.TLA.Checker.Search do
     # TLC checks a new state with the level of its predecessor (0 for an
     # initial state).
     env = %{Eval.new(model.ctx) | state: state, level: depth - 1}
-    step_env = if from, do: %{Eval.new(model.ctx) | state: elem(from, 1), next: state, level: depth - 1}
+
+    step_env =
+      if from, do: %{Eval.new(model.ctx) | state: elem(from, 1), next: state, level: depth - 1}
 
     # The _POSSIBLE predicates go after the constraints, as in TLC: a
     # state predicate is a state constraint, an action is an action

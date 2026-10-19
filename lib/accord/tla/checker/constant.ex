@@ -44,7 +44,16 @@ defmodule Accord.TLA.Checker.Constant do
       {kind, _} when kind in [:prime, :unchanged, :enabled, :always, :eventually] ->
         false
 
-      {kind, _, _} when kind in [:box_action, :diamond_action, :leadsto, :wf, :sf, :temporal_forall, :temporal_exists] ->
+      {kind, _, _}
+      when kind in [
+             :box_action,
+             :diamond_action,
+             :leadsto,
+             :wf,
+             :sf,
+             :temporal_forall,
+             :temporal_exists
+           ] ->
         false
 
       {:name, n, _} ->
@@ -61,9 +70,20 @@ defmodule Accord.TLA.Checker.Constant do
         local = Enum.reduce(defs, local, &MapSet.put(&2, &1.name))
 
         Enum.all?(defs, fn
-          %{kind: :instance} -> false
-          %{kind: :fun} = d -> binds?(d.binds, ctx, sid, local) and expr?(d.body, ctx, sid, bind_names(d.binds, local))
-          d -> expr?(d.body, ctx, sid, Enum.reduce(d.params, local, fn {p, _}, acc -> MapSet.put(acc, p) end))
+          %{kind: :instance} ->
+            false
+
+          %{kind: :fun} = d ->
+            binds?(d.binds, ctx, sid, local) and
+              expr?(d.body, ctx, sid, bind_names(d.binds, local))
+
+          d ->
+            expr?(
+              d.body,
+              ctx,
+              sid,
+              Enum.reduce(d.params, local, fn {p, _}, acc -> MapSet.put(acc, p) end)
+            )
         end) and expr?(body, ctx, sid, local)
 
       {kind, binds, body} when kind in [:forall, :exists, :func] ->
@@ -76,7 +96,8 @@ defmodule Accord.TLA.Checker.Constant do
         expr?(set, ctx, sid, local) and expr?(pred, ctx, sid, bind_names([{target, set}], local))
 
       {:choose, {target, set}, body} ->
-        (set == nil or expr?(set, ctx, sid, local)) and expr?(body, ctx, sid, bind_names([{target, set}], local))
+        (set == nil or expr?(set, ctx, sid, local)) and
+          expr?(body, ctx, sid, bind_names([{target, set}], local))
 
       {:lambda, names, body} ->
         expr?(body, ctx, sid, Enum.reduce(names, local, &MapSet.put(&2, &1)))
@@ -93,7 +114,8 @@ defmodule Accord.TLA.Checker.Constant do
   defp sub?(x, ctx, sid, local) when is_list(x), do: Enum.all?(x, &sub?(&1, ctx, sid, local))
   defp sub?(_, _ctx, _sid, _local), do: true
 
-  defp binds?(binds, ctx, sid, local), do: Enum.all?(binds, fn {_, set} -> set == nil or expr?(set, ctx, sid, local) end)
+  defp binds?(binds, ctx, sid, local),
+    do: Enum.all?(binds, fn {_, set} -> set == nil or expr?(set, ctx, sid, local) end)
 
   defp bind_names(binds, local) do
     Enum.reduce(binds, local, fn
@@ -137,10 +159,13 @@ defmodule Accord.TLA.Checker.Constant do
 
       :error ->
         Process.put(:tla_constant_defs, Map.put(cache, key, true))
-        local = case d.kind do
-          :fun -> bind_names(d.binds, MapSet.new())
-          _ -> MapSet.new(d.params, &elem(&1, 0))
-        end
+
+        local =
+          case d.kind do
+            :fun -> bind_names(d.binds, MapSet.new())
+            _ -> MapSet.new(d.params, &elem(&1, 0))
+          end
+
         v = expr?(d.body, ctx, sid, local)
         Process.put(:tla_constant_defs, Map.put(Process.get(:tla_constant_defs), key, v))
         v

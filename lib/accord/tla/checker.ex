@@ -65,6 +65,16 @@ defmodule Accord.TLA.Checker do
     end
   end
 
+  @doc """
+  Loads the module in `path` and its config (options `:config` and
+  `:paths`, as for `check/2`), for a use other than a model check (see
+  `Accord.TLA.Checker.Machine`). Without a config, the config is empty.
+  """
+  @spec context(Path.t(), keyword()) :: {:ok, Context.t()} | {:error, atom(), String.t()}
+  def context(path, opts \\ []) do
+    with {:ok, config} <- config(path, opts), do: load(path, config, opts)
+  end
+
   defp config(path, opts) do
     case Keyword.get(opts, :config) do
       %Config{} = c ->

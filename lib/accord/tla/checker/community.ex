@@ -254,7 +254,8 @@ defmodule Accord.TLA.Checker.Community do
     true
   end
 
-  defp op("Json", "JsonDeserialize", [path], _env), do: path |> read!() |> JSON.decode!() |> from_json()
+  defp op("Json", "JsonDeserialize", [path], _env),
+    do: path |> read!() |> JSON.decode!() |> from_json()
 
   defp op("Json", "ndJsonDeserialize", [path], _env) do
     path
@@ -436,16 +437,23 @@ defmodule Accord.TLA.Checker.Community do
   defp json_node({:lazy_fun, _, _} = f), do: f |> Value.canon() |> json_node()
 
   defp json_node(v) do
-    if Value.set?(v), do: v |> Value.canon() |> json_node(), else: error("cannot convert #{Value.show(v)} to JSON")
+    if Value.set?(v),
+      do: v |> Value.canon() |> json_node(),
+      else: error("cannot convert #{Value.show(v)} to JSON")
   end
 
   defp json_array({:seq, t}), do: {:arr, t |> Tuple.to_list() |> Enum.map(&json_node/1)}
   defp json_array({:fun, _} = f), do: json_object(f)
-  defp json_array(%MapSet{} = s), do: {:arr, s |> MapSet.to_list() |> Value.sort() |> Enum.map(&json_node/1)}
+
+  defp json_array(%MapSet{} = s),
+    do: {:arr, s |> MapSet.to_list() |> Value.sort() |> Enum.map(&json_node/1)}
+
   defp json_array({:lazy_fun, _, _} = f), do: f |> Value.canon() |> json_array()
 
   defp json_array(v) do
-    if Value.set?(v), do: v |> Value.canon() |> json_array(), else: error("cannot convert #{Value.show(v)} to a JSON array")
+    if Value.set?(v),
+      do: v |> Value.canon() |> json_array(),
+      else: error("cannot convert #{Value.show(v)} to a JSON array")
   end
 
   defp json_object({:seq, _} = s), do: json_array(s)
@@ -465,7 +473,11 @@ defmodule Accord.TLA.Checker.Community do
   defp json_text(n) when is_integer(n), do: Integer.to_string(n)
   defp json_text(s) when is_binary(s), do: JSON.encode!(s)
   defp json_text({:arr, items}), do: "[" <> Enum.map_join(items, ",", &json_text/1) <> "]"
-  defp json_text({:obj, fields}), do: "{" <> Enum.map_join(fields, ",", fn {k, v} -> JSON.encode!(k) <> ":" <> json_text(v) end) <> "}"
+
+  defp json_text({:obj, fields}),
+    do:
+      "{" <>
+        Enum.map_join(fields, ",", fn {k, v} -> JSON.encode!(k) <> ":" <> json_text(v) end) <> "}"
 
   defp from_json(v) when is_integer(v) or is_boolean(v) or is_binary(v), do: v
   defp from_json(v) when is_float(v), do: error("JSON number #{v} is not an integer")

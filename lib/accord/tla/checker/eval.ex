@@ -340,6 +340,14 @@ defmodule Accord.TLA.Checker.Eval do
   defp bound_value({:let_def, _d, _}, n, _env), do: error("the operator #{n} needs arguments")
   defp bound_value({:op_value, _, 0, _} = op, _n, env), do: apply_op(op, [], env)
   defp bound_value({:op_value, n, _, _}, _n, _env), do: error("the operator #{n} needs arguments")
+
+  defp bound_value({:free_param, _} = key, n, env) do
+    case env.next do
+      %{^key => v} -> v
+      _ -> error("the parameter #{n} has no value yet")
+    end
+  end
+
   defp bound_value(v, _n, _env), do: v
 
   # A zero-arity LET definition, cached in evaluation.
@@ -475,7 +483,17 @@ defmodule Accord.TLA.Checker.Eval do
         v
 
       :error ->
-        v = eval(d.body, %{env | scope: sid, bound: %{}, state: nil, next: nil, primed: false, gen: false})
+        v =
+          eval(d.body, %{
+            env
+            | scope: sid,
+              bound: %{},
+              state: nil,
+              next: nil,
+              primed: false,
+              gen: false
+          })
+
         Process.put(:tla_constants, Map.put(Process.get(:tla_constants) || %{}, key, v))
         v
     end
@@ -674,7 +692,7 @@ defmodule Accord.TLA.Checker.Eval do
           {:sub_expr_of, sub, n}
 
         _ ->
-          Context.lookup(env.ctx, scope_env.scope, name) ||
+          Context.export(env.ctx, scope_env.scope, name) ||
             error("#{name} is not defined in the instance")
       end
 
@@ -1197,7 +1215,12 @@ defmodule Accord.TLA.Checker.Eval do
       {:def, %{kind: :op, params: []} = d, sid} when args == [] and not is_nil(d) ->
         if Constant.definition?(env.ctx, sid, d),
           do: guard(e, caller, mode),
-          else: do_gen(d.body, %{caller | scope: sid, bound: %{}, frames: env.frames, label: label(caller, n)}, mode)
+          else:
+            do_gen(
+              d.body,
+              %{caller | scope: sid, bound: %{}, frames: env.frames, label: label(caller, n)},
+              mode
+            )
 
       {:def, %{kind: :op} = d, sid} ->
         values = prepare(args, d.params, caller)
@@ -1311,6 +1334,11 @@ defmodule Accord.TLA.Checker.Eval do
   # The variable that `lhs` assigns: `x'` in :next mode, `x` in :init mode.
   defp target({:name, n, _} = lhs, env, mode) do
     case Map.fetch(env.bound, n) do
+      # An open parameter (see `Accord.TLA.Checker.Machine`): the action
+      # gives its value.
+      {:ok, {:free_param, _} = key} ->
+        {:ok, key}
+
       # An operator argument: the argument expression decides.
       {:ok, {:thunk, _, te, scope, bound, frames, _}} ->
         target(te, %{env | scope: scope, bound: bound, frames: frames}, mode)

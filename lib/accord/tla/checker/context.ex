@@ -41,7 +41,11 @@ defmodule Accord.TLA.Checker.Context do
 
   defmodule Scope do
     @moduledoc "The names that a module can see."
-    defstruct [:id, :module, ops: %{}, public: %{}]
+    # `exports`: for an instance, the entries that `I!Op` gives when they
+    # differ from `ops`. A config replacement changes the names that the
+    # module uses, but not `I!Op` (as in TLC, where an instance has its
+    # own copies of the definitions).
+    defstruct [:id, :module, ops: %{}, public: %{}, exports: %{}]
   end
 
   defstruct id: nil,
@@ -57,6 +61,8 @@ defmodule Accord.TLA.Checker.Context do
             paths: [],
             root_scopes: MapSet.new(),
             let_instances: %{}
+
+  @type t :: %__MODULE__{}
 
   @doc """
   Loads the module in `path` with the config in `config`.
@@ -382,8 +388,79 @@ defmodule Accord.TLA.Checker.Context do
   # -- Constants from the config --
 
   defp apply_constants(ctx, config) do
-    Enum.reduce(config.constants, ctx, fn
-      {:value, name, value}, ctx ->
+    originals =
+      Map.new(config.constants, fn
+        {:replace, name, _} -> {name, lookup(ctx, ctx.root, name)}
+        _ -> {nil, nil}
+      end)
+
+    config.constants
+    |> Enum.reduce(ctx, &apply_constant/2)
+    |> own_names(originals)
+  end
+
+  # In the body of a replacement `name <- target`, `name` is the original
+  # definition (TLC does not loop when `target` uses `name`). The target
+  # gets a scope: the root scope with the original entry of `name`.
+  defp own_names(ctx, originals) do
+    Enum.reduce(originals, ctx, fn
+      {nil, _}, ctx ->
+        ctx
+
+      {_name, nil}, ctx ->
+        ctx
+
+      {name, original}, ctx ->
+        root = Map.fetch!(ctx.scopes, ctx.root)
+        id = ctx.scopes |> Map.keys() |> Enum.max() |> Kernel.+(1)
+        # The definitions of the root module in the copy have the copy as
+        # their scope, so that the body of `target` sees the original.
+        ops =
+          Map.new(root.ops, fn
+            {k, {:def, d, sid}} when sid == ctx.root -> {k, {:def, d, id}}
+            other -> other
+          end)
+
+        copy = %{root | id: id, ops: Map.put(ops, name, original)}
+
+        scopes =
+          ctx.scopes
+          |> Map.put(id, copy)
+          |> Map.new(fn {sid, scope} ->
+            case Map.get(scope.ops, name) do
+              {:alias, sid0, target} when sid0 == ctx.root and sid != id ->
+                entry = {:alias, id, target}
+
+                {sid,
+                 %{
+                   scope
+                   | ops: Map.put(scope.ops, name, entry),
+                     public: maybe_put(scope.public, name, entry)
+                 }}
+
+              _ ->
+                {sid, scope}
+            end
+          end)
+
+        let_instances =
+          for {{sid, pos}, v} <- ctx.let_instances,
+              sid == ctx.root,
+              into: ctx.let_instances,
+              do: {{id, pos}, v}
+
+        %{
+          ctx
+          | scopes: scopes,
+            root_scopes: MapSet.put(ctx.root_scopes, id),
+            let_instances: let_instances
+        }
+    end)
+  end
+
+  defp apply_constant(c, ctx) do
+    case c do
+      {:value, name, value} ->
         value = config_value(value)
 
         if constant?(ctx, name) do
@@ -393,10 +470,10 @@ defmodule Accord.TLA.Checker.Context do
           override(ctx, name, {:value, value}, :root)
         end
 
-      {:replace, name, target}, ctx ->
+      {:replace, name, target} ->
         override(ctx, name, {:alias, ctx.root, target}, :root)
 
-      {:op_case, name, args, value}, ctx ->
+      {:op_case, name, args, value} ->
         key = Value.tuple(Enum.map(args, &config_value/1))
 
         table =
@@ -411,14 +488,14 @@ defmodule Accord.TLA.Checker.Context do
               Map.put(ctx.constants, name, {:op_table, Map.put(table, key, config_value(value))})
         }
 
-      {:module_value, mod, name, value}, ctx ->
+      {:module_value, mod, name, value} ->
         override(ctx, name, {:value, config_value(value)}, {:module, mod})
 
-      {:module_replace, mod, name, target}, ctx ->
+      {:module_replace, mod, name, target} ->
         # `name <-[mod] target`: `name` in the module `mod`; `target` is a
         # definition of the root module.
         override(ctx, name, {:alias, ctx.root, target}, {:module, mod})
-    end)
+    end
   end
 
   defp constant?(ctx, name) do
@@ -450,11 +527,17 @@ defmodule Accord.TLA.Checker.Context do
           end
 
         if applies do
+          exports =
+            if root_context?(ctx, scope),
+              do: scope.exports,
+              else: Map.put_new(scope.exports, name, Map.get(scope.ops, name))
+
           {id,
            %{
              scope
              | ops: Map.put(scope.ops, name, entry),
-               public: maybe_put(scope.public, name, entry)
+               public: maybe_put(scope.public, name, entry),
+               exports: exports
            }}
         else
           {id, scope}
@@ -483,6 +566,12 @@ defmodule Accord.TLA.Checker.Context do
   @doc "Looks up a name in a scope."
   def lookup(%__MODULE__{scopes: scopes}, scope_id, name) do
     scopes |> Map.fetch!(scope_id) |> Map.fetch!(:ops) |> Map.get(name)
+  end
+
+  @doc "The entry of `I!name`, where `scope_id` is the scope of the instance `I`."
+  def export(%__MODULE__{scopes: scopes}, scope_id, name) do
+    scope = Map.fetch!(scopes, scope_id)
+    Map.get(scope.exports, name) || Map.get(scope.ops, name)
   end
 
   @doc "The definition of a name in the root scope."
