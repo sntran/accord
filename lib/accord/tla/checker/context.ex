@@ -564,8 +564,11 @@ defmodule Accord.TLA.Checker.Context do
           end
 
         if applies do
+          # A replacement of the root does not change `I!Op` of an
+          # instance (TLC makes new definitions for an instance); a
+          # replacement for a module (`<-[M]`, `= [M]v`) does.
           exports =
-            if root_context?(ctx, scope),
+            if root_context?(ctx, scope) or match?({:module, _}, where),
               do: scope.exports,
               else: Map.put_new(scope.exports, name, Map.get(scope.ops, name))
 

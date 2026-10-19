@@ -28,6 +28,7 @@ defmodule Accord.TLA.Checker.Community do
       "SimplePath" => [0]
     },
     "FiniteSetsExt" => %{"FoldSet" => [2, 0, 0], "Quantify" => [0, 1], "kSubset" => [0, 0]},
+    "VectorClocks" => %{"CausalOrder" => [0, 1, 1, 1]},
     "Functions" => %{
       "FoldFunction" => [2, 0, 0],
       "FoldFunctionOnSet" => [2, 0, 0, 0],
@@ -149,6 +150,77 @@ defmodule Accord.TLA.Checker.Community do
         )
 
     {:ksubset, k, set}
+  end
+
+  # The Java override of TLC (the TLA+ definition is a CHOOSE over all the
+  # orders). The log of each node in the order of its clock; a node is a
+  # parent of an entry when the entry has a larger time of the node; then
+  # the roots, node by node, in the order of TLC's HashMap of the nodes.
+  defp op("VectorClocks", "CausalOrder", [log, clock, node, domain], env) do
+    entries =
+      log
+      |> Value.seq_list()
+      |> Enum.with_index()
+      |> Enum.map(fn {val, idx} ->
+        n = Eval.apply_op(node, [val], env)
+        vc = Eval.apply_op(clock, [val], env)
+        dom = domain |> Eval.apply_op([vc], env) |> Value.enum() |> Value.sort()
+        %{id: idx, node: n, vc: vc, time: Value.apply_fun(vc, n), dom: dom, val: val}
+      end)
+
+    hosts = entries |> Enum.map(& &1.node) |> Enum.uniq()
+
+    lists =
+      Map.new(hosts, fn h ->
+        {h, entries |> Enum.filter(&(&1.node == h)) |> Enum.sort_by(& &1.time)}
+      end)
+
+    parents =
+      Enum.reduce(hosts, %{}, fn host, parents ->
+        clock0 = Map.new(hosts, &{&1, 0})
+
+        lists
+        |> Map.fetch!(host)
+        |> Enum.reduce({clock0, parents}, fn gn, {gclock, parents} ->
+          gclock = Map.put(gclock, host, gn.time)
+
+          Enum.reduce(gn.dom, {gclock, parents}, fn other, {gclock, parents} ->
+            time = Value.apply_fun(gn.vc, other)
+
+            if Map.get(gclock, other, 0) < time do
+              parent = lists |> Map.fetch!(other) |> Enum.at(time - 1)
+
+              {Map.put(gclock, other, time),
+               Map.update(parents, gn.id, MapSet.new([parent.id]), &MapSet.put(&1, parent.id))}
+            else
+              {gclock, parents}
+            end
+          end)
+        end)
+        |> elem(1)
+      end)
+
+    order = java_hash_map_order(hosts)
+
+    {sorted, _, _} =
+      Enum.reduce(1..length(entries)//1, {[], lists, parents}, fn _, acc ->
+        Enum.reduce(order, acc, fn host, {sorted, lists, parents} ->
+          case Map.fetch!(lists, host) do
+            [head | rest] ->
+              if MapSet.size(Map.get(parents, head.id, MapSet.new())) == 0 do
+                parents = Map.new(parents, fn {k, ps} -> {k, MapSet.delete(ps, head.id)} end)
+                {[head.val | sorted], Map.put(lists, host, rest), parents}
+              else
+                {sorted, lists, parents}
+              end
+
+            [] ->
+              {sorted, lists, parents}
+          end
+        end)
+      end)
+
+    Value.tuple(Enum.reverse(sorted))
   end
 
   defp op("Functions", "FoldFunction", [opv, base, f], env),
@@ -454,6 +526,26 @@ defmodule Accord.TLA.Checker.Community do
     |> Value.sort()
     |> Enum.reduce(base, fn x, acc -> Eval.apply_op(opv, [Value.apply_fun(f, x), acc], env) end)
   end
+
+  # The order of the keys of a java.util.HashMap (keys put in the order of
+  # the list): buckets by the hash of TLC's values (the fingerprint, high
+  # XOR low), in the order of insertion in a bucket.
+  defp java_hash_map_order(keys) do
+    import Bitwise
+    cap = hash_map_capacity(length(keys), 16)
+
+    keys
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {k, i} ->
+      fp = Accord.TLA.Checker.Fingerprint.value(Accord.TLA.Checker.Fingerprint.new(), k)
+      h = bxor(fp >>> 32, fp &&& 0xFFFFFFFF) &&& 0xFFFFFFFF
+      {bxor(h, h >>> 16) &&& cap - 1, i}
+    end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  defp hash_map_capacity(n, cap) when n > cap * 3 / 4, do: hash_map_capacity(n, cap * 2)
+  defp hash_map_capacity(_n, cap), do: cap
 
   defp permutations([]), do: [[]]
   defp permutations(list), do: for(x <- list, rest <- permutations(list -- [x]), do: [x | rest])

@@ -670,14 +670,29 @@ defmodule Accord.TLA.Checker.Stdlib do
   defp config_record(env) do
     deadlock = Process.get(:tla_deadlock, env.ctx.config.check_deadlock)
 
-    Value.record([
-      {"mode", "bfs"},
+    common = [
       {"deadlock", deadlock},
       {"worker", Process.get(:tla_workers, 1)},
       {"seed", Integer.to_string(Random.seed())},
       {"fingerprint", "0"},
       {"install", ""}
-    ])
+    ]
+
+    case Process.get(:tla_simulation) do
+      nil ->
+        Value.record([{"mode", "bfs"} | common])
+
+      sim ->
+        # As TLC: the number of traces is an int (-1 without a limit).
+        traces = if sim.traces == :infinity, do: -1, else: sim.traces
+
+        Value.record([
+          {"mode", "simulate"},
+          {"depth", sim.depth},
+          {"traces", traces},
+          {"aril", "0"} | common
+        ])
+    end
   end
 
   # TLCGet("revision"): the checker is a development version.
@@ -834,7 +849,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       {"distinct", Process.get(:tla_stats_distinct, 0)},
       {"generated", Process.get(:tla_stats_generated, 0)},
       {"queue", Process.get(:tla_stats_queue, 0)},
-      {"traces", 0},
+      {"traces", Process.get(:tla_stats_traces, 0)},
       {"duration", 0}
     ])
   end

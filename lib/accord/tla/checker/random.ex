@@ -68,17 +68,56 @@ defmodule Accord.TLA.Checker.Random do
   # java.util.Random#next(bits): a signed 32-bit value for bits = 32.
   defp next(bits) do
     g = generator()
-    s = g.s * @multiplier + 0xB &&& @mask48
+    {r, s} = step(g.s, bits)
     Process.put(:tla_random, %{g | s: s})
+    r
+  end
+
+  defp step(s, bits) do
+    s = s * @multiplier + 0xB &&& @mask48
     r = s >>> (48 - bits)
-    if bits == 32 and r >= 0x80000000, do: r - 0x100000000, else: r
+    {if(bits == 32 and r >= 0x80000000, do: r - 0x100000000, else: r), s}
   end
 
   @doc "java.util.Random#nextDouble."
-  def next_double do
-    a = next(26)
-    b = next(27)
+  def next_double, do: double(&next/1)
+
+  defp double(next) do
+    a = next.(26)
+    b = next.(27)
     ((a <<< 27) + b) * :math.pow(2, -53)
+  end
+
+  # -- A second generator: the choices of the simulation --
+
+  # TLC's simulator has its own java.util.Random for its choices (the
+  # initial state, the action, the successor), apart from the generator
+  # of the random values.
+
+  @doc "Starts the generator of the choices with `seed`."
+  def choice_setup(seed), do: Process.put(:tla_random_choice, scramble(seed))
+
+  defp choice_next(bits) do
+    {r, s} = step(Process.get(:tla_random_choice), bits)
+    Process.put(:tla_random_choice, s)
+    r
+  end
+
+  @doc "nextDouble of the generator of the choices."
+  def choice_double, do: double(&choice_next/1)
+
+  @doc "nextLong of the generator of the choices."
+  def choice_long, do: int64((choice_next(32) <<< 32) + choice_next(32))
+
+  @doc "RandomGenerator.nextPrime of the generator of the choices."
+  def choice_prime, do: prime(&choice_double/0)
+
+  @doc "A java.util.Random(seed).nextLong(), as TLC's simulator makes the seed of a worker."
+  def first_long(seed) do
+    s = scramble(seed)
+    {hi, s} = step(s, 32)
+    {lo, _} = step(s, 32)
+    int64((hi <<< 32) + lo)
   end
 
   @doc "java.util.Random#nextInt(bound)."
@@ -117,12 +156,14 @@ defmodule Accord.TLA.Checker.Random do
   end
 
   # RandomGenerator.nextPrime.
-  defp next_prime do
+  defp next_prime, do: prime(&next_double/0)
+
+  defp prime(double) do
     n = tuple_size(@primes)
 
     index =
       Enum.reduce_while(Stream.repeatedly(fn -> nil end), n, fn _, _ ->
-        i = floor(next_double() * n)
+        i = floor(double.() * n)
         if i == n, do: {:cont, n}, else: {:halt, i}
       end)
 

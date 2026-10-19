@@ -65,12 +65,25 @@ defmodule Accord.TLA.Checker.Search do
     Process.put(:tla_registers, %{})
     # Workers (TLC's -workers): each has its registers (TLCSet, TLCGet).
     Process.put(:tla_workers, Keyword.get(opts, :workers, 1))
-    Enum.each([:tla_worker_regs, :tla_worker_slot, :tla_expansions], &Process.delete/1)
+
+    Enum.each(
+      [:tla_worker_regs, :tla_worker_slot, :tla_expansions, :tla_simulation, :tla_stats_traces],
+      &Process.delete/1
+    )
+
     Random.setup(Keyword.get(opts, :seed))
     Process.put(:tla_string_ranks, ctx.string_ranks)
     # Coverage (TLC's -coverage): the counts of states of each action.
     Process.put(:tla_coverage, Keyword.get(opts, :coverage, false))
     Process.put(:tla_continue, Keyword.get(opts, :continue, false))
+
+    if sim = Keyword.get(opts, :simulate) do
+      Process.put(:tla_simulation, %{
+        depth: Keyword.get(sim, :depth, 100),
+        traces: Keyword.get(sim, :num, :infinity)
+      })
+    end
+
     Process.put(:tla_violations, [])
     Process.put(:tla_counts, %{})
     Process.put(:tla_properties, Keyword.get(opts, :properties, %{}))
@@ -138,7 +151,12 @@ defmodule Accord.TLA.Checker.Search do
           for {text, e} <- Keyword.get(opts, :invariant_exprs, []),
               do: {text, {e, ctx.root, %{}, %{}}}
 
-        search(base, %{model | invariants: model.invariants ++ extra})
+        model = %{model | invariants: model.invariants ++ extra}
+
+        case Keyword.get(opts, :simulate) do
+          nil -> search(base, model)
+          sim -> simulate(base, model, sim)
+        end
       end
     rescue
       e in Stop ->
@@ -147,7 +165,43 @@ defmodule Accord.TLA.Checker.Search do
       e in [Value.Error, Context.Error, Accord.TLA.Checker.Parser.Error] ->
         error_result(ctx, Exception.message(e), [], base)
     end
+    |> with_alias(ctx)
   end
+
+  # ALIAS: the trace prints the fields of the alias expression in place of
+  # the variables. TLC evaluates it with each state and its successor in
+  # the trace (the state itself for the last one); on an error, the state
+  # prints as it is.
+  defp with_alias(%{trace: [_ | _] = trace} = result, %{config: %{alias: name}} = ctx)
+       when is_binary(name) do
+    states = Enum.map(trace, & &1.state)
+    nexts = Enum.drop(states, 1) ++ [List.last(states)]
+    trace_values = trace_value(%{ctx: ctx}, trace)
+
+    aliased =
+      Enum.zip(states, nexts)
+      |> Enum.with_index(1)
+      |> Enum.map(fn {{s, t}, i} ->
+        Process.put(:tla_trace_fun, fn _ -> trace_prefix(trace_values, i) end)
+        env = %{Eval.new(ctx) | state: s, next: t, level: i}
+
+        try do
+          v = Eval.eval({:name, name, nil}, env)
+          Enum.map(Value.written_keys(v), &{&1, Value.apply_fun(v, &1)})
+        rescue
+          Value.Error -> nil
+        end
+      end)
+
+    Map.put(result, :alias, aliased)
+  end
+
+  defp with_alias(result, _ctx), do: result
+
+  defp trace_prefix({:seq, t}, i),
+    do: {:seq, t |> Tuple.to_list() |> Enum.take(i) |> List.to_tuple()}
+
+  defp trace_prefix(v, _i), do: v
 
   # -- Setup --
 
@@ -195,7 +249,11 @@ defmodule Accord.TLA.Checker.Search do
   # count of at most 2^31 - 1 disjuncts.
   defp check_dnf_size(model, base) do
     Enum.each(model.live, fn {name, formula, _atoms} ->
-      if Temporal.dnf_size(formula) * Integer.pow(2, length(model.fairness)) > 2_147_483_647 do
+      # TLC: WF_v(A) is []<>(~ENABLED <<A>>_v \/ <<A>>_v), one disjunct;
+      # SF_v(A) is <>[]~ENABLED <<A>>_v \/ []<><<A>>_v, two disjuncts.
+      strong = Enum.count(model.fairness, &(elem(&1, 0) == :strong))
+
+      if Temporal.dnf_size(formula) * Integer.pow(2, strong) > 2_147_483_647 do
         raise Stop,
           result:
             error_result(
@@ -704,6 +762,17 @@ defmodule Accord.TLA.Checker.Search do
             }
         end
 
+        # TLCSet("exit", TRUE) stops the search (TLC's mainChecker.stop).
+        if exit_requested?() do
+          raise Stop,
+            result: %{
+              result(model.ctx)
+              | status: :incomplete,
+                stats: stats(st),
+                warnings: base.warnings
+            }
+        end
+
         if base.max_depth && elem(Map.fetch!(st.nodes, id), 3) >= base.max_depth do
           loop(base, model, st)
         else
@@ -859,7 +928,7 @@ defmodule Accord.TLA.Checker.Search do
            (Enum.all?(model.action_constraints, &holds?(&1, step_env, model, st, parent, base)) and
               witness(model, :action, step_env) == :ok))
 
-    key = fingerprint(model, state)
+    key = fingerprint(model, state, depth)
 
     {st, unseen} =
       cond do
@@ -924,6 +993,269 @@ defmodule Accord.TLA.Checker.Search do
       _ ->
         st
     end
+  end
+
+  # -- Simulation (TLC's -simulate) --
+
+  # Random behaviors, as TLC's simulator with one worker: each behavior
+  # starts at a random initial state; each step takes a random action
+  # (the next ones in an order of a random prime when it has no step) and
+  # a random successor of it. The checker checks the invariants and the
+  # action properties of each successor of the action, and the temporal
+  # properties of each behavior. The choices come from a java.util.Random
+  # with the seed of TLC's worker, so the behaviors are the behaviors of
+  # TLC for the same seed.
+  defp simulate(base, model, sim) do
+    max_depth = Keyword.get(sim, :depth, 100)
+    max_traces = Keyword.get(sim, :num, :infinity)
+    seed = Random.seed()
+
+    st = %{
+      seen: %{},
+      nodes: %{},
+      queue: :queue.new(),
+      next_id: 0,
+      depth: 0,
+      generated: 0,
+      edges: nil,
+      init_ids: []
+    }
+
+    {inits, st} = simulation_inits(base, model, st)
+
+    if inits == [] do
+      raise Stop,
+        result:
+          error_result(
+            model.ctx,
+            "There is no initial state that satisfies the constraints.",
+            [],
+            base,
+            st,
+            :error
+          )
+    end
+
+    inits = List.to_tuple(inits)
+    # The worker has its own generators: a new stream of random values,
+    # and the choices from the first long of the seed.
+    Random.setup(seed)
+    Random.choice_setup(Random.first_long(seed))
+    simulation_loop(base, model, st, inits, max_depth, max_traces, 0)
+  end
+
+  defp simulation_inits(base, model, st) do
+    env = %{Eval.new(model.ctx) | state: %{}, label: "Init", level: 0}
+
+    partials =
+      try do
+        Enum.reduce(model.init, [{%{}, "Init"}], fn {e, scope, bound, frames}, acc ->
+          Enum.flat_map(acc, fn {p, label} ->
+            Eval.gen(
+              e,
+              %{env | scope: scope, bound: bound, frames: frames, state: p, label: label},
+              :init
+            )
+          end)
+        end)
+      rescue
+        err in Value.Error ->
+          raise Stop,
+            result: error_result(model.ctx, Exception.message(err), [], base, st, :spec_eval)
+      end
+
+    st = %{st | generated: length(partials)}
+
+    inits =
+      for {p, _} <- partials,
+          state = complete!(model, p, "the initial predicate", [], base, st),
+          sim_check_state(base, model, st, state, [%{state: state, action: nil}], 1),
+          Enum.all?(
+            model.constraints,
+            &holds?(&1, %{env | state: state, level: 1}, model, st, nil, base)
+          ),
+          do: state
+
+    {inits, st}
+  end
+
+  # The invariants of a state of a behavior (at `level`).
+  defp sim_check_state(base, model, st, state, trace, level) do
+    Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace) end)
+    env = %{Eval.new(model.ctx) | state: state, level: level}
+    kind = if level == 1, do: :spec_eval, else: :safety_eval
+
+    Enum.each(model.invariants, fn {name, closure} ->
+      unless holds?(closure, env, model, st, nil, base, fn -> trace end, kind),
+        do: stop_violation(model, base, st, :invariant, name, trace)
+    end)
+
+    true
+  end
+
+  defp simulation_loop(base, model, st, _inits, _depth, max, traces)
+       when max != :infinity and traces >= max,
+       do: simulation_done(base, model, st)
+
+  defp simulation_loop(base, model, st, inits, max_depth, max, traces) do
+    Process.put(:tla_stats_traces, traces + 1)
+    cur = elem(inits, floor(Random.choice_double() * tuple_size(inits)))
+    trace = [%{state: cur, action: nil}]
+    {st, trace} = simulate_trace(base, model, st, cur, trace, max_depth, 0)
+    st = sim_liveness(base, model, st, trace)
+
+    if exit_requested?(),
+      do: simulation_done(base, model, st),
+      else: simulation_loop(base, model, st, inits, max_depth, max, traces + 1)
+  end
+
+  defp simulation_done(base, model, st) do
+    result = %{result(model.ctx) | status: :ok, stats: stats(st), warnings: base.warnings}
+    Stdlib.switch_worker(nil)
+    check_postconditions(model, result)
+  end
+
+  defp exit_requested?, do: Map.get(Process.get(:tla_registers) || %{}, "exit") == true
+
+  defp simulate_trace(_base, _model, st, _cur, trace, max_depth, d) when d >= max_depth,
+    do: {st, trace}
+
+  defp simulate_trace(base, model, st, cur, trace, max_depth, d) do
+    actions = List.to_tuple(model.actions_next)
+    n = tuple_size(actions)
+    index = floor(Random.choice_double() * n)
+    p = Random.choice_prime()
+
+    {st, nexts, _} =
+      Enum.reduce_while(1..n//1, {st, [], index}, fn _, {st, [], i} ->
+        {st, nexts} = sim_action(base, model, st, cur, trace, elem(actions, i), d + 1)
+
+        if nexts == [],
+          do: {:cont, {st, [], rem(i + p, n)}},
+          else: {:halt, {st, nexts, i}}
+      end)
+
+    cond do
+      nexts == [] and base.deadlock ->
+        raise Stop,
+          result: %{
+            result(model.ctx)
+            | status: :violated,
+              kind: :deadlock,
+              trace: trace,
+              stats: stats(st),
+              warnings: base.warnings
+          }
+
+      nexts == [] ->
+        {st, trace}
+
+      true ->
+        nexts = List.to_tuple(Enum.reverse(nexts))
+        {s1, label} = elem(nexts, floor(Random.choice_double() * tuple_size(nexts)))
+        st = %{st | depth: max(st.depth, d + 2)}
+        # TLC leaves out the stuttering steps of a behavior.
+        trace = if s1 == cur, do: trace, else: trace ++ [%{state: s1, action: label}]
+
+        if exit_requested?(),
+          do: {st, trace},
+          else: simulate_trace(base, model, st, s1, trace, max_depth, d + 1)
+    end
+  end
+
+  # The successors of one action, with their checks; gives the ones in
+  # the model.
+  defp sim_action(base, model, st, cur, trace, {{e, scope, bound, frames}, name}, level) do
+    Process.put(:tla_stats_generated, st.generated)
+    Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace) end)
+    Eval.reset_cache()
+
+    env = %{
+      Eval.new(model.ctx)
+      | scope: scope,
+        bound: bound,
+        frames: frames,
+        state: cur,
+        next: %{},
+        label: name,
+        level: level
+    }
+
+    successors =
+      try do
+        Eval.gen(e, env, :next)
+      rescue
+        err in Value.Error ->
+          kind = if err.module, do: :error, else: :spec_eval
+
+          raise Stop,
+            result: error_result(model.ctx, Exception.message(err), trace, base, st, kind)
+      end
+
+    Enum.reduce(successors, {st, []}, fn {p, label}, {st, acc} ->
+      st = %{st | generated: st.generated + 1}
+      state = complete!(model, p, "the action #{label}", trace, base, st)
+      strace = trace ++ [%{state: state, action: label}]
+      sim_check_state(base, model, st, state, strace, level + 1)
+      step_env = %{Eval.new(model.ctx) | state: cur, next: state, level: level}
+
+      Enum.each(model.actions, fn {aname, a, sub} ->
+        unless action_holds?(a, sub, step_env, model, st, nil, base),
+          do: stop_violation(model, base, st, :action_property, aname, strace)
+      end)
+
+      senv = %{Eval.new(model.ctx) | state: state, level: level + 1}
+
+      in_model =
+        Enum.all?(model.constraints, &holds?(&1, senv, model, st, nil, base, fn -> strace end)) and
+          Enum.all?(
+            model.action_constraints,
+            &holds?(&1, step_env, model, st, nil, base, fn -> strace end)
+          )
+
+      if in_model, do: {st, [{state, label} | acc]}, else: {st, acc}
+    end)
+  end
+
+  # The temporal properties on one behavior, as TLC: the states of the
+  # behavior with their steps; each state can stutter.
+  defp sim_liveness(_base, %{live: []}, st, _trace), do: st
+
+  defp sim_liveness(base, model, st, trace) do
+    states = Enum.map(trace, & &1.state)
+    ids = states |> Enum.uniq() |> Enum.with_index() |> Map.new()
+    labels = Enum.map(trace, & &1.action)
+    nodes = Map.new(ids, fn {s, i} -> {i, {s, nil, nil, 1}} end)
+
+    edges =
+      states
+      |> Enum.zip(Enum.drop(labels, 1))
+      |> Enum.zip(Enum.drop(states, 1))
+      |> Enum.reduce(%{}, fn {{s, label}, t}, acc ->
+        edge = {Map.fetch!(ids, t), label}
+        Map.update(acc, Map.fetch!(ids, s), [edge], &[edge | &1])
+      end)
+
+    cache = :ets.new(:tla_live_atoms, [:set, :private])
+
+    gst = %{
+      next_id: map_size(ids),
+      nodes: nodes,
+      edges: edges,
+      init_ids: [Map.fetch!(ids, hd(states))],
+      live_cache: cache
+    }
+
+    result =
+      try do
+        check_liveness(base, model, gst, stats(st))
+      after
+        :ets.delete(cache)
+      end
+
+    if result.status == :ok,
+      do: st,
+      else: raise(Stop, result: %{result | stats: stats(st)})
   end
 
   # -- Liveness atoms during the search --
@@ -1151,14 +1483,23 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
-  defp fingerprint(%{view: nil, perms: []}, state), do: state
+  defp fingerprint(%{view: nil, perms: []}, state, _level), do: state
 
-  defp fingerprint(%{view: nil, perms: perms}, state) do
+  defp fingerprint(%{view: nil, perms: perms}, state, _level) do
     Enum.reduce(perms, state, fn perm, best -> min(best, permute(state, perm)) end)
   end
 
-  defp fingerprint(%{view: {e, scope, bound, frames}} = model, state) do
-    env = %{Eval.new(model.ctx) | state: state, scope: scope, bound: bound, frames: frames}
+  # The VIEW sees the level of the state (TLCGet("level")).
+  defp fingerprint(%{view: {e, scope, bound, frames}} = model, state, level) do
+    env = %{
+      Eval.new(model.ctx)
+      | state: state,
+        scope: scope,
+        bound: bound,
+        frames: frames,
+        level: level
+    }
+
     Value.canon(Eval.eval(e, env))
   end
 

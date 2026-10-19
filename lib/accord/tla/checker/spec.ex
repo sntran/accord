@@ -244,6 +244,12 @@ defmodule Accord.TLA.Checker.Spec do
   defp expand({:name, n, _}, env), do: expand_call(n, [], env)
   defp expand({:app, n, args, _}, env), do: expand_call(n, args, env)
 
+  # `Inv!2`: a part of a definition.
+  defp expand({:inst, path, name, _args, _}, env) when is_integer(name) do
+    {:def, d, sid} = Eval.inst_entry(path, name, env)
+    {:ok, {d.body, %{env | scope: sid, bound: %{}}}}
+  end
+
   defp expand({:inst, path, name, args, _}, env) do
     {_, env2} = navigate(path, env)
     expand_entry(Context.lookup(env.ctx, env2.scope, name), name, args, env, env2)
@@ -489,6 +495,11 @@ defmodule Accord.TLA.Checker.Spec do
       _ ->
         :state
     end
+  end
+
+  defp inst_level(path, name, _args, env, seen) when is_integer(name) do
+    {:def, _d, sid} = entry = Eval.inst_entry(path, name, env)
+    entry_level(entry, %{env | scope: sid}, seen)
   end
 
   defp inst_level(path, name, _args, env, seen) do

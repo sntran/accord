@@ -777,6 +777,12 @@ defmodule Accord.TLA.Checker.Eval do
 
   # Follows `M!N!Op`: gives the entry of `name` and the environment of
   # the instance.
+  @doc """
+  The entry of `path!name` (an instance path, or a positional selector
+  as `Inv!2` with an integer `name`).
+  """
+  def inst_entry(path, name, env), do: path |> navigate(name, env) |> elem(0)
+
   defp navigate(path, name, env) do
     {scope_env, entry_owner} =
       Enum.reduce(path, {env, nil}, fn {seg, args}, {cur, owner} ->
@@ -827,12 +833,13 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   # `Inv!2`: the second conjunct of the definition of Inv.
+  # The part has its own name (`Inv!2`): the caches of definitions use it.
   defp sub_entry({:sub_expr, d, sid, n}, _env),
-    do: {:def, %{d | body: select(d.body, n), params: []}, sid}
+    do: {:def, %{d | body: select(d.body, n), params: [], name: "#{d.name}!#{n}"}, sid}
 
   defp sub_entry({:sub_expr_of, inner, n}, env) do
     {:def, d, sid} = sub_entry(inner, env)
-    {:def, %{d | body: select(d.body, n)}, sid}
+    {:def, %{d | body: select(d.body, n), name: "#{d.name}!#{n}"}, sid}
   end
 
   defp sub_entry(entry, _env), do: entry

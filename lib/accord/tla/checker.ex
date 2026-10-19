@@ -20,7 +20,9 @@ defmodule Accord.TLA.Checker do
     conditions as properties).
   - `CONSTANT` values, model values, and replacements (`<-`, `<-[M]`).
   - `CONSTRAINT`, `ACTION_CONSTRAINT`, `SYMMETRY`, `VIEW`, deadlock.
-  - `ASSUME`.
+  - `ASSUME`, `POSTCONDITION`, `_POSSIBLE`, and `ALIAS` (for traces).
+  - Breadth-first model checking, as TLC's default mode, and random
+    simulation (`:simulate`).
 
   The standard modules (Naturals, Integers, Sequences, FiniteSets, Bags,
   TLC, TLCExt, and some others) are in Elixir. The other modules come
@@ -58,6 +60,10 @@ defmodule Accord.TLA.Checker do
     the counts of states of each action.
   - `:stop_after` — stop the search after this number of seconds (TLC's
     `-Dtlc2.TLC.stopAfter`).
+  - `:simulate` — random simulation, as TLC's `-simulate`: a keyword
+    list with `:num` (the number of behaviors; default: no limit) and
+    `:depth` (the length of a behavior; default 100). With the same
+    seed, the behaviors are the behaviors of TLC with one worker.
   - `:max_depth` — do not expand the states at this depth (the initial
     states are at depth 1), as TLC's `-dfid`. The search stays breadth
     first.
@@ -205,11 +211,25 @@ defmodule Accord.TLA.Checker do
   defp tlc_kind(_), do: :error
 
   defp tlc_trace(result) do
+    aliases = Map.get(result, :alias) || []
+
     states =
       result.trace
       |> Enum.with_index(1)
       |> Enum.map(fn {%{state: state, action: action}, n} ->
-        %{number: n, action: action, assignments: assignments(result.variables, state)}
+        case Enum.at(aliases, n - 1) do
+          nil ->
+            %{number: n, action: action, assignments: assignments(result.variables, state)}
+
+          fields ->
+            # ALIAS: the fields of the alias, in their order.
+            %{
+              number: n,
+              action: action,
+              assignments: Map.new(fields, fn {k, v} -> {k, Value.show(v)} end),
+              order: Enum.map(fields, &elem(&1, 0))
+            }
+        end
       end)
 
     case result.loop do
@@ -304,7 +324,7 @@ defmodule Accord.TLA.Checker do
 
   defp format_state(%{number: n, action: :stuttering}, _), do: ["State #{n}: Stuttering", ""]
 
-  defp format_state(%{number: n, action: action, assignments: a}, result) do
+  defp format_state(%{number: n, action: action, assignments: a} = state, result) do
     head =
       cond do
         a == %{} -> "Back to state #{n}: <#{action}>"
@@ -312,7 +332,8 @@ defmodule Accord.TLA.Checker do
         true -> "State #{n}: <#{action}>"
       end
 
-    vars = for name <- result.variables, Map.has_key?(a, name), do: "/\\ #{name} = #{a[name]}"
+    names = Map.get(state, :order, result.variables)
+    vars = for name <- names, Map.has_key?(a, name), do: "/\\ #{name} = #{a[name]}"
     [head | vars] ++ [""]
   end
 end
