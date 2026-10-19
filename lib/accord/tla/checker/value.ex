@@ -817,6 +817,13 @@ defmodule Accord.TLA.Checker.Value do
     end)
   end
 
+  # A small set of integers is already in order (a map of 32 keys or
+  # fewer keeps its keys in order).
+  def ordered(%MapSet{} = s) do
+    list = MapSet.to_list(s)
+    if MapSet.size(s) <= 32 and Enum.all?(list, &is_integer/1), do: list, else: sort(list)
+  end
+
   def ordered(s), do: s |> enum() |> sort()
 
   defp combinations_stream(_, 0), do: [[]]
@@ -1271,7 +1278,19 @@ defmodule Accord.TLA.Checker.Value do
     end
   end
 
-  def sort(values), do: Enum.sort_by(values, &sort_key/1)
+  def sort(values) do
+    # Without strings and model values, the order of Erlang terms is the
+    # order of TLC (and much faster).
+    if Enum.all?(values, &plain?/1),
+      do: Enum.sort(values),
+      else: Enum.sort_by(values, &sort_key/1)
+  end
+
+  defp plain?(v) when is_integer(v) or is_boolean(v), do: true
+  defp plain?({:seq, t}), do: t |> Tuple.to_list() |> Enum.all?(&plain?/1)
+  defp plain?(%MapSet{} = s), do: Enum.all?(s, &plain?/1)
+  defp plain?({:fun, m}), do: Enum.all?(m, fn {k, v} -> plain?(k) and plain?(v) end)
+  defp plain?(_), do: false
 
   @doc """
   The rank of a string (or of the name of a model value): TLC orders them

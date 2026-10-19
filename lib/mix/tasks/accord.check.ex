@@ -41,8 +41,10 @@ defmodule Mix.Tasks.Accord.Check do
 
   ## Hand-written extension specs
 
-  `--extra` checks a user-authored TLA+ module that `EXTENDS` a
-  generated protocol module — custom invariants, refinement mappings,
+  `--extra` checks a user-authored TLA+ module. A module that extends no
+  generated protocol module is checked alone, with its own `.cfg` (or
+  the CONFIG section of the file), as TLC checks it. A module that
+  `EXTENDS` a generated protocol module — custom invariants, refinement mappings,
   anything the DSL cannot express — without ever editing generated
   files, so regeneration is always safe:
 
@@ -201,10 +203,40 @@ defmodule Mix.Tasks.Accord.Check do
       end
     else
       {:error, :no_known_extends} ->
-        {{:extra, Path.basename(path, ".tla"), nil}, {:error, :no_known_extends}}
+        # A module that extends no generated protocol is a specification
+        # of its own (for example the contract of `Accord.Spec`): check it
+        # with its own config, as TLC does.
+        {{:extra, Path.basename(path, ".tla"), nil},
+         check_standalone(path, engine_opts, strict?, deadlock?, dump?)}
 
       {:error, reason} ->
         {{:extra, Path.basename(path, ".tla"), nil}, {:error, {:extra_unreadable, reason}}}
+    end
+  end
+
+  defp check_standalone(path, engine_opts, strict?, deadlock?, dump?) do
+    cfg = Path.rootname(path) <> ".cfg"
+    # Without a .cfg file, the config is the CONFIG section of the module.
+    cfg = if File.exists?(cfg), do: cfg, else: path
+    # The config decides the deadlock check, unless --no-deadlock.
+    opts = if deadlock?, do: engine_opts, else: Keyword.put(engine_opts, :deadlock, false)
+
+    case require_engine(engine_opts) do
+      :ok ->
+        result =
+          case Engine.check(path, cfg, opts) do
+            {:error, violation, stats} = error when is_map(violation) ->
+              if dump?, do: dump_tlc_output(path, stats.output)
+              error
+
+            other ->
+              other
+          end
+
+        classify_tlc_run(result, strict?)
+
+      error ->
+        error
     end
   end
 
