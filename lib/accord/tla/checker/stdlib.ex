@@ -12,7 +12,8 @@ defmodule Accord.TLA.Checker.Stdlib do
   `Reals` is known but not supported: its operators raise an error.
   """
 
-  alias Accord.TLA.Checker.{Community, Eval, Value}
+  alias Accord.TLA.Checker.{Community, Eval, Fingerprint, Random, Value}
+  import Bitwise, only: [&&&: 2]
   import Value, only: [error: 1]
 
   @int2 ["+", "-", "*", "^", "\\div", "%", "<", ">", "<=", ">=", ".."]
@@ -80,7 +81,12 @@ defmodule Accord.TLA.Checker.Stdlib do
       "ndJsonSerialize",
       "ndJsonDeserialize"
     ],
-    "Randomization" => ["RandomSubset", "RandomSetOfSubsets", "TestRandomSetOfSubsets"],
+    "Randomization" => [
+      "RandomSubset",
+      "RandomSetOfSubsets",
+      "RandomSubsetSet",
+      "TestRandomSetOfSubsets"
+    ],
     "Toolbox" => []
   }
 
@@ -382,14 +388,7 @@ defmodule Accord.TLA.Checker.Stdlib do
     {:seq, List.to_tuple(sorted)}
   end
 
-  defp op("RandomElement", [s], _) do
-    Value.normalize!(s)
-
-    case s |> Value.enum() |> Value.sort() do
-      [] -> error("RandomElement of the empty set")
-      [x | _] -> x
-    end
-  end
+  defp op("RandomElement", [s], _), do: Random.element(s)
 
   defp op("Any", [], _), do: :any
   defp op("ToString", [v], _), do: v |> Value.deep_normalize!() |> Value.show()
@@ -437,7 +436,12 @@ defmodule Accord.TLA.Checker.Stdlib do
     true
   end
 
-  defp op("TLCFP", [v], _), do: :erlang.phash2(Value.canon(v))
+  # The low 32 bits (signed) of the TLC fingerprint of the value.
+  defp op("TLCFP", [v], _) do
+    fp = Fingerprint.value(Fingerprint.new(), Value.deep_normalize!(v)) &&& 0xFFFFFFFF
+    if fp >= 0x80000000, do: fp - 0x100000000, else: fp
+  end
+
   defp op("TLCEvalDefinition", [name], env), do: Eval.eval({:name, name, nil}, env)
 
   defp op("Trace", [], env) do
@@ -480,25 +484,50 @@ defmodule Accord.TLA.Checker.Stdlib do
   # -- Randomization (deterministic: the first subsets) --
 
   defp op("RandomSubset", [k, s], _) do
-    k = int(k)
-    if k < 0, do: error("#{k}")
-
-    case s do
-      # A large interval: no enumeration.
-      {:interval, a, b} -> Value.interval(a, min(b, a + k - 1))
-      _ -> s |> Value.enum() |> Value.sort() |> Enum.take(k) |> Value.set()
-    end
+    unless is_integer(k), do: arg_error("first", "RandomSubset", "nonnegative integer", k)
+    finite_arg!(s, "second", "RandomSubset", "a finite set")
+    Random.subset(k, s)
   end
 
   defp op("RandomSetOfSubsets", [k, n, s], _) do
-    {k, n} = {int(k), int(n)}
-    elems = s |> Value.enum() |> Value.sort()
+    name = "RandomSetOfSubsets"
+    unless is_integer(k) and k >= 0, do: arg_error("first", name, "nonnegative integer", k)
+    unless is_integer(n) and n >= 0, do: arg_error("second", name, "nonnegative integer", n)
+    finite_arg!(s, "third", name, "a finite set")
+    size = Value.size(s)
+    picks_check!(k, size, name)
 
-    {:subset, Value.set(elems)}
-    |> Value.enum()
-    |> Enum.filter(&(MapSet.size(&1) <= n))
-    |> Enum.take(k)
-    |> Value.set()
+    if size < n,
+      do:
+        arg_error(
+          "second",
+          name,
+          "nonnegative integer that is smaller than the subset's size of #{size}",
+          n
+        )
+
+    Random.set_of_subsets(k, if(size == 0, do: :nan, else: n / size), s)
+  end
+
+  defp op("RandomSubsetSet", [k, p, s], _) do
+    name = "RandomSubsetSetProbability"
+    unless is_integer(k) and k >= 0, do: arg_error("first", name, "nonnegative integer", k)
+
+    unless is_binary(p),
+      do: arg_error("second", name, "string literal representing a probability", p)
+
+    prob =
+      case Float.parse(p) do
+        {f, ""} when f >= 0 and f <= 1 ->
+          f
+
+        _ ->
+          arg_error("second", name, "string literal does not represent a parsable probability", p)
+      end
+
+    finite_arg!(s, "third", name, "finite set")
+    picks_check!(k, Value.size(s), name)
+    Random.set_of_subsets(k, prob, s)
   end
 
   defp op("TestRandomSetOfSubsets", _args, _),
@@ -508,6 +537,31 @@ defmodule Accord.TLA.Checker.Stdlib do
     do: error("the operator #{name} with #{length(args)} arguments is not supported")
 
   # -- Helpers --
+
+  # EC.TLC_MODULE_ARGUMENT_ERROR.
+  defp arg_error(nth, name, what, v),
+    do:
+      error(
+        "The #{nth} argument of #{name} should be a #{what}, but instead it is:\n#{Value.show(v)}"
+      )
+
+  defp finite_arg!(s, nth, name, what) do
+    unless Value.set?(s) and not Value.infinite?(s), do: arg_error(nth, name, what, s)
+  end
+
+  # The number of picks cannot be more than the size of the power set.
+  defp picks_check!(k, size, name) do
+    if k > 0 and bit_length(k) > size and k > Integer.pow(2, min(size, 62)),
+      do:
+        arg_error(
+          "first",
+          name,
+          "nonnegative integer that is smaller than the subset's size of 2^#{size}",
+          k
+        )
+  end
+
+  defp bit_length(k), do: k |> Integer.digits(2) |> length()
 
   defp int(n) when is_integer(n), do: n
   defp int(v), do: error("expected an integer, not #{Value.show(v)}")

@@ -761,7 +761,13 @@ defmodule Accord.TLA.Checker.Value do
   # -- Enumeration --
 
   @doc "The elements of a set, as a list. Raises for an infinite set."
-  def enum(%MapSet{} = s), do: MapSet.to_list(s)
+  # TLC enumerates a set in its normal order. A map of more than 32 keys
+  # has no order: sort it (the order of terms is the order of TLC for
+  # integers and strings).
+  def enum(%MapSet{} = s) do
+    list = MapSet.to_list(s)
+    if MapSet.size(s) > 32, do: Enum.sort(list), else: list
+  end
 
   def enum({:interval, a, b} = s) do
     check_interval_size!(s)

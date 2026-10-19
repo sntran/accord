@@ -24,6 +24,7 @@ defmodule Accord.TLA.Checker.Search do
     Context,
     Eval,
     Liveness,
+    Random,
     SafetyTableau,
     Spec,
     Temporal,
@@ -47,8 +48,13 @@ defmodule Accord.TLA.Checker.Search do
     config = ctx.config
     Eval.reset_cache()
     # The memos of an earlier run (in the same process) are of no use.
-    Enum.each([:tla_constants, :tla_constant_defs, :tla_levels, :tla_tlccache], &Process.delete/1)
+    Enum.each(
+      [:tla_constants, :tla_constant_defs, :tla_constant_scopes, :tla_levels, :tla_tlccache],
+      &Process.delete/1
+    )
+
     Process.put(:tla_registers, %{})
+    Random.setup(Keyword.get(opts, :seed))
     Process.put(:tla_properties, Keyword.get(opts, :properties, %{}))
     Process.put(:tla_warn, Keyword.get(opts, :warn, true))
     Process.put(:tla_deadlock, Keyword.get(opts, :deadlock, config.check_deadlock))
@@ -621,6 +627,7 @@ defmodule Accord.TLA.Checker.Search do
   defp expand(base, model, st, id) do
     {state, _parent, _label, depth} = Map.fetch!(st.nodes, id)
     Eval.reset_cache()
+    Random.at_state({id, state})
     Process.put(:tla_stats_distinct, map_size(st.seen))
     Process.put(:tla_stats_queue, :queue.len(st.queue))
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace(st, id)) end)
@@ -658,13 +665,13 @@ defmodule Accord.TLA.Checker.Search do
                   error_result(model.ctx, Exception.message(err), trace(st, id), base, st, kind)
           end
 
-        st = %{
-          st
-          | generated: st.generated + length(successors) + Process.get(:tla_extra_generated, 0)
-        }
+        st = %{st | generated: st.generated + Process.get(:tla_extra_generated, 0)}
 
+        # TLC counts a successor when it checks it: after a violation, the
+        # next successors do not count.
         st =
           Enum.reduce(successors, st, fn {p, label}, st ->
+            st = %{st | generated: st.generated + 1}
             next_state = complete!(model, p, "the action #{label}", trace(st, id), base, st)
             step(base, model, st, id, state, next_state, label, depth)
           end)

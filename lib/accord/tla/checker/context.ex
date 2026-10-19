@@ -61,7 +61,10 @@ defmodule Accord.TLA.Checker.Context do
             paths: [],
             root_scopes: MapSet.new(),
             let_instances: %{},
-            constant_replacements: []
+            constant_replacements: [],
+            # The scopes that `own_names` makes: scope id => the name that
+            # has its original entry in the scope.
+            shadows: %{}
 
   @type t :: %__MODULE__{}
 
@@ -454,7 +457,8 @@ defmodule Accord.TLA.Checker.Context do
           ctx
           | scopes: scopes,
             root_scopes: MapSet.put(ctx.root_scopes, id),
-            let_instances: let_instances
+            let_instances: let_instances,
+            shadows: Map.put(ctx.shadows, id, name)
         }
     end)
   end

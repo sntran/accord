@@ -494,7 +494,7 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp constant_value(d, sid, env) do
-    key = {env.ctx.id, sid, d.name}
+    key = {env.ctx.id, constant_scope(env.ctx, sid, d), d.name}
 
     case Map.fetch(Process.get(:tla_constants) || %{}, key) do
       {:ok, v} ->
@@ -516,6 +516,68 @@ defmodule Accord.TLA.Checker.Eval do
         v
     end
   end
+
+  # A definition in a scope of `Context.own_names` has the value of the
+  # root scope when its body (with the definitions that it uses) does not
+  # use the name of the scope. Thus TLC's one value of a definition (and
+  # of its random values) is the same for the replacement and the
+  # definition.
+  defp constant_scope(ctx, sid, d) do
+    case Map.fetch(ctx.shadows, sid) do
+      {:ok, name} ->
+        memo = Process.get(:tla_constant_scopes) || %{}
+        key = {ctx.id, sid, d.name}
+
+        case Map.fetch(memo, key) do
+          {:ok, v} ->
+            v
+
+          :error ->
+            v = if uses_name?(ctx, d.body, name, MapSet.new()), do: sid, else: ctx.root
+            Process.put(:tla_constant_scopes, Map.put(memo, key, v))
+            v
+        end
+
+      :error ->
+        sid
+    end
+  end
+
+  defp uses_name?(ctx, ast, name, seen) do
+    ast
+    |> names([])
+    |> Enum.reduce_while({false, seen}, fn n, {_, seen} ->
+      cond do
+        n == name ->
+          {:halt, {true, seen}}
+
+        MapSet.member?(seen, n) ->
+          {:cont, {false, seen}}
+
+        true ->
+          seen = MapSet.put(seen, n)
+
+          case Context.lookup(ctx, ctx.root, n) do
+            {:def, d, _} ->
+              if uses_name?(ctx, d.body, name, seen),
+                do: {:halt, {true, seen}},
+                else: {:cont, {false, seen}}
+
+            _ ->
+              {:cont, {false, seen}}
+          end
+      end
+    end)
+    |> elem(0)
+  end
+
+  # All the strings in an expression (more than its names: a safe test).
+  defp names(s, acc) when is_binary(s), do: [s | acc]
+  defp names(t, acc) when is_tuple(t), do: names(Tuple.to_list(t), acc)
+  defp names(l, acc) when is_list(l), do: Enum.reduce(l, acc, &names/2)
+  defp names(m, acc) when is_map(m) and not is_struct(m), do: names(Map.to_list(m), acc)
+  defp names(%{body: b, params: p}, acc), do: names([b, p], acc)
+  defp names(_, acc), do: acc
 
   defp invoke_named(name, args, caller, env) do
     if name in @core do
@@ -986,14 +1048,20 @@ defmodule Accord.TLA.Checker.Eval do
 
   defp leaf(env, mode), do: [{partial(env, mode), env.label}]
 
+  # TLC goes depth first: it evaluates the next conjuncts for one choice
+  # before the next choice (this is the order of the random values).
   defp do_gen({:and, items}, env, mode) do
     env = %{env | label_mode: false}
+    gen_all(Enum.map(items, &{&1, env}), partial(env, mode), env.label, mode)
+  end
 
-    Enum.reduce(items, leaf(env, mode), fn item, acc ->
-      Enum.flat_map(acc, fn {p, label} ->
-        gen_item(item, with_partial(%{env | label: label}, mode, p), mode)
-      end)
-    end)
+  # Each `{item, env}` in order, from the partial state `p`.
+  defp gen_all([], p, label, _mode), do: [{p, label}]
+
+  defp gen_all([{item, env} | rest], p, label, mode) do
+    item
+    |> gen_item(with_partial(%{env | label: label}, mode, p), mode)
+    |> Enum.flat_map(fn {p, label} -> gen_all(rest, p, label, mode) end)
   end
 
   defp do_gen({:or, items}, env, mode), do: Enum.flat_map(items, &do_gen(&1, env, mode))
@@ -1011,11 +1079,7 @@ defmodule Accord.TLA.Checker.Eval do
     envs =
       binds |> each_binding(env, [], fn env2, acc -> {:cont, [env2 | acc]} end) |> Enum.reverse()
 
-    Enum.reduce(envs, leaf(env, mode), fn benv, acc ->
-      Enum.flat_map(acc, fn {p, label} ->
-        gen_item(body, with_partial(%{benv | label: label}, mode, p), mode)
-      end)
-    end)
+    gen_all(Enum.map(envs, &{body, &1}), partial(env, mode), env.label, mode)
   end
 
   defp do_gen({:implies, a, b}, env, mode) do
