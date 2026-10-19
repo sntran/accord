@@ -99,7 +99,7 @@ defmodule Accord.TLA.Checker.Spec do
       {:or, items} ->
         Enum.flat_map(items, &split(&1, env, name))
 
-      {:label, _, inner} ->
+      {:label, _, _, inner} ->
         split(inner, env, name)
 
       {:let, defs, body} ->
@@ -161,7 +161,7 @@ defmodule Accord.TLA.Checker.Spec do
 
   # The parts of a conjunction of temporal formulas.
   defp flatten({:and, items}, env), do: Enum.flat_map(items, &flatten(&1, env))
-  defp flatten({:label, _, e}, env), do: flatten(e, env)
+  defp flatten({:label, _, _, e}, env), do: flatten(e, env)
 
   defp flatten({:always, {:box_action, a, sub}}, env),
     do: [{:next, closure(a, env), closure(sub, env)}]
@@ -244,15 +244,18 @@ defmodule Accord.TLA.Checker.Spec do
   defp expand({:name, n, _}, env), do: expand_call(n, [], env)
   defp expand({:app, n, args, _}, env), do: expand_call(n, args, env)
 
-  # `Inv!2`: a part of a definition.
-  defp expand({:inst, path, name, _args, _}, env) when is_integer(name) do
-    {:def, d, sid} = Eval.inst_entry(path, name, env)
-    {:ok, {d.body, %{env | scope: sid, bound: %{}}}}
-  end
-
   defp expand({:inst, path, name, args, _}, env) do
-    {_, env2} = navigate(path, env)
-    expand_entry(Context.lookup(env.ctx, env2.scope, name), name, args, env, env2)
+    # `Inv!2`, `Thm!2!1`: a part of a definition (a subexpression
+    # selector).
+    if Eval.selector?(path, name, env) do
+      case Eval.resolve_selector(path ++ [{name, args}], env) do
+        {:expr, sub, env2} -> {:ok, {sub, env2}}
+        {:entry, entry, n, args2, env2} -> expand_entry(entry, n, args2, env, env2)
+      end
+    else
+      {_, env2} = navigate(path, env)
+      expand_entry(Context.lookup(env.ctx, env2.scope, name), name, args, env, env2)
+    end
   end
 
   defp expand({:let, defs, body}, env), do: {:ok, {body, let_bound(defs, env)}}
@@ -404,6 +407,9 @@ defmodule Accord.TLA.Checker.Spec do
           l -> l
         end
 
+      {:inst, _, name, _, _} = e when is_integer(name) or not is_binary(name) ->
+        selector_level(e, env, seen)
+
       {:inst, path, name, args, _} when args != [] and not is_integer(name) ->
         {_, env2} = navigate(Enum.map(path, fn {s, _} -> {s, []} end), env)
         arg_levels = Enum.map(args, &level(&1, env, seen))
@@ -546,6 +552,14 @@ defmodule Accord.TLA.Checker.Spec do
 
   defp app_level(_entry, _arg_levels, _env, _seen), do: nil
 
+  # The level of a subexpression: the level of the selected expression.
+  defp selector_level({:inst, path, name, args, _}, env, seen) do
+    case Eval.resolve_selector(path ++ [{name, args}], env) do
+      {:expr, sub, env2} -> level(sub, env2, seen)
+      {:entry, entry, _n, _args, env2} -> entry_level(entry, env2, seen)
+    end
+  end
+
   defp inst_level(path, name, _args, env, seen) when is_integer(name) do
     {:def, _d, sid} = entry = Eval.inst_entry(path, name, env)
     entry_level(entry, %{env | scope: sid}, seen)
@@ -588,7 +602,7 @@ defmodule Accord.TLA.Checker.Spec do
   end
 
   defp obligations({:and, items}, env), do: Enum.flat_map(items, &obligations(&1, env))
-  defp obligations({:label, _, e}, env), do: obligations(e, env)
+  defp obligations({:label, _, _, e}, env), do: obligations(e, env)
 
   defp obligations({:forall, binds, body} = e, env) do
     if temporal?(body, env) do
@@ -762,7 +776,7 @@ defmodule Accord.TLA.Checker.Spec do
             if pos, do: f, else: Temporal.negate(f)
         end
 
-      {:label, _, inner} ->
+      {:label, _, _, inner} ->
         ltl(inner, env, pos)
 
       {:let, defs, body} ->

@@ -48,7 +48,10 @@ defmodule Accord.TLA.Checker.Parser do
     `{:fun_set, domain, range}`, `{:times, sets}`,
     `{:except, f, updates}` (an update is `{path, value}`; a path step is
     `{:index, args}` or `{:field, name}`), `{:at}`
-  - `{:lambda, params, body}`, `{:label, name, e}`, `{:op_arg, name}`
+  - `{:lambda, params, body}`, `{:label, name, params, e}`, `{:op_arg, name}`
+  - `{:inst, path, name, args, pos}` with a subexpression selector in the
+    path or as the name: a number, `:null` (`!(args)`), `:ll` (`!<<`),
+    `:gg` (`!>>`), `:at` (`!@`), or `:colon` (`!:`)
 
   A definition is a map with `:kind` `:op`, `:fun`, or `:instance`.
   """
@@ -1163,9 +1166,16 @@ defmodule Accord.TLA.Checker.Parser do
       op?(p, "!") ->
         instance_path(advance(p), [{name, args || []}], t)
 
+      # A label, with its parameters: `lab(x, y) :: e`.
       op?(p, "::") ->
+        params =
+          Enum.map(args || [], fn
+            {:name, n, _} -> n
+            _ -> error(p, t, "a parameter of a label must be a name")
+          end)
+
         {e, p} = expr(advance(p), 0)
-        {{:label, name, e}, p}
+        {{:label, name, params, e}, p}
 
       args == nil ->
         {{:name, name, pos(t)}, p}
@@ -1175,12 +1185,19 @@ defmodule Accord.TLA.Checker.Parser do
     end
   end
 
-  # `M!N!Op(args)`.
+  # `M!N!Op(args)`, and the subexpression selectors: `Op!lab`, `Op!2`,
+  # `Op!(x)` (`:null`), `Op!<<` (`:ll`), `Op!>>` (`:gg`), `Op!@` (`:at`),
+  # `Op!:` (`:colon`).
   defp instance_path(p, path, t) do
     {name, p} =
       case peek(p) do
         {:id, n, _, _} -> {n, advance(p)}
         {:num, n, _, _} -> {n, advance(p)}
+        {:op, "(", _, _} -> {:null, p}
+        {:op, "<<", _, _} -> {:ll, advance(p)}
+        {:op, ">>", _, _} -> {:gg, advance(p)}
+        {:op, "@", _, _} -> {:at, advance(p)}
+        {:op, ":", _, _} -> {:colon, advance(p)}
         # `I!-.(a)`: the prefix minus.
         {:op, "-", _, _} ->
           if match?({:op, ".", _, _}, raw_at(p, p.pos + 1)),
@@ -1205,7 +1222,7 @@ defmodule Accord.TLA.Checker.Parser do
         instance_path(advance(p), path ++ [{name, args}], t)
 
       # `Thm!:` is the statement of `Thm`.
-      name == ":" ->
+      name == :colon and length(path) == 1 and is_binary(elem(hd(path), 0)) ->
         case Enum.split(path, -1) do
           {[], [{n, []}]} -> {{:name, n, pos(t)}, p}
           {[], [{n, a}]} -> {{:app, n, a, pos(t)}, p}

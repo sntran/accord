@@ -135,7 +135,7 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   def eval({:let, defs, body}, env), do: eval(body, let_env(defs, env))
-  def eval({:label, _, e}, env), do: eval(e, env)
+  def eval({:label, _, _, e}, env), do: eval(e, env)
 
   def eval({:forall, binds, body}, env) do
     each_binding(binds, env, true, fn env2, _acc ->
@@ -272,8 +272,12 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   def eval({:inst, path, name, args, _}, env) do
-    {target, env2} = navigate(path, name, env)
-    invoke_entry(target, name, args, env, env2)
+    if selector?(path, name, env) do
+      eval_selected(resolve_selector(path ++ [{name, args}], env), env)
+    else
+      {target, env2} = navigate(path, name, env)
+      invoke_entry(target, name, args, env, env2)
+    end
   end
 
   def eval({:op_arg, op}, _env), do: error("the operator #{op} is used as a value")
@@ -507,13 +511,24 @@ defmodule Accord.TLA.Checker.Eval do
               else: invoke_named("TLCEval", args, caller, outer_env)
 
           {_, {:name, g, _}} ->
-            invoke_named(g, args, caller, outer_env)
+            # A parameter of an instance (`I(Op(_)) == INSTANCE M`): an
+            # operator.
+            case Map.fetch(outer_env.bound, g) do
+              {:ok, {:op_value, _, _, _} = opv} ->
+                apply_op(opv, Enum.map(args, &arg_value(&1, caller)), env)
+
+              _ ->
+                invoke_named(g, args, caller, outer_env)
+            end
 
           {_, {:op_arg, sym}} ->
             invoke_named(sym, args, caller, outer_env)
 
           {_, {:lambda, _, _} = l} ->
             apply_op(op_value(l, outer_env), Enum.map(args, &arg_value(&1, caller)), env)
+
+          {_, {:inst, _, _, [], _} = i} ->
+            apply_op(op_value(i, outer_env), Enum.map(args, &arg_value(&1, caller)), env)
 
           _ ->
             error("cannot apply the substitution for #{name}")
@@ -764,6 +779,23 @@ defmodule Accord.TLA.Checker.Eval do
 
   def op_value({:op_arg, sym}, env), do: {:op_value, sym, op_arity(sym), {:named, sym, env.scope}}
 
+
+  def op_value({:name, n, _}, env) do
+    case Map.fetch(env.bound, n) do
+      {:ok, {:op_value, _, _, _} = opv} -> opv
+      {:ok, {:let_def, d, closure}} -> {:op_value, n, length(d.params), {:let, d, closure}}
+      _ -> {:op_value, n, nil, {:named, n, env.scope}}
+    end
+  end
+
+  def op_value({:inst, path, name, [], _}, env) do
+    if selector?(path, name, env),
+      do: {:op_value, "LAMBDA", nil, {:selector, path ++ [{name, []}], env}},
+      else: {:op_value, name, nil, {:inst, path, name, env}}
+  end
+
+  def op_value(other, _env), do: error("expected an operator argument, not #{inspect(other)}")
+
   defp op_arity(sym) when sym in ["=>", "<=>", "\\equiv", "/\\", "\\/"], do: 2
   defp op_arity(sym) when sym in @expr_ops or sym in ~w(-. SUBSET UNION DOMAIN ^+ ^* ^#), do: 1
   defp op_arity(_), do: 2
@@ -781,19 +813,6 @@ defmodule Accord.TLA.Checker.Eval do
   defp expr_op("/\\", [a, b], env), do: eval({:and, [a, b]}, env)
   defp expr_op("\\/", [a, b], env), do: eval({:or, [a, b]}, env)
   defp expr_op(sym, args, _env), do: error("the operator #{sym} takes 1 argument, not #{length(args)}")
-
-  def op_value({:name, n, _}, env) do
-    case Map.fetch(env.bound, n) do
-      {:ok, {:op_value, _, _, _} = opv} -> opv
-      {:ok, {:let_def, d, closure}} -> {:op_value, n, length(d.params), {:let, d, closure}}
-      _ -> {:op_value, n, nil, {:named, n, env.scope}}
-    end
-  end
-
-  def op_value({:inst, path, name, [], _}, env),
-    do: {:op_value, name, nil, {:inst, path, name, env}}
-
-  def op_value(other, _env), do: error("expected an operator argument, not #{inspect(other)}")
 
   @doc "Applies an operator value to values."
   def apply_op({:op_value, _name, _arity, impl}, values, env) do
@@ -820,8 +839,354 @@ defmodule Accord.TLA.Checker.Eval do
       {:inst, path, name, caller} ->
         {target, env2} = navigate(path, name, caller)
         invoke_entry(target, name, exprs, %{caller | state: env.state, next: env.next}, env2)
+
+      # A subexpression as an operator (`Op!@!2`): the values fill the
+      # parameters of the selector in order.
+      {:selector, segs, caller} ->
+        caller = %{caller | state: env.state, next: env.next, primed: env.primed}
+        eval_selected(resolve_selector(segs, caller, exprs), caller)
     end
   end
+
+  # -- Subexpression selectors --
+
+  # A path names a part of a definition (`Op(a)!lab(x)!2!<<`) when a
+  # selector is not a name, or when a name of the path is a definition
+  # (not an instance).
+  @doc false
+  def selector?(path, name, env) do
+    not is_binary(name) or Enum.any?(path, fn {seg, _} -> not is_binary(seg) end) or
+      def_in_path?(path, env)
+  end
+
+  defp def_in_path?(path, env) do
+    Enum.reduce_while(path, env, fn {seg, _args}, cur ->
+      entry =
+        case Map.fetch(cur.bound, seg) do
+          {:ok, v} -> v
+          :error -> Context.lookup(cur.ctx, cur.scope, seg)
+        end
+
+      case entry do
+        {:let_instance, sid, _, _} -> {:cont, %{cur | scope: sid, bound: %{}}}
+        {:instance, sid, _, _} -> {:cont, %{cur | scope: sid, bound: %{}}}
+        _ -> {:halt, :def}
+      end
+    end) == :def
+  end
+
+  defp eval_selected({:expr, e, env2}, _caller), do: eval(e, env2)
+
+  defp eval_selected({:entry, entry, name, args, env2}, caller),
+    do: invoke_entry(entry, name, args, caller, env2)
+
+  @doc """
+  Resolves a subexpression selector (as SANY's selectorToNode): `segs`
+  is the list of `{selector, args}`; a selector is a name, a number, or
+  `:null` (`!(args)`), `:ll` (`!<<`), `:gg` (`!>>`), `:at` (`!@`),
+  `:colon` (`!:`). `supply`: for a selector used as an operator, the
+  arguments of the missing parameters, in order.
+
+  Gives `{:expr, e, env}` (the selected expression and its environment)
+  or `{:entry, entry, name, args, env}` (an application of a definition).
+  """
+  def resolve_selector(segs, caller, supply \\ nil) do
+    {result, rest} = sel_name(segs, caller, caller, supply, :top)
+    if rest not in [nil, []], do: error("too many arguments for the subexpression")
+    result
+  end
+
+  # Finds the definition that a name gives (in the module, an instance,
+  # or a LET).
+  defp sel_name([{name, args} | rest], env, caller, supply, where) when is_binary(name) do
+    entry =
+      case where do
+        :let ->
+          Map.get(env.bound, name)
+
+        :inst ->
+          Context.export(env.ctx, env.scope, name)
+
+        :top ->
+          case Map.fetch(env.bound, name) do
+            {:ok, v} -> v
+            :error -> Context.lookup(env.ctx, env.scope, name)
+          end
+      end
+
+    case entry do
+      {:let_instance, sid, frame, bound} ->
+        if rest == [], do: error("Operator name #{name} is incomplete.")
+        env2 = %{env | scope: sid, bound: %{}, frames: Map.put(env.frames, frame, bound)}
+        sel_name(rest, env2, caller, supply, :inst)
+
+      {:instance, sid, params, frame} ->
+        if rest == [], do: error("Operator name #{name} is incomplete.")
+        {args, supply} = sel_args(args, params, supply, name)
+        values = prepare(args, params, caller)
+        frames = Map.put(env.frames, frame, param_map(%{params: params}, values))
+        sel_name(rest, %{env | scope: sid, bound: %{}, frames: frames}, caller, supply, :inst)
+
+      {:def, %{kind: :op} = d, sid} ->
+        {args, supply} = sel_args(args, d.params, supply, name)
+
+        if rest == [] do
+          {{:entry, entry, name, args, env}, supply}
+        else
+          body_env = %{env | scope: sid, bound: param_map(d, prepare(args, d.params, caller))}
+          sel_next(d.body, rest, body_env, caller, supply)
+        end
+
+      {:let_def, %{kind: :op} = d, closure} ->
+        {args, supply} = sel_args(args, d.params, supply, name)
+
+        if rest == [] do
+          {{:expr, {:app, name, args, nil}, %{env | bound: Map.put(caller.bound, name, entry)}},
+           supply}
+        else
+          bound =
+            closure.bound
+            |> Map.put(name, entry)
+            |> Map.merge(param_map(d, prepare(args, d.params, caller)))
+
+          body_env = %{env | scope: closure.scope, bound: bound, frames: closure.frames}
+          sel_next(d.body, rest, body_env, caller, supply)
+        end
+
+      nil ->
+        error("Unknown operator: `#{name}'.")
+
+      _ when rest == [] and args == [] ->
+        {{:expr, {:name, name, nil}, env}, supply}
+
+      _ ->
+        error("Cannot take subexpression of `#{name}'.")
+    end
+  end
+
+  defp sel_name([{sel, _} | _], _env, _caller, _supply, _where),
+    do: error("Need name or step number here, not `#{sel_text(sel)}'.")
+
+  # The arguments of a definition or a label: the given ones, or (for an
+  # operator argument) the next ones of the supply.
+  defp sel_args(args, params, supply, name) do
+    n = length(params)
+
+    cond do
+      args == [] and n > 0 and is_list(supply) and length(supply) >= n ->
+        Enum.split(supply, n)
+
+      length(args) == n ->
+        {args, supply}
+
+      true ->
+        error("The operator #{name} requires #{n} arguments.")
+    end
+  end
+
+  # After a definition or a label: labels (a name), or operands.
+  defp sel_next(cur, [{name, _} | _] = segs, env, caller, supply) when is_binary(name),
+    do: sel_label(cur, segs, env, caller, supply)
+
+  defp sel_next(cur, segs, env, caller, supply), do: sel_sub(cur, segs, env, caller, supply)
+
+  defp sel_label(cur, [{name, args} | rest], env, caller, supply) do
+    case find_label(cur, name, env) do
+      {:ok, params, body, env2} ->
+        {args, supply} = sel_args(args, Enum.map(params, &{&1, 0}), supply, name)
+        values = prepare(args, Enum.map(params, &{&1, 0}), caller)
+        env3 = %{env2 | bound: Map.merge(env2.bound, Map.new(Enum.zip(params, values)))}
+
+        if rest == [],
+          do: {{:expr, body, env3}, supply},
+          else: sel_next(body, rest, env3, caller, supply)
+
+      :error ->
+        error("Cannot find label `#{name}'.")
+    end
+  end
+
+  # A label of an expression: not inside another label; the LET
+  # definitions on the way are in the environment.
+  defp find_label({:label, name, params, body}, name, env), do: {:ok, params, body, env}
+  defp find_label({:label, _, _, _}, _name, _env), do: :error
+
+  defp find_label({:let, defs, body}, name, env), do: find_label(body, name, let_env(defs, env))
+
+  defp find_label(t, name, env) when is_tuple(t) do
+    t |> Tuple.to_list() |> find_label_in(name, env)
+  end
+
+  defp find_label(l, name, env) when is_list(l), do: find_label_in(l, name, env)
+  defp find_label(_, _name, _env), do: :error
+
+  defp find_label_in(items, name, env) do
+    Enum.find_value(items, :error, fn x ->
+      case find_label(x, name, env) do
+        :error -> nil
+        found -> found
+      end
+    end)
+  end
+
+  # Operand selectors.
+  defp sel_sub(cur, [{:colon, _} | rest], env, caller, supply) do
+    case rest do
+      [] -> {{:expr, cur, env}, supply}
+      [{name, _} | _] when is_binary(name) -> sel_let_name(cur, rest, env, caller, supply)
+      _ -> error("`!:' can be used only after a name and either at the end or before an operator name.")
+    end
+  end
+
+  defp sel_sub({:label, _, _, body}, segs, env, caller, supply),
+    do: sel_sub(body, segs, env, caller, supply)
+
+  defp sel_sub(cur, [{sel, args} | rest], env, caller, supply) do
+    {cur2, env2, rest, supply} =
+      case {cur, operands(cur)} do
+        {{:let, defs, body}, _} ->
+          if arg_num(sel, 1) == 1,
+            do: {body, let_env(defs, env), rest, supply},
+            else: error("A LET/IN expression has only one operand.")
+
+        {_, {:plain, list}} ->
+          {pick(sel, list), env, rest, supply}
+
+        {_, {:bound, names, bounds, body}} ->
+          case sel do
+            :null ->
+              if length(args) != length(names),
+                do:
+                  error(
+                    "Selector with #{length(args)} argument(s) used for quantifier with #{length(names)} bound identifier(s)."
+                  )
+
+              {body, bind_args(env, names, args, caller), rest, supply}
+
+            :at ->
+              {vals, supply} = take_supply(supply, length(names))
+              {body, bind_args(env, names, vals, caller), rest, supply}
+
+            _ ->
+              {pick(sel, bounds), env, rest, supply}
+          end
+
+        {_, {:case, arms}} ->
+          {p, e} = pick(sel, arms)
+
+          case rest do
+            [{j, _} | rest2] ->
+              case arg_num(j, 2) do
+                1 when p != nil -> {p, env, rest2, supply}
+                1 -> error("Selecting OTHER in a CASE statement.")
+                2 -> {e, env, rest2, supply}
+                _ -> error("Second selector for CASE subexpression must specify one of two operands.")
+              end
+
+            [] ->
+              error("Subexpression of CASE must have form !i!j.")
+          end
+
+        {_, :none} ->
+          error("Selecting subexpression of expression that has none.")
+      end
+
+    case rest do
+      [] -> {{:expr, cur2, env2}, supply}
+      [{name, _} | _] when is_binary(name) -> sel_let_name(cur2, rest, env2, caller, supply)
+      [{:colon, _} | _] -> error("!: should not follow an operand selector.")
+      _ -> sel_sub(cur2, rest, env2, caller, supply)
+    end
+  end
+
+  # A name after an operand: a definition of a LET.
+  defp sel_let_name({:label, _, _, body}, segs, env, caller, supply),
+    do: sel_let_name(body, segs, env, caller, supply)
+
+  defp sel_let_name({:let, defs, _body}, segs, env, caller, supply),
+    do: sel_name(segs, let_env(defs, env), caller, supply, :let)
+
+  defp sel_let_name(_cur, _segs, _env, _caller, _supply),
+    do: error("A name selector here must be from a LET clause.")
+
+  defp take_supply(supply, n) when is_list(supply) and length(supply) >= n,
+    do: Enum.split(supply, n)
+
+  defp take_supply(_supply, _n), do: error("`!@' needs the arguments of an operator argument.")
+
+  defp bind_args(env, names, args, caller) do
+    params = Enum.map(names, &{&1, 0})
+    values = prepare(args, params, caller)
+    %{env | bound: Map.merge(env.bound, Map.new(Enum.zip(names, values)))}
+  end
+
+  defp pick(sel, list) do
+    case arg_num(sel, length(list)) do
+      -1 -> error("Nonexistent operand specified by `#{sel_text(sel)}'.")
+      n -> Enum.at(list, n - 1)
+    end
+  end
+
+  # ArgNum of SANY: the operand that a selector gives (from 1), or -1.
+  defp arg_num(n, arity) when is_integer(n), do: if(n >= 1 and n <= arity, do: n, else: -1)
+  defp arg_num(:ll, arity), do: if(arity > 0, do: 1, else: -1)
+  defp arg_num(:gg, 2), do: 2
+  defp arg_num(_, _), do: -1
+
+  defp sel_text(:null), do: "(...)"
+  defp sel_text(:ll), do: "<<"
+  defp sel_text(:gg), do: ">>"
+  defp sel_text(:at), do: "@"
+  defp sel_text(:colon), do: ":"
+  defp sel_text(x), do: to_string(x)
+
+  # The operands of an expression, as SANY numbers them.
+  defp operands(e) do
+    case e do
+      {:app, _, args, _} -> {:plain, args}
+      {:inst, _, _, args, _} -> {:plain, args}
+      {kind, items} when kind in [:and, :or, :set, :tuple, :times] -> {:plain, items}
+      {kind, x} when kind in [:not, :prime, :unchanged, :enabled, :always, :eventually] -> {:plain, [x]}
+      {kind, a, b} when kind in [:implies, :equiv, :leadsto, :fun_set] -> {:plain, [a, b]}
+      {kind, a, sub} when kind in [:box_action, :diamond_action] -> {:plain, [a, sub]}
+      {kind, sub, a} when kind in [:wf, :sf] -> {:plain, [sub, a]}
+      {:if, c, t, f} -> {:plain, [c, t, f]}
+      {:case, arms, other} -> {:case, arms ++ if(other, do: [{nil, other}], else: [])}
+      {kind, binds, body} when kind in [:forall, :exists, :func] -> bound_operands(binds, body)
+      {:choose, bind, body} -> bound_operands([bind], body)
+      {:set_map, body, binds} -> bound_operands(binds, body)
+      {:set_filter, bind, pred} -> bound_operands([bind], pred)
+      {kind, names, body} when kind in [:temporal_forall, :temporal_exists] -> {:bound, names, [], body}
+      {:lambda, names, body} -> {:bound, names, [], body}
+      {:apply, f, [arg]} -> {:plain, [f, arg]}
+      {:apply, f, args} -> {:plain, [f, {:tuple, args}]}
+      {:dot, r, field} -> {:plain, [r, {:str, field}]}
+      {kind, fields} when kind in [:record, :record_set] -> {:plain, Enum.map(fields, &elem(&1, 1))}
+      {:except, f, updates} -> {:plain, [f | Enum.map(updates, fn _ -> {:at} end)]}
+      _ -> :none
+    end
+  end
+
+  # The bound names (a tuple gives its names) and the bounds (one for each
+  # group `x, y \\in S`) of a binding construct.
+  defp bound_operands(binds, body) do
+    names =
+      Enum.flat_map(binds, fn
+        {{:tuple, names}, _} -> Enum.map(names, &bind_name/1)
+        {name, _} -> [bind_name(name)]
+      end)
+
+    bounds =
+      binds
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.dedup()
+
+    {:bound, names, bounds, body}
+  end
+
+  defp bind_name({:name, n, _}), do: n
+  defp bind_name(n), do: n
 
   # -- Instances --
 
@@ -1266,7 +1631,7 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp do_gen({:let, defs, body}, env, mode), do: do_gen(body, let_env(defs, env), mode)
-  defp do_gen({:label, _, e}, env, mode), do: do_gen(e, env, mode)
+  defp do_gen({:label, _, _, e}, env, mode), do: do_gen(e, env, mode)
 
   defp do_gen({:app, "=", [lhs, rhs], _} = e, env, mode) do
     case target(lhs, env, mode) do
@@ -1427,6 +1792,19 @@ defmodule Accord.TLA.Checker.Eval do
   defp do_gen({:app, n, args, _} = e, env, mode), do: gen_named(n, args, e, env, mode)
 
   defp do_gen({:inst, path, name, args, _} = e, env, mode) do
+    if selector?(path, name, env) do
+      case resolve_selector(path ++ [{name, args}], env) do
+        {:expr, sub, env2} -> do_gen(sub, env2, mode)
+        _ -> guard(e, env, mode)
+      end
+    else
+      gen_inst(e, env, mode)
+    end
+  end
+
+  defp do_gen(e, env, mode), do: guard(e, env, mode)
+
+  defp gen_inst({:inst, path, name, args, _} = e, env, mode) do
     {entry, env2} = navigate(path, name, env)
 
     case entry do
@@ -1449,7 +1827,6 @@ defmodule Accord.TLA.Checker.Eval do
     end
   end
 
-  defp do_gen(e, env, mode), do: guard(e, env, mode)
 
   defp label(env, name) when is_binary(name), do: if(env.label_mode, do: name, else: env.label)
   defp label(env, _), do: env.label
@@ -1658,7 +2035,7 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp target({:let, defs, body}, env, mode), do: target(body, let_env(defs, env), mode)
-  defp target({:label, _, e}, env, mode), do: target(e, env, mode)
+  defp target({:label, _, _, e}, env, mode), do: target(e, env, mode)
   defp target({:prime, inner}, env, :next), do: var_of(inner, env)
   defp target(_lhs, _env, :next), do: :no
   defp target({:prime, _}, _env, :init), do: :no
@@ -1678,7 +2055,7 @@ defmodule Accord.TLA.Checker.Eval do
     end
   end
 
-  defp var_of({:label, _, e}, env), do: var_of(e, env)
+  defp var_of({:label, _, _, e}, env), do: var_of(e, env)
   defp var_of({:let, defs, body}, env), do: var_of(body, let_env(defs, env))
 
   defp var_of({:inst, path, name, [], _}, env) do
