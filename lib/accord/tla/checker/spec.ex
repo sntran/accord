@@ -590,10 +590,21 @@ defmodule Accord.TLA.Checker.Spec do
       for {a, scope, bound, frames} <- Process.get(:tla_spec_assumptions) || [],
           do: ltl(a, %{env | scope: scope, bound: bound, frames: frames}, true)
 
-    formula = {:and, [ltl(e, env, false) | assumptions]} |> Temporal.simplify()
+    raw = {:and, [ltl(e, env, false) | assumptions]}
+    formula = Temporal.simplify(raw)
+
+    # TLC finds a tautology only when FALSE comes up through \/ and /\
+    # (not through [] or <>). A negation that is FALSE in another way has
+    # no counterexample, but it is not a tautology for TLC: {:or, []}.
+    formula = if formula == false and not shallow_false?(raw), do: {:or, []}, else: formula
     {formula, atoms} = number_atoms(formula)
     [{:live, formula, atoms}]
   end
+
+  defp shallow_false?(false), do: true
+  defp shallow_false?({:and, items}), do: Enum.any?(items, &shallow_false?/1)
+  defp shallow_false?({:or, items}), do: Enum.all?(items, &shallow_false?/1)
+  defp shallow_false?(_), do: false
 
   # Gives the atoms ids; equal atoms get the same id.
   defp number_atoms(formula) do

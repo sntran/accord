@@ -38,7 +38,7 @@ defmodule Accord.TLA.Checker.Search do
     config = ctx.config
     Eval.reset_cache()
     # The memos of an earlier run (in the same process) are of no use.
-    Enum.each([:tla_constants, :tla_constant_defs, :tla_levels], &Process.delete/1)
+    Enum.each([:tla_constants, :tla_constant_defs, :tla_levels, :tla_tlccache], &Process.delete/1)
     Process.put(:tla_registers, %{})
     Process.put(:tla_properties, Keyword.get(opts, :properties, %{}))
     Process.put(:tla_warn, Keyword.get(opts, :warn, true))
@@ -65,7 +65,9 @@ defmodule Accord.TLA.Checker.Search do
       spec = setup(ctx, base, fn -> Spec.analyze(ctx, config) end)
       trivial_check(ctx, base, spec)
 
-      if spec.init == nil do
+      # A model of constants (no variables): TLC only checks the
+      # assumptions.
+      if spec.init == nil or tuple_size(ctx.variables) == 0 do
         %{result(ctx) | status: :ok}
       else
         check_invariant_levels(ctx, base, config)
@@ -561,9 +563,10 @@ defmodule Accord.TLA.Checker.Search do
             result: error_result(model.ctx, Exception.message(err), [], base, st, :spec_eval)
       end
 
-    st = %{st | generated: st.generated + length(partials)}
-
+    # TLC checks each initial state when it generates it: the count of
+    # generated states grows one by one.
     Enum.reduce(partials, st, fn {p, _label}, st ->
+      st = %{st | generated: st.generated + 1}
       state = complete!(model, p, "the initial predicate", [], base, st)
       visit(base, model, st, state, nil, nil, 1)
     end)
@@ -701,7 +704,8 @@ defmodule Accord.TLA.Checker.Search do
     parent = if from, do: elem(from, 0)
     # TLC sorts the sets of a state when it computes the fingerprint; a set
     # with typed model values of different types cannot be sorted.
-    if Process.get(:tla_typed_model_values), do: check_order(state)
+    if Process.get(:tla_typed_model_values),
+      do: state |> Tuple.to_list() |> Enum.each(&check_order/1)
 
     partial_trace = fn ->
       if(parent, do: trace(st, parent), else: []) ++ [%{state: state, action: label}]
@@ -812,6 +816,9 @@ defmodule Accord.TLA.Checker.Search do
     err in Value.Error ->
       trace = if trace_fun, do: trace_fun.(), else: if(id, do: trace(st, id), else: [])
       kind = if kind == :auto, do: if(err.module, do: :error, else: :spec_eval), else: kind
+      # An error in the comparison of two values: TLC reports that it cannot
+      # compute the fingerprint (an error of the specification).
+      kind = if err.fingerprint and kind == :safety_eval, do: :spec_eval, else: kind
       raise Stop, result: error_result(model.ctx, Exception.message(err), trace, base, st, kind)
   end
 
@@ -980,7 +987,9 @@ defmodule Accord.TLA.Checker.Search do
     end
   rescue
     err in Value.Error ->
-      error_result(model.ctx, Exception.message(err), [], base, st, :liveness_eval)
+      # TLC reports an error in the evaluation of the liveness check as a
+      # general error.
+      error_result(model.ctx, Exception.message(err), [], base, st, :error)
   end
 
   # Evaluates the atoms of a property, with a memo: a state predicate at a

@@ -556,7 +556,24 @@ defmodule Accord.TLA.Checker.Eval do
         Value.Error -> true
       end
 
-    [eval(msg, env), failed]
+    [eval(msg, env), {:assert_error, failed}]
+  end
+
+  # TLCCache(e, k): one evaluation of e for each value of k (at this
+  # place of the spec).
+  defp prepare_native("TLCCache", [e, key], env, _mod) do
+    k = {e, Value.canon(eval(key, env))}
+    cache = Process.get(:tla_tlccache) || %{}
+
+    case Map.fetch(cache, k) do
+      {:ok, v} ->
+        [v, :cached]
+
+      :error ->
+        v = eval(e, env)
+        Process.put(:tla_tlccache, Map.put(Process.get(:tla_tlccache) || %{}, k, v))
+        [v, :cached]
+    end
   end
 
   defp prepare_native(op, args, env, mod) do
@@ -1128,7 +1145,18 @@ defmodule Accord.TLA.Checker.Eval do
           eval(sub, %{env | gen: false})
         )
       rescue
-        Value.Error -> true
+        # In ENABLED <<A>>_v (fairness), TLC fails when A does not give a
+        # value to a variable of v.
+        e in Value.Error ->
+          if env.pseudo and e.message =~ ~r/' has no value yet/,
+            do:
+              raise(Value.Error,
+                message:
+                  "In evaluation of ENABLED <<A>>_v, the step of A does not give a value to all the variables of v: " <>
+                    e.message,
+                module: true
+              ),
+            else: true
       end
     end)
   end
@@ -1137,18 +1165,41 @@ defmodule Accord.TLA.Checker.Eval do
   # the middle state. TLC counts the middle states as generated.
   defp do_gen({:app, "\\cdot", [a, b], _}, env, :next) do
     nvars = tuple_size(env.ctx.variables)
-    middles = do_gen(a, %{env | next: %{}}, :next)
-    Process.put(:tla_extra_generated, Process.get(:tla_extra_generated, 0) + length(middles))
+    depth = Process.get(:tla_cdot_depth, 0)
+    Process.put(:tla_cdot_depth, depth + 1)
+
+    # The middle state starts with the variables that the step has already
+    # assigned, with their current values (as TLC's copyWith).
+    start = for {i, _} <- env.next, is_integer(i), into: %{}, do: {i, read_var(i, %{env | primed: false})}
+
+    middles =
+      try do
+        do_gen(a, %{env | next: start}, :next)
+      after
+        Process.put(:tla_cdot_depth, depth)
+      end
+
+    # Only the outermost composition counts its middle states.
+    if depth == 0,
+      do: Process.put(:tla_extra_generated, Process.get(:tla_extra_generated, 0) + length(middles))
 
     Enum.flat_map(middles, fn {t, _} ->
-      if map_size(t) != nvars,
-        do: error("the first action of `\\cdot` does not give a value to all the variables")
+      # As in TLC, the middle state can be partial: B fails when it reads a
+      # variable that A did not assign.
+      middle =
+        if map_size(t) == nvars,
+          do: List.to_tuple(for i <- 0..(nvars - 1)//1, do: Map.fetch!(t, i)),
+          else: t
 
-      middle = List.to_tuple(for i <- 0..(nvars - 1)//1, do: Map.fetch!(t, i))
+      Process.put(:tla_cdot_depth, depth + 1)
 
-      b
-      |> do_gen(%{env | state: middle}, :next)
-      |> Enum.map(fn {u, _} -> {u, env.label} end)
+      try do
+        b
+        |> do_gen(%{env | state: middle}, :next)
+        |> Enum.map(fn {u, _} -> {u, env.label} end)
+      after
+        Process.put(:tla_cdot_depth, depth)
+      end
     end)
   end
 

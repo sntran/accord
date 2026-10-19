@@ -233,7 +233,7 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp op("IsFiniteSet", [s], _) do
     case s do
-      _ -> if Value.set?(s), do: not Value.infinite?(s), else: error("IsFiniteSet needs a set")
+      _ -> if Value.set?(s), do: Value.finite?(s), else: error("IsFiniteSet needs a set")
     end
   end
 
@@ -339,6 +339,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       "diameter" -> env.level
       "config" -> config_record(env)
       "all:named" -> named_registers()
+      "all" -> index_registers()
       "stats" -> stats_record(env)
       "-D" <> property -> env.ctx.config |> system_property(property, key)
       other -> register(other)
@@ -450,7 +451,11 @@ defmodule Accord.TLA.Checker.Stdlib do
     |> Value.tuple()
   end
 
-  defp op("AssertError", [_msg, _failed], _), do: true
+  # AssertError(msg, e): TRUE when e fails to evaluate (the checker does
+  # not compare its error text with the text of TLC). Called through an
+  # operator replacement, e has already a value: FALSE.
+  defp op("AssertError", [_msg, {:assert_error, failed}], _), do: failed
+  defp op("AssertError", [_msg, _value], _), do: false
 
   defp op("TLCModelValue", [name], _) do
     v = {:mv, name}
@@ -521,6 +526,15 @@ defmodule Accord.TLA.Checker.Stdlib do
   defp named_registers do
     (Process.get(:tla_registers) || %{})
     |> Enum.filter(fn {k, _} -> is_binary(k) and String.starts_with?(k, "s:") end)
+    |> Map.new(fn {k, v} -> {k, Value.tuple([v])} end)
+    |> Value.fun()
+  end
+
+  # The registers with an integer index, each as a sequence of one value
+  # (one worker).
+  defp index_registers do
+    (Process.get(:tla_registers) || %{})
+    |> Enum.filter(fn {k, _} -> is_integer(k) end)
     |> Map.new(fn {k, v} -> {k, Value.tuple([v])} end)
     |> Value.fun()
   end

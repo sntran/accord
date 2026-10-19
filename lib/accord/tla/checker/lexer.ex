@@ -88,6 +88,8 @@ defmodule Accord.TLA.Checker.Lexer do
     "wr" => "\\wr",
     "A" => "\\A",
     "E" => "\\E",
+    "forall" => "\\A",
+    "exists" => "\\E",
     "AA" => "\\AA",
     "EE" => "\\EE"
   }

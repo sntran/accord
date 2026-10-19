@@ -43,10 +43,11 @@ defmodule Accord.TLA.Checker.Value do
     standard module: TLC reports these with another exit code than the
     errors of the core semantics.
     """
-    defexception [:message, module: false]
+    defexception [:message, module: false, fingerprint: false]
   end
 
   @big_interval 2_000
+  @builtin_sets [:nat, :int, :string, :any]
 
   # -- Construction --
 
@@ -127,10 +128,13 @@ defmodule Accord.TLA.Checker.Value do
   defp lazy_set?({:cup, _}), do: true
   defp lazy_set?(_), do: false
 
-  @doc "Tells if a set is infinite (or TLC cannot enumerate it)."
+  @doc """
+  Tells if a set is infinite, or TLC cannot enumerate it. The checker uses
+  this to keep a set lazy; `finite?/1` is `IsFiniteSet` with the rules of
+  TLC.
+  """
   def infinite?(s) when s in [:nat, :int, :string, :any], do: true
-  # Seq({}) is {<<>>}.
-  def infinite?({:seq_set, s}), do: not empty?(s)
+  def infinite?({:seq_set, _}), do: true
   def infinite?({:diff, a, _}), do: infinite?(a)
   def infinite?({:cap, a, b}), do: infinite?(a) and infinite?(b)
   def infinite?({:cup, sets}), do: Enum.any?(sets, &infinite?/1)
@@ -139,36 +143,170 @@ defmodule Accord.TLA.Checker.Value do
   def infinite?({:union, s}), do: s |> enum() |> Enum.any?(&infinite?/1)
 
   # An empty domain gives {<<>>}; an empty range (with a domain that is
-  # not empty) gives {}.
+  # not empty) gives {}; a range of one element gives one function.
   def infinite?({:fun_set, d, r}),
     do:
-      not empty?(d) and not empty?(r) and
-        (infinite?(r) or (infinite?(d) and size(r) > 1))
+      not safe_empty?(d) and not safe_empty?(r) and
+        (infinite?(r) or (infinite?(d) and safe_size(r) != 1))
 
   def infinite?({:record_set, fields}),
-    do: not empty?({:record_set, fields}) and Enum.any?(fields, fn {_, s} -> infinite?(s) end)
+    do: not Enum.any?(fields, fn {_, s} -> safe_empty?(s) end) and Enum.any?(fields, fn {_, s} -> infinite?(s) end)
 
-  def infinite?({:times, sets}), do: not empty?({:times, sets}) and Enum.any?(sets, &infinite?/1)
+  def infinite?({:times, sets}),
+    do: not Enum.any?(sets, &safe_empty?/1) and Enum.any?(sets, &infinite?/1)
+
   def infinite?(_), do: false
 
+  defp safe_empty?(s) do
+    empty?(s)
+  rescue
+    Error -> false
+  end
+
+  defp safe_size(s) do
+    size(s)
+  rescue
+    Error -> :unknown
+  end
+
+  @doc "`IsFiniteSet(s)`, with the rules (and the errors) of TLC."
+  def finite?(%MapSet{}), do: true
+  def finite?({:interval, _, _}), do: true
+  def finite?(s) when s in [:nat, :int, :string, :any], do: false
+  def finite?({:subset, s}), do: finite?(s)
+
+  def finite?({:fun_set, d, r}) do
+    fd = finite?(d)
+
+    if fd and empty?(d) do
+      true
+    else
+      fr = finite?(r)
+
+      cond do
+        fr and empty?(r) -> true
+        fd and fr -> true
+        true -> fr and size(r) == 1
+      end
+    end
+  end
+
+  def finite?({:record_set, fields}), do: parts_finite?(Enum.map(fields, &elem(&1, 1)))
+  def finite?({:times, sets}), do: parts_finite?(sets)
+  def finite?({:seq_set, s}), do: finite?(s) and empty?(s)
+
+  def finite?({:diff, a, b} = s) do
+    cond do
+      finite?(a) -> true
+      not finite?(b) -> error("Attempted to check if the set #{show(s)}is finite.")
+      true -> false
+    end
+  end
+
+  def finite?({:cap, a, b} = s) do
+    if not finite?(a) and not finite?(b),
+      do: error("Attempted to check if the set #{show(s)}is finite."),
+      else: true
+  end
+
+  def finite?({:cup, sets}), do: Enum.all?(sets, &finite?/1)
+  def finite?({:union, s}), do: s |> enum() |> Enum.all?(&finite?/1)
+
+  def finite?({:filter, inner, _}) do
+    if finite?(inner),
+      do: true,
+      else:
+        error(
+          "Attempted to check if expression of form {x \\in S : p(x)} is a finite set, but cannot check if S:\n#{show(inner)}\nis finite."
+        )
+  end
+
+  def finite?(v), do: error("Attempted to check if #{show(v)} is a finite set.")
+
+  # A set of records or tuples is finite when a finite part is empty, or
+  # when all the parts are finite.
+  defp parts_finite?(parts) do
+    Enum.reduce_while(parts, true, fn p, all ->
+      if finite?(p) do
+        if empty?(p), do: {:halt, true}, else: {:cont, all}
+      else
+        {:cont, false}
+      end
+    end)
+  end
+
   @doc """
-  Tells if a set is empty. For a lazy set, the check does not enumerate
-  the infinite parts.
+  Tells if a set is empty, with the rules of TLC: a set of functions, of
+  records, or of tuples decides from its parts; a difference, an
+  intersection, a union, or a filter looks for a first element (an error
+  when TLC cannot enumerate it).
   """
   def empty?(%MapSet{} = s), do: MapSet.size(s) == 0
   def empty?({:interval, a, b}), do: b < a
-  def empty?(s) when s in [:nat, :int, :string, :any], do: false
+  def empty?(s) when s in [:nat, :int, :string], do: false
+  def empty?(:any), do: error("Shouldn't call isEmpty() on value ANY")
   def empty?({:subset, _}), do: false
   def empty?({:seq_set, _}), do: false
   def empty?({:fun_set, d, r}), do: not empty?(d) and empty?(r)
   def empty?({:record_set, fields}), do: Enum.any?(fields, fn {_, s} -> empty?(s) end)
   def empty?({:times, sets}), do: Enum.any?(sets, &empty?/1)
-  def empty?({:cup, sets}), do: Enum.all?(sets, &empty?/1)
-  def empty?({:union, s}), do: s |> enum() |> Enum.all?(&empty?/1)
-  def empty?({:cap, a, b} = s), do: empty?(a) or empty?(b) or (not infinite?(s) and enum(s) == [])
-  def empty?({:diff, a, _} = s), do: empty?(a) or (not infinite?(s) and enum(s) == [])
-  def empty?({:filter, inner, _} = s), do: empty?(inner) or (not infinite?(s) and enum(s) == [])
-  def empty?(v), do: enum(v) == []
+  def empty?({kind, _} = s) when kind in [:cup, :union], do: first(s) == :none
+  def empty?({kind, _, _} = s) when kind in [:cap, :diff, :filter], do: first(s) == :none
+  def empty?(v), do: error("Shouldn't call isEmpty() on value #{show(v)}")
+
+  # The first element of a lazy set, as TLC enumerates it, or :none.
+  defp first(%MapSet{} = s), do: s |> MapSet.to_list() |> List.first(:none)
+  defp first({:interval, a, b}), do: if(a <= b, do: a, else: :none)
+
+  defp first({:diff, a, b}) do
+    if not enumerable?(a),
+      do: error("Attempted to enumerate S \\ T when S:\n#{show(a)}\nis not enumerable.")
+
+    a |> enum() |> Enum.find(:none, &(not member?(&1, b)))
+  end
+
+  defp first({:cap, a, b}) do
+    cond do
+      enumerable?(a) -> a |> enum() |> Enum.find(:none, &member?(&1, b))
+      enumerable?(b) -> b |> enum() |> Enum.find(:none, &member?(&1, a))
+      true -> error("Attempted to enumerate S \\cap T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable")
+    end
+  end
+
+  defp first({:cup, [a, b]} = s) do
+    if not (enumerable?(a) and enumerable?(b)),
+      do: error("Attempted to enumerate S \\cup T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable")
+
+    s |> elem(1) |> Enum.find_value(:none, fn x -> if (f = first_of(x)) != :none, do: f end)
+  end
+
+  defp first({:cup, sets}),
+    do: Enum.find_value(sets, :none, fn x -> if (f = first_of(x)) != :none, do: f end)
+
+  defp first({:union, s}) do
+    elems = enum(s)
+
+    if not Enum.all?(elems, &enumerable?/1),
+      do: error("Attempted to enumerate UNION(s), but some element of s is nonenumerable.")
+
+    Enum.find_value(elems, :none, fn x -> if (f = first_of(x)) != :none, do: f end)
+  end
+
+  defp first({:filter, inner, pred}) do
+    if not enumerable?(inner),
+      do: error("Attempted to enumerate { x \\in S : p(x) } when S:\n#{show(inner)}\nis not enumerable")
+
+    inner |> enum() |> Enum.find(:none, pred)
+  end
+
+  defp first(s), do: s |> enum() |> List.first(:none)
+
+  defp first_of(s), do: if(empty?(s), do: :none, else: first(s))
+
+  # TLC can enumerate the set (Nat, Int, STRING, and Seq(S) are not).
+  defp enumerable?(s) when s in [:nat, :int, :string, :any], do: false
+  defp enumerable?({:seq_set, _}), do: false
+  defp enumerable?(s), do: not infinite?(s)
 
   @doc "Tells if a value is a function (also a sequence or a record)."
   def fun?({:seq, _}), do: true
@@ -187,7 +325,8 @@ defmodule Accord.TLA.Checker.Value do
   """
   def eq?(a, b) when is_integer(a) and is_integer(b), do: a == b
   def eq?(a, b) when is_binary(a) and is_binary(b), do: a == b
-  def eq?(a, a), do: true
+  # The same value (not a lazy set: TLC compares the parts of those).
+  def eq?(a, a) when not is_tuple(a) or elem(a, 0) in [:seq, :fun, :mv], do: true
 
   def eq?(a, b) do
     case {kind(a), kind(b)} do
@@ -195,6 +334,7 @@ defmodule Accord.TLA.Checker.Value do
       {:mv, _} -> model_value_other(a, b)
       {_, :mv} -> model_value_other(b, a)
       {:set, :set} -> set_eq?(a, b)
+      {:fun, :fun} -> fun_eq?(a, b)
       {k, k} -> canon(a) == canon(b)
       {:other, _} -> canon(a) == canon(b)
       {_, :other} -> canon(a) == canon(b)
@@ -202,15 +342,95 @@ defmodule Accord.TLA.Checker.Value do
     end
   end
 
-  # Two sets of functions with an infinite domain (and one function each):
-  # equal when the domains and the ranges are equal.
-  defp set_eq?({:fun_set, d1, r1} = a, {:fun_set, d2, r2} = b) do
-    if (infinite?(d1) or infinite?(d2)) and not empty?(a) and not empty?(b),
-      do: eq?(d1, d2) and eq?(r1, r2),
+  # Set equality with the rules of TLC: sets of functions, records, and
+  # tuples compare their parts; Nat, Int, STRING, and Seq(S) compare with
+  # sets of the same form only; other lazy sets are enumerated.
+  defp set_eq?({:fun_set, d1, r1}, {:fun_set, d2, r2}) do
+    u1 = empty?(d1)
+    u2 = empty?(d2)
+
+    cond do
+      u1 or u2 ->
+        u1 == u2
+
+      empty?(r1) or empty?(r2) ->
+        empty?(r1) == empty?(r2)
+
+      true ->
+        eq?(d1, d2) and eq?(r1, r2)
+    end
+  end
+
+  defp set_eq?({:record_set, f1} = a, {:record_set, f2} = b) do
+    cond do
+      empty?(a) -> empty?(b)
+      empty?(b) -> false
+      length(f1) != length(f2) -> false
+      true -> Enum.zip(Enum.sort(f1), Enum.sort(f2)) |> Enum.all?(fn {{n1, s1}, {n2, s2}} -> n1 == n2 and eq?(s1, s2) end)
+    end
+  end
+
+  defp set_eq?({:times, s1} = a, {:times, s2} = b) do
+    cond do
+      empty?(a) -> empty?(b)
+      empty?(b) -> false
+      length(s1) != length(s2) -> false
+      true -> Enum.zip(s1, s2) |> Enum.all?(fn {x, y} -> eq?(x, y) end)
+    end
+  end
+
+  defp set_eq?({:seq_set, s1}, {:seq_set, s2}), do: eq?(s1, s2)
+  defp set_eq?({:subset, s1}, {:subset, s2}), do: eq?(s1, s2)
+
+  defp set_eq?(a, b) when elem(a, 0) == :seq_set or elem(b, 0) == :seq_set,
+    do: error("Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}")
+
+  defp set_eq?(a, b) when a in @builtin_sets or b in @builtin_sets do
+    if a in @builtin_sets and b in @builtin_sets,
+      do: a == b,
+      else: error("Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}")
+  end
+
+  defp set_eq?(a, b) do
+    cond do
+      infinite?(a) -> error("cannot enumerate the infinite set #{show(a)}")
+      infinite?(b) -> error("cannot enumerate the infinite set #{show(b)}")
+      true -> elements_eq?(canon(a), canon(b))
+    end
+  end
+
+  # TLC compares the elements one by one (so values of different kinds
+  # are an error).
+  defp elements_eq?(ca, cb) do
+    cond do
+      ca == cb ->
+        true
+
+      not (is_struct(ca, MapSet) and is_struct(cb, MapSet)) ->
+        false
+
+      MapSet.size(ca) != MapSet.size(cb) ->
+        false
+
+      true ->
+        ca |> MapSet.to_list() |> sort() |> Enum.zip(cb |> MapSet.to_list() |> sort()) |> Enum.all?(fn {x, y} -> eq?(x, y) end)
+    end
+  end
+
+  # TLC cannot compare a record with a tuple.
+  defp fun_eq?({:fun, m} = a, {:seq, t} = b) when tuple_size(t) > 0 do
+    if Enum.all?(Map.keys(m), &is_binary/1),
+      do: error("Attempted to check equality of record:\n#{show(a)}\nwith non-record\n#{show(b)}"),
       else: canon(a) == canon(b)
   end
 
-  defp set_eq?(a, b), do: canon(a) == canon(b)
+  defp fun_eq?({:seq, t} = a, {:fun, m} = b) when tuple_size(t) > 0 do
+    if Enum.all?(Map.keys(m), &is_binary/1) and map_size(m) == tuple_size(t),
+      do: error("Attempted to compare an integer with non-integer:\n#{show(b)}."),
+      else: canon(a) == canon(b)
+  end
+
+  defp fun_eq?(a, b), do: canon(a) == canon(b)
 
   defp kind(v) when is_integer(v), do: :int
   defp kind(v) when is_boolean(v), do: :bool
@@ -340,6 +560,9 @@ defmodule Accord.TLA.Checker.Value do
       {:seq, {}} ->
         fields == []
 
+      {:seq, _} ->
+        error("Attempted to check if non-record\n#{show(x)}\nis in the set of records:\n#{show({:record_set, fields})}")
+
       _ ->
         if fun?(x), do: false, else: bad_member(x, {:record_set, fields})
     end
@@ -349,6 +572,11 @@ defmodule Accord.TLA.Checker.Value do
     case x do
       {:seq, t} when tuple_size(t) == length(sets) ->
         sets |> Enum.with_index() |> Enum.all?(fn {s, i} -> member?(elem(t, i), s) end)
+
+      {:fun, m} ->
+        if Enum.all?(Map.keys(m), &is_integer/1),
+          do: false,
+          else: error("Attempted to check if non-tuple\n#{show(x)}\nis in the set of tuples:\n#{show({:times, sets})}")
 
       _ ->
         if fun?(x), do: false, else: bad_member(x, {:times, sets})
@@ -369,19 +597,33 @@ defmodule Accord.TLA.Checker.Value do
       nil ->
         false
 
-      {:mv, _} ->
-        false
-
       e ->
         case {kind(c), kind(e)} do
+          {:mv, :mv} -> model_values_eq?(c, e)
           {:mv, _} -> model_value_other(c, s)
+          {_, :mv} -> model_value_other(e, c)
           {k, k} -> false
           {:other, _} -> false
           {_, :other} -> false
-          _ -> error("Attempted to check if the value:\n#{show(c)}\nis an element of #{show(s)}")
+          {k, _} -> raise Error, message: compare_message(k, c, e), fingerprint: true
         end
     end
   end
+
+  defp compare_message(:int, a, b),
+    do: "Attempted to compare integer #{show(a)} with non-integer:\n#{show(b)}"
+
+  defp compare_message(:str, a, b),
+    do: "Attempted to compare string #{show(a)} with non-string:\n#{show(b)}"
+
+  defp compare_message(:bool, a, b),
+    do: "Attempted to compare boolean #{show(a)} with non-boolean:\n#{show(b)}"
+
+  defp compare_message(:set, a, b),
+    do: "Attempted to compare the set #{show(a)} with the value:\n#{show(b)}"
+
+  defp compare_message(:fun, a, b),
+    do: "Attempted to compare the function #{show(a)} with the value:\n#{show(b)}"
 
   defp first_element(%MapSet{map: map}) do
     case :maps.next(:maps.iterator(map)) do
@@ -460,9 +702,8 @@ defmodule Accord.TLA.Checker.Value do
   def enum(s) when s in [:nat, :int, :string, :any, {:seq_set, nil}],
     do: error("cannot enumerate the infinite set #{show(s)}")
 
-  def enum({:seq_set, s} = set) do
-    if empty?(s), do: [{:seq, {}}], else: error("cannot enumerate the infinite set #{show(set)}")
-  end
+  def enum({:seq_set, _} = set),
+    do: error("TLC encountered the non-enumerable quantifier bound\n#{show(set)}")
 
   def enum(v), do: error("expected a set, not #{show(v)}")
 
@@ -485,7 +726,23 @@ defmodule Accord.TLA.Checker.Value do
   end
 
   @doc "The number of elements of a finite set."
-  def size(%MapSet{} = s), do: MapSet.size(s)
+  # TLC sorts the elements to count them: two different sets, one of
+  # them not enumerable, cannot be compared.
+  def size(%MapSet{} = s) do
+    n = MapSet.size(s)
+
+    if n > 1 do
+      lazy = Enum.filter(s, &(lazy_set?(&1) and infinite?(&1)))
+
+      if lazy != [] do
+        [x | _] = lazy
+        other = s |> Enum.reject(&(&1 == x)) |> hd()
+        set_eq?(x, other)
+      end
+    end
+
+    n
+  end
 
   def size({:interval, a, b} = s) do
     check_interval_size!(s)
@@ -501,17 +758,29 @@ defmodule Accord.TLA.Checker.Value do
       empty?(d) -> 1
       empty?(r) -> 0
       size(r) == 1 -> 1
-      true -> Integer.pow(size(r), size(d))
+      true -> checked_product(List.duplicate(size(r), size(d)), {:fun_set, d, r})
     end
   end
 
+  # TLC has 32-bit sizes.
+  defp checked_product(sizes, s) do
+    Enum.reduce(sizes, 1, fn n, acc ->
+      p = acc * n
+
+      if p > 2_147_483_647,
+        do: error("Overflow when computing the number of elements in #{show_lazy(s)}")
+
+      p
+    end)
+  end
+
   def size({:times, sets} = s),
-    do: if(empty?(s), do: 0, else: Enum.reduce(sets, 1, &(size(&1) * &2)))
+    do: if(empty?(s), do: 0, else: checked_product(Enum.map(sets, &size/1), s))
 
   def size({:record_set, fields} = s),
-    do: if(empty?(s), do: 0, else: Enum.reduce(fields, 1, fn {_, f}, acc -> size(f) * acc end))
+    do: if(empty?(s), do: 0, else: checked_product(Enum.map(fields, &size(elem(&1, 1))), s))
 
-  def size({:seq_set, s} = set), do: if(empty?(s), do: 1, else: length(enum(set)))
+  def size({:seq_set, _} = set), do: error("Attempted to compute cardinality of the value\n#{show(set)}")
   def size(s), do: length(enum(s))
 
   # TLC has 32-bit sizes.
@@ -698,18 +967,29 @@ defmodule Accord.TLA.Checker.Value do
   def show(:int), do: "Int"
   def show(:string), do: "STRING"
   def show(:any), do: "the set of all values"
-  # TLC prints a lazy set that is empty as {}, and a set of functions
-  # with an empty domain as {<<>>}.
-  def show({kind, _} = s) when kind in [:record_set, :times] do
-    if empty?(s), do: "{}", else: show_lazy(s)
-  end
+  # As TLC: a set of records, tuples, or functions with fewer than 2000
+  # elements prints as its elements; a larger one prints in its lazy form.
+  # The sizes come from the parts, in order (an error when a part has no
+  # size).
+  def show({:record_set, fields} = s),
+    do: show_sized(s, product_size(Enum.map(fields, &elem(&1, 1))))
+
+  def show({:times, sets} = s), do: show_sized(s, product_size(sets))
 
   def show({:fun_set, d, r} = s) do
-    cond do
-      empty?(d) -> "{<<>>}"
-      empty?(r) -> "{}"
-      true -> show_lazy(s)
-    end
+    sz =
+      if empty?(d) do
+        1
+      else
+        dsz = size(d)
+        rsz = size(r)
+
+        Enum.reduce_while(1..dsz//1, 1, fn _, acc ->
+          if acc <= 2_147_483_647, do: {:cont, acc * rsz}, else: {:halt, acc}
+        end)
+      end
+
+    show_sized(s, sz)
   end
 
   def show({:subset, s}), do: "SUBSET #{show(s)}"
@@ -724,8 +1004,20 @@ defmodule Accord.TLA.Checker.Value do
   def show({:op_value, name, _, _}), do: "operator #{name}"
   def show(other), do: inspect(other)
 
+  defp show_sized(s, sz),
+    do: if(sz < 2000, do: s |> enum() |> MapSet.new() |> show(), else: show_lazy(s))
+
+  defp product_size(parts) do
+    Enum.reduce_while(parts, 1, fn p, acc ->
+      case size(p) do
+        0 -> {:halt, 0}
+        n -> {:cont, if(acc <= 2_147_483_647, do: acc * n, else: acc)}
+      end
+    end)
+  end
+
   defp show_lazy({:fun_set, d, r}), do: "[#{show(d)} -> #{show(r)}]"
-  defp show_lazy({:times, sets}), do: Enum.map_join(sets, " \\X ", &show/1)
+  defp show_lazy({:times, sets}), do: "(" <> Enum.map_join(sets, " \\X ", &show/1) <> ")"
 
   defp show_lazy({:record_set, fields}),
     do: "[" <> Enum.map_join(fields, ", ", fn {f, s} -> "#{f}: #{show(s)}" end) <> "]"
