@@ -80,6 +80,10 @@ defmodule Accord.TLA.Checker.Machine do
     Process.put(:tla_properties, Process.get(:tla_properties) || %{})
     Process.put(:tla_warn, true)
     Process.put(:tla_deadlock, ctx.config.check_deadlock)
+    # The order of strings: the ranks of the module first (see Context).
+    unless Process.get(:tla_string_ranks),
+      do: Process.put(:tla_string_ranks, ctx.string_ranks)
+
     Eval.reset_cache()
   end
 

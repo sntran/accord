@@ -64,7 +64,9 @@ defmodule Accord.TLA.Checker.Context do
             constant_replacements: [],
             # The scopes that `own_names` makes: scope id => the name that
             # has its original entry in the scope.
-            shadows: %{}
+            shadows: %{},
+            # The order of strings and model values (see `string_ranks/2`).
+            string_ranks: %{}
 
   @type t :: %__MODULE__{}
 
@@ -87,7 +89,8 @@ defmodule Accord.TLA.Checker.Context do
       variables: [],
       assumes: [],
       root_scopes: MapSet.new(),
-      let_instances: %{}
+      let_instances: %{},
+      parsed: [root_mod]
     }
 
     # The variables of the root module: its own and those of the modules
@@ -113,9 +116,31 @@ defmodule Accord.TLA.Checker.Context do
       let_instances: state.let_instances
     }
 
-    ctx
-    |> apply_constants(config)
+    ctx = apply_constants(ctx, config)
+    %{ctx | string_ranks: string_ranks(config, Enum.reverse(state.parsed))}
   end
+
+  # TLC orders strings (and model values) by the order in which it first
+  # makes them (UniqueString tokens): the strings and model values of the
+  # config (TLC parses it first), then the names of the module files (the
+  # root module first), then the string literals (the dependencies before
+  # the modules that use them).
+  defp string_ranks(config, [root | deps]) do
+    cfg = Enum.flat_map(config.constants, &config_strings/1)
+
+    (cfg ++
+       Enum.flat_map([root | deps], & &1.names) ++
+       Enum.flat_map(Enum.reverse(deps) ++ [root], & &1.strings))
+    |> Enum.reduce(%{}, fn s, acc -> Map.put_new(acc, s, map_size(acc)) end)
+  end
+
+  defp config_strings({:value, _name, v}), do: value_strings(v)
+  defp config_strings(_), do: []
+
+  defp value_strings({:mv, n}), do: [n]
+  defp value_strings(s) when is_binary(s), do: [s]
+  defp value_strings({:set, elems}), do: Enum.flat_map(elems, &value_strings/1)
+  defp value_strings(_), do: []
 
   defp parse_file(path) do
     Parser.parse_module(File.read!(path), file: path)
@@ -137,7 +162,7 @@ defmodule Accord.TLA.Checker.Context do
         mod = parse_file(path)
         modules = Map.put(state.modules, name, mod)
         modules = Enum.reduce(mod.submodules, modules, &Map.put_new(&2, &1.name, &1))
-        {mod, %{state | modules: modules}}
+        {mod, %{state | modules: modules, parsed: [mod | state.parsed]}}
 
       true ->
         raise Error,

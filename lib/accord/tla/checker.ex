@@ -46,6 +46,19 @@ defmodule Accord.TLA.Checker do
   - `:max_states` — stop after this number of distinct states.
   - `:invariant_exprs` — more invariants, as TLA+ expressions (text).
   - `:warn` — `false` for TLC's `-nowarning` (see `Accord.TLA.Checker.Eval`).
+  - `:seed` — the seed of the random values (TLC's `-seed`; default: a
+    random seed). With the same seed, the values are the values of TLC.
+  - `:continue` — `true` for TLC's `-continue`: the search does not stop
+    at a violation of an invariant or of an action property. The result
+    has the violations in `:violations`.
+  - `:workers` — the number of workers of TLC (`-workers`) that the
+    registers of `TLCSet` and `TLCGet` simulate (the search has one
+    process; the workers take the states in turn).
+  - `:coverage` — `true` for TLC's `-coverage`: `TLCGet("spec")` gives
+    the counts of states of each action.
+  - `:stop_after` — stop the search after this number of seconds (TLC's
+    `-Dtlc2.TLC.stopAfter`).
+  - `:properties` — the values of `TLCGet("-Dname")`.
   """
   @spec check(Path.t(), keyword()) :: result()
   def check(path, opts \\ []) do
@@ -211,7 +224,7 @@ defmodule Accord.TLA.Checker do
   defp assignments(variables, state) when is_tuple(state) do
     variables
     |> Enum.with_index()
-    |> Map.new(fn {name, i} -> {name, Value.show(elem(state, i))} end)
+    |> Map.new(fn {name, i} -> {name, Value.show_normal(elem(state, i))} end)
   end
 
   defp assignments(variables, state) when is_map(state) do
@@ -219,7 +232,7 @@ defmodule Accord.TLA.Checker do
     |> Enum.with_index()
     |> Enum.flat_map(fn {name, i} ->
       case Map.fetch(state, i) do
-        {:ok, v} -> [{name, Value.show(v)}]
+        {:ok, v} -> [{name, Value.show_normal(v)}]
         :error -> []
       end
     end)

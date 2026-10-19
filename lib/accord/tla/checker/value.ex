@@ -713,16 +713,60 @@ defmodule Accord.TLA.Checker.Value do
 
       e ->
         case {kind(c), kind(e)} do
-          {:mv, :mv} -> model_values_eq?(c, e)
-          {:mv, _} -> model_value_other(c, s)
-          {_, :mv} -> model_value_other(e, c)
-          {k, k} -> false
-          {:other, _} -> false
-          {_, :other} -> false
-          {k, _} -> raise Error, message: compare_message(k, c, e), fingerprint: true
+          {:mv, :mv} ->
+            model_values_eq?(c, e)
+
+          {:mv, _} ->
+            model_value_other(c, s)
+
+          {_, :mv} ->
+            model_value_other(e, c)
+
+          {k, k} ->
+            false
+
+          {:other, _} ->
+            false
+
+          {_, :other} ->
+            false
+
+          # TLC finds a value in a set in normal form (the value of a
+          # constant definition) with a binary search: the error of the
+          # comparison. In a set expression, TLC compares each element
+          # with the value: the error of the equality.
+          {k, _} ->
+            if normal?(s),
+              do: raise(Error, message: compare_message(k, c, e), fingerprint: true),
+              else: not eq?(e, c)
         end
     end
   end
+
+  @doc """
+  Records the sets in a value of a constant definition: TLC keeps them in
+  normal form (sorted), and some errors depend on it.
+  """
+  def register_normal(v) do
+    sets = normal_sets(v, [])
+
+    if sets != [] do
+      reg = Process.get(:tla_normal_sets) || MapSet.new()
+      Process.put(:tla_normal_sets, Enum.reduce(sets, reg, &MapSet.put(&2, &1)))
+    end
+
+    v
+  end
+
+  defp normal_sets(%MapSet{} = s, acc) do
+    if MapSet.size(s) > 1000, do: [s | acc], else: Enum.reduce(s, [s | acc], &normal_sets/2)
+  end
+
+  defp normal_sets({:seq, t}, acc), do: t |> Tuple.to_list() |> Enum.reduce(acc, &normal_sets/2)
+  defp normal_sets({:fun, m}, acc), do: m |> Map.values() |> Enum.reduce(acc, &normal_sets/2)
+  defp normal_sets(_, acc), do: acc
+
+  defp normal?(s), do: MapSet.member?(Process.get(:tla_normal_sets) || MapSet.new(), s)
 
   defp compare_message(:int, a, b),
     do: "Attempted to compare integer #{show(a)} with non-integer:\n#{show(b)}"
@@ -766,7 +810,13 @@ defmodule Accord.TLA.Checker.Value do
   # integers and strings).
   def enum(%MapSet{} = s) do
     list = MapSet.to_list(s)
-    if MapSet.size(s) > 32, do: Enum.sort(list), else: list
+
+    cond do
+      MapSet.size(s) < 2 -> list
+      ranked?(first_element(s)) -> sort(list)
+      MapSet.size(s) > 32 -> Enum.sort(list)
+      true -> list
+    end
   end
 
   def enum({:interval, a, b} = s) do
@@ -1196,22 +1246,129 @@ defmodule Accord.TLA.Checker.Value do
     end
   end
 
-  def sort(values), do: Enum.sort(values, &(compare(&1, &2) != :gt))
+  def sort(values), do: Enum.sort_by(values, &sort_key/1)
 
+  @doc """
+  The rank of a string (or of the name of a model value): TLC orders them
+  by the order in which it first made them (see
+  `Accord.TLA.Checker.Context`). A string that is new gets the next rank.
+  """
+  def rank(s) do
+    ranks = Process.get(:tla_string_ranks) || %{}
+
+    case ranks do
+      %{^s => r} ->
+        r
+
+      _ ->
+        r = map_size(ranks)
+        Process.put(:tla_string_ranks, Map.put(ranks, s, r))
+        r
+    end
+  end
+
+  # -- The order of the fields of records --
+
+  # TLC keeps a record (or a function that `@@` makes) in the order of
+  # its construction until it puts the record in normal form (in a state,
+  # or in a sorted set). The checker keeps the order of construction of
+  # each set of fields: `show/1` uses it, `show_normal/1` does not.
+  @max_orders 10_000
+
+  @doc "Records the order of construction of the keys of a function."
+  def note_order(keys) when length(keys) > 1 and length(keys) <= 32 do
+    orders = Process.get(:tla_field_orders) || %{}
+    key = Enum.sort(keys)
+
+    if map_size(orders) < @max_orders and not Map.has_key?(orders, key),
+      do: Process.put(:tla_field_orders, Map.put(orders, key, keys))
+
+    :ok
+  end
+
+  def note_order(_keys), do: :ok
+
+  @doc "The keys of a function in the order of its construction (when known)."
+  def written_keys(f) do
+    keys = f |> pairs() |> Enum.map(&elem(&1, 0))
+
+    case Map.get(Process.get(:tla_field_orders) || %{}, Enum.sort(keys)) do
+      nil -> Enum.sort_by(keys, &sort_key/1)
+      written -> written
+    end
+  end
+
+  defp order_pairs(pairs) do
+    written =
+      if Process.get(:tla_show_normal),
+        do: nil,
+        else:
+          Map.get(
+            Process.get(:tla_field_orders) || %{},
+            pairs |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+          )
+
+    case written do
+      nil ->
+        Enum.sort_by(pairs, &sort_key(elem(&1, 0)))
+
+      keys ->
+        m = Map.new(pairs)
+        Enum.map(keys, &{&1, Map.fetch!(m, &1)})
+    end
+  end
+
+  @doc "Writes a value in normal form, as TLC prints the values of a state."
+  def show_normal(v), do: normal(fn -> show(v) end)
+
+  defp normal(fun) do
+    old = Process.get(:tla_show_normal)
+    Process.put(:tla_show_normal, true)
+
+    try do
+      fun.()
+    after
+      Process.put(:tla_show_normal, old)
+    end
+  end
+
+  # Values whose order in TLC is not the order of Erlang terms (they
+  # contain strings or model values).
+  defp ranked?(v) when is_binary(v), do: true
+  defp ranked?({:mv, _}), do: true
+  defp ranked?({:seq, t}), do: tuple_size(t) > 0 and ranked?(elem(t, 0))
+
+  defp ranked?({:fun, m}) do
+    case :maps.next(:maps.iterator(m)) do
+      {k, v, _} -> ranked?(k) or ranked?(v)
+      :none -> false
+    end
+  end
+
+  defp ranked?(%MapSet{} = s), do: MapSet.size(s) > 0 and ranked?(first_element(s))
+  defp ranked?(_), do: false
+
+  # The order of TLC: a model value is less than any other value; strings
+  # (and model values) go in the order of `rank/1`; sets by size, then
+  # elements; functions (and tuples and records) by size, then domain,
+  # then values.
   defp sort_key(v) when is_boolean(v), do: {3, v}
   defp sort_key(v) when is_integer(v), do: {0, v}
-  defp sort_key(v) when is_binary(v), do: {1, v}
-  defp sort_key({:mv, n}), do: {2, n}
+  defp sort_key(v) when is_binary(v), do: {1, rank(v)}
+  defp sort_key({:mv, n}), do: {-1, rank(n)}
 
   defp sort_key(%MapSet{} = s),
-    do: {4, MapSet.size(s), s |> MapSet.to_list() |> sort() |> Enum.map(&sort_key/1)}
+    do: {4, MapSet.size(s), s |> MapSet.to_list() |> Enum.map(&sort_key/1) |> Enum.sort()}
 
-  defp sort_key({:seq, t}), do: {5, tuple_size(t), t |> Tuple.to_list() |> Enum.map(&sort_key/1)}
+  defp sort_key({:seq, t}) do
+    n = tuple_size(t)
+    {6, n, Enum.map(1..n//1, &{0, &1}), t |> Tuple.to_list() |> Enum.map(&sort_key/1)}
+  end
 
-  defp sort_key({:fun, m}),
-    do:
-      {6, map_size(m),
-       m |> Map.to_list() |> Enum.map(fn {k, v} -> {sort_key(k), sort_key(v)} end) |> Enum.sort()}
+  defp sort_key({:fun, m}) do
+    pairs = m |> Enum.map(fn {k, v} -> {sort_key(k), v} end) |> Enum.sort_by(&elem(&1, 0))
+    {6, map_size(m), Enum.map(pairs, &elem(&1, 0)), Enum.map(pairs, &sort_key(elem(&1, 1)))}
+  end
 
   defp sort_key(other), do: {9, inspect(other)}
 
@@ -1224,21 +1381,27 @@ defmodule Accord.TLA.Checker.Value do
   def show(s) when is_binary(s), do: inspect(s)
   def show({:mv, n}), do: n
 
-  def show(%MapSet{} = s),
-    do: "{" <> (s |> MapSet.to_list() |> sort() |> Enum.map_join(", ", &show/1)) <> "}"
+  def show(%MapSet{} = s) do
+    elems = s |> MapSet.to_list() |> sort()
+    # TLC sorts a set of two or more elements to print it: the records in
+    # it are in normal form (see `show_normal/1`).
+    shown =
+      if length(elems) > 1,
+        do: normal(fn -> Enum.map(elems, &show/1) end),
+        else: Enum.map(elems, &show/1)
+
+    "{" <> Enum.join(shown, ", ") <> "}"
+  end
 
   def show({:seq, t}), do: "<<" <> (t |> Tuple.to_list() |> Enum.map_join(", ", &show/1)) <> ">>"
 
   def show({:fun, m}) do
+    pairs = m |> Map.to_list() |> order_pairs()
+
     if Enum.all?(Map.keys(m), &is_binary/1) do
-      "[" <>
-        (m |> Enum.sort() |> Enum.map_join(", ", fn {k, v} -> "#{k} |-> #{show(v)}" end)) <> "]"
+      "[" <> Enum.map_join(pairs, ", ", fn {k, v} -> "#{k} |-> #{show(v)}" end) <> "]"
     else
-      "(" <>
-        (m
-         |> Map.to_list()
-         |> Enum.sort_by(&elem(&1, 0), &(compare(&1, &2) != :gt))
-         |> Enum.map_join(" @@ ", fn {k, v} -> "#{show(k)} :> #{show(v)}" end)) <> ")"
+      "(" <> Enum.map_join(pairs, " @@ ", fn {k, v} -> "#{show(k)} :> #{show(v)}" end) <> ")"
     end
   end
 

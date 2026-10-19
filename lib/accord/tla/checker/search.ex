@@ -27,6 +27,7 @@ defmodule Accord.TLA.Checker.Search do
     Random,
     SafetyTableau,
     Spec,
+    Stdlib,
     Temporal,
     Value
   }
@@ -49,12 +50,29 @@ defmodule Accord.TLA.Checker.Search do
     Eval.reset_cache()
     # The memos of an earlier run (in the same process) are of no use.
     Enum.each(
-      [:tla_constants, :tla_constant_defs, :tla_constant_scopes, :tla_levels, :tla_tlccache],
+      [
+        :tla_constants,
+        :tla_field_orders,
+        :tla_constant_defs,
+        :tla_constant_scopes,
+        :tla_levels,
+        :tla_tlccache,
+        :tla_normal_sets
+      ],
       &Process.delete/1
     )
 
     Process.put(:tla_registers, %{})
+    # Workers (TLC's -workers): each has its registers (TLCSet, TLCGet).
+    Process.put(:tla_workers, Keyword.get(opts, :workers, 1))
+    Enum.each([:tla_worker_regs, :tla_worker_slot, :tla_expansions], &Process.delete/1)
     Random.setup(Keyword.get(opts, :seed))
+    Process.put(:tla_string_ranks, ctx.string_ranks)
+    # Coverage (TLC's -coverage): the counts of states of each action.
+    Process.put(:tla_coverage, Keyword.get(opts, :coverage, false))
+    Process.put(:tla_continue, Keyword.get(opts, :continue, false))
+    Process.put(:tla_violations, [])
+    Process.put(:tla_counts, %{})
     Process.put(:tla_properties, Keyword.get(opts, :properties, %{}))
     Process.put(:tla_warn, Keyword.get(opts, :warn, true))
     Process.put(:tla_deadlock, Keyword.get(opts, :deadlock, config.check_deadlock))
@@ -68,6 +86,11 @@ defmodule Accord.TLA.Checker.Search do
       ctx: ctx,
       deadlock: Keyword.get(opts, :deadlock, config.check_deadlock),
       max_states: Keyword.get(opts, :max_states, :infinity),
+      # Time-bound checking (TLC's -Dtlc2.TLC.stopAfter, in seconds).
+      deadline:
+        if(opts[:stop_after],
+          do: System.monotonic_time(:millisecond) + trunc(opts[:stop_after] * 1000)
+        ),
       generated: 0,
       warnings: [],
       graph: Keyword.get(opts, :graph, false)
@@ -489,7 +512,14 @@ defmodule Accord.TLA.Checker.Search do
         do: check_liveness(base, model, st, stats),
         else: %{result(model.ctx) | status: :ok, stats: stats, warnings: base.warnings}
 
+    Stdlib.switch_worker(nil)
     result = if result.status == :ok, do: check_postconditions(model, result), else: result
+    # With `:continue`: the violations that the search found.
+    result =
+      if Process.get(:tla_continue),
+        do: Map.put(result, :violations, Enum.reverse(Process.get(:tla_violations, []))),
+        else: result
+
     if base.graph, do: Map.put(result, :graph, graph(st)), else: result
   end
 
@@ -528,7 +558,7 @@ defmodule Accord.TLA.Checker.Search do
   end
 
   defp unwitnessed(model) do
-    {:fun, counts} = Map.get(Process.get(:tla_registers) || %{}, "s:_possible", {:fun, %{}})
+    counts = Stdlib.possible_counts()
     Enum.find(model.possible, fn {name, _, _} -> Map.get(counts, name, 0) == 0 end)
   end
 
@@ -590,11 +620,37 @@ defmodule Accord.TLA.Checker.Search do
 
     # TLC checks each initial state when it generates it: the count of
     # generated states grows one by one.
-    Enum.reduce(partials, st, fn {p, _label}, st ->
-      st = %{st | generated: st.generated + 1}
-      state = complete!(model, p, "the initial predicate", [], base, st)
-      visit(base, model, st, state, nil, nil, 1)
-    end)
+    st0 = st
+
+    st =
+      Enum.reduce(partials, st, fn {p, _label}, st ->
+        st = %{st | generated: st.generated + 1}
+        state = complete!(model, p, "the initial predicate", [], base, st)
+        visit(base, model, st, state, nil, nil, 1)
+      end)
+
+    count(:init, length(partials), st.next_id - st0.next_id)
+    st
+  end
+
+  # The workers take the states in turn.
+  defp next_worker do
+    n = Process.get(:tla_workers, 1)
+
+    if n > 1 do
+      k = Process.get(:tla_expansions, 0)
+      Process.put(:tla_expansions, k + 1)
+      Stdlib.switch_worker(rem(k, n) + 1)
+    end
+  end
+
+  # The coverage counts of an action (or of the initial predicate).
+  defp count(key, generated, distinct) do
+    if Process.get(:tla_coverage) do
+      counts = Process.get(:tla_counts)
+      {g, d} = Map.get(counts, key, {0, 0})
+      Process.put(:tla_counts, Map.put(counts, key, {g + generated, d + distinct}))
+    end
   end
 
   defp loop(base, model, st) do
@@ -603,6 +659,16 @@ defmodule Accord.TLA.Checker.Search do
         st
 
       {{:value, id}, queue} ->
+        if base.deadline && System.monotonic_time(:millisecond) > base.deadline do
+          raise Stop,
+            result: %{
+              result(model.ctx)
+              | status: :incomplete,
+                stats: stats(st),
+                warnings: base.warnings
+            }
+        end
+
         st = %{st | queue: queue}
 
         if base.max_states != :infinity and map_size(st.seen) > base.max_states do
@@ -628,13 +694,15 @@ defmodule Accord.TLA.Checker.Search do
     {state, _parent, _label, depth} = Map.fetch!(st.nodes, id)
     Eval.reset_cache()
     Random.at_state({id, state})
+    next_worker()
     Process.put(:tla_stats_distinct, map_size(st.seen))
     Process.put(:tla_stats_queue, :queue.len(st.queue))
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace(st, id)) end)
 
     {st, any?} =
-      Enum.reduce(model.actions_next, {st, false}, fn {{e, scope, bound, frames}, name},
-                                                      {st, any?} ->
+      model.actions_next
+      |> Enum.with_index()
+      |> Enum.reduce({st, false}, fn {{{e, scope, bound, frames}, name}, index}, {st, any?} ->
         Process.put(:tla_stats_generated, st.generated)
         Process.put(:tla_extra_generated, 0)
 
@@ -669,12 +737,16 @@ defmodule Accord.TLA.Checker.Search do
 
         # TLC counts a successor when it checks it: after a violation, the
         # next successors do not count.
+        st0 = st
+
         st =
           Enum.reduce(successors, st, fn {p, label}, st ->
             st = %{st | generated: st.generated + 1}
             next_state = complete!(model, p, "the action #{label}", trace(st, id), base, st)
             step(base, model, st, id, state, next_state, label, depth)
           end)
+
+        count({:action, index}, length(successors), st.next_id - st0.next_id)
 
         {st, any? or successors != []}
       end)
@@ -797,9 +869,15 @@ defmodule Accord.TLA.Checker.Search do
       # error of the initial predicate.
       eval_kind = if from == nil, do: :spec_eval, else: :safety_eval
 
-      Enum.each(model.invariants, fn {name, closure} ->
-        unless holds?(closure, env, model, st, nil, base, partial_trace, eval_kind),
-          do: violation(model, base, st, :invariant, name, partial_trace.())
+      # With `:continue` (TLC's -continue), the first invariant that a
+      # state violates is reported, and the search goes on.
+      Enum.find(model.invariants, fn {name, closure} ->
+        if holds?(closure, env, model, st, nil, base, partial_trace, eval_kind) do
+          false
+        else
+          violation(model, base, st, :invariant, name, partial_trace.())
+          true
+        end
       end)
     end
 
@@ -958,6 +1036,16 @@ defmodule Accord.TLA.Checker.Search do
   end
 
   defp violation(model, base, st, kind, name, trace) do
+    if Process.get(:tla_continue) and kind in [:invariant, :action_property] do
+      v = %{kind: kind, property: name, trace: trace}
+      Process.put(:tla_violations, [v | Process.get(:tla_violations, [])])
+      :continue
+    else
+      stop_violation(model, base, st, kind, name, trace)
+    end
+  end
+
+  defp stop_violation(model, base, st, kind, name, trace) do
     raise Stop,
       result: %{
         result(model.ctx)

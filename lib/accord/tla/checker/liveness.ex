@@ -119,19 +119,21 @@ defmodule Accord.TLA.Checker.Liveness do
   # The nodes that the initial states reach, by breadth-first search.
   defp product(graph, automaton, lit, kind) do
     %{nodes: anodes} = automaton
-    ok = %{lit: lit, kind: kind}
+    ok = consistency(anodes, lit, kind)
 
     starts =
       for v <- graph.init,
           q <- automaton.init,
-          Enum.all?(anodes[q].lits, &state_lit_ok?(&1, v, ok)),
-          do: {v, q}
+          ok.state.(q, v),
+          uniq: true,
+          do: {v, ok.rep.(q)}
 
     index = starts |> Enum.with_index() |> Map.new()
     queue = :queue.from_list(starts)
     parents = Map.new(starts, &{&1, nil})
 
     {index, parents, edges} = explore(queue, graph, anodes, ok, index, parents, %{})
+    :ets.delete(ok.table)
 
     size = map_size(index)
     nodes = index |> Enum.sort_by(&elem(&1, 1)) |> Enum.map(&elem(&1, 0)) |> List.to_tuple()
@@ -155,9 +157,100 @@ defmodule Accord.TLA.Checker.Liveness do
   end
 
   # The literals of an automaton node: the state predicates must hold at
-  # the node, and the actions on the step from it.
-  defp state_lit_ok?({id, pol}, v, ok), do: ok.kind.(id) == :action or ok.lit.(id, v, nil) == pol
-  defp action_lit_ok?({id, pol}, v, w, ok), do: ok.kind.(id) == :state or ok.lit.(id, v, w) == pol
+  # the node, and the actions on the step from it. A state (a step) has a
+  # signature: the values of all the state (action) atoms. The test of a
+  # node depends only on the signature: it is computed one time for each
+  # node and signature.
+  defp consistency(anodes, lit, kind) do
+    ids =
+      anodes |> Enum.flat_map(fn {_, n} -> n.lits end) |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+    state_ids = ids |> Enum.filter(&(kind.(&1) == :state)) |> Enum.sort()
+    action_ids = ids |> Enum.filter(&(kind.(&1) == :action)) |> Enum.sort()
+    spos = state_ids |> Enum.with_index() |> Map.new()
+    apos = action_ids |> Enum.with_index() |> Map.new()
+
+    lits =
+      Map.new(anodes, fn {q, n} ->
+        {q,
+         {for({id, pol} <- n.lits, kind.(id) == :state, do: {Map.fetch!(spos, id), pol}),
+          for({id, pol} <- n.lits, kind.(id) == :action, do: {Map.fetch!(apos, id), pol})}}
+      end)
+
+    # The nodes with the same obligations, acceptance, and action literals
+    # are one class: in a product node, a class takes the place of the
+    # nodes of the class that the state is consistent with (they have the
+    # same successors and the same acceptance).
+    class_key = fn q, n ->
+      {Map.get(n, :cls, q), for({id, _} = l <- n.lits, kind.(id) == :action, do: l)}
+    end
+
+    rep =
+      anodes
+      |> Enum.group_by(fn {q, n} -> class_key.(q, n) end, &elem(&1, 0))
+      |> Enum.flat_map(fn {_, qs} -> Enum.map(qs, &{&1, Enum.min(qs)}) end)
+      |> Map.new()
+
+    table = :ets.new(:tla_consistency, [:set, :private])
+
+    cached = fn key, fun ->
+      case :ets.lookup(table, key) do
+        [{_, r}] ->
+          r
+
+        [] ->
+          r = fun.()
+          :ets.insert(table, {key, r})
+          r
+      end
+    end
+
+    ssig = fn v ->
+      cached.({:s, v}, fn -> state_ids |> Enum.map(&lit.(&1, v, nil)) |> List.to_tuple() end)
+    end
+
+    asig = fn v, w ->
+      cached.({:a, v, w}, fn -> action_ids |> Enum.map(&lit.(&1, v, w)) |> List.to_tuple() end)
+    end
+
+    %{
+      table: table,
+      rep: &Map.fetch!(rep, &1),
+      state: fn q, v ->
+        sig = ssig.(v)
+
+        cached.({:qs, q, sig}, fn ->
+          Enum.all?(elem(Map.fetch!(lits, q), 0), fn {i, pol} -> elem(sig, i) == pol end)
+        end)
+      end,
+      # The successors of the node q that a state v is consistent with.
+      succ: fn q, v ->
+        sig = ssig.(v)
+
+        cached.({:succ, q, sig}, fn ->
+          Map.fetch!(anodes, q).succ
+          |> Enum.filter(fn q2 ->
+            Enum.all?(elem(Map.fetch!(lits, q2), 0), fn {i, pol} -> elem(sig, i) == pol end)
+          end)
+          |> Enum.map(&Map.fetch!(rep, &1))
+          |> Enum.uniq()
+        end)
+      end,
+      action: fn q, v, w ->
+        case elem(Map.fetch!(lits, q), 1) do
+          [] ->
+            true
+
+          alits ->
+            sig = asig.(v, w)
+
+            cached.({:qa, q, sig}, fn ->
+              Enum.all?(alits, fn {i, pol} -> elem(sig, i) == pol end)
+            end)
+        end
+      end
+    }
+  end
 
   defp explore(queue, graph, anodes, ok, index, parents, edges) do
     case :queue.out(queue) do
@@ -166,28 +259,23 @@ defmodule Accord.TLA.Checker.Liveness do
 
       {{:value, {v, q} = node}, queue} ->
         x = Map.fetch!(index, node)
-        lits = anodes[q].lits
         steps = [{v, nil} | elem(graph.succ, v)]
 
         {queue, index, parents, edges} =
           Enum.reduce(steps, {queue, index, parents, edges}, fn {w, label}, acc ->
-            if Enum.all?(lits, &action_lit_ok?(&1, v, w, ok)) do
-              Enum.reduce(anodes[q].succ, acc, fn q2, {queue, index, parents, edges} ->
-                if Enum.all?(anodes[q2].lits, &state_lit_ok?(&1, w, ok)) do
-                  target = {w, q2}
+            if ok.action.(q, v, w) do
+              Enum.reduce(ok.succ.(q, w), acc, fn q2, {queue, index, parents, edges} ->
+                target = {w, q2}
 
-                  {queue, index, parents} =
-                    if Map.has_key?(index, target),
-                      do: {queue, index, parents},
-                      else:
-                        {:queue.in(target, queue), Map.put(index, target, map_size(index)),
-                         Map.put(parents, target, {node, label})}
+                {queue, index, parents} =
+                  if Map.has_key?(index, target),
+                    do: {queue, index, parents},
+                    else:
+                      {:queue.in(target, queue), Map.put(index, target, map_size(index)),
+                       Map.put(parents, target, {node, label})}
 
-                  y = Map.fetch!(index, target)
-                  {queue, index, parents, Map.update(edges, x, [{y, label}], &[{y, label} | &1])}
-                else
-                  {queue, index, parents, edges}
-                end
+                y = Map.fetch!(index, target)
+                {queue, index, parents, Map.update(edges, x, [{y, label}], &[{y, label} | &1])}
               end)
             else
               acc

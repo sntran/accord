@@ -220,8 +220,10 @@ defmodule Accord.TLA.Checker.Eval do
     end
   end
 
-  def eval({:record, fields}, env),
-    do: Value.record(Enum.map(fields, fn {f, e} -> {f, eval(e, env)} end))
+  def eval({:record, fields}, env) do
+    Value.note_order(Enum.map(fields, &elem(&1, 0)))
+    Value.record(Enum.map(fields, fn {f, e} -> {f, eval(e, env)} end))
+  end
 
   def eval({:record_set, fields}, env),
     do: {:record_set, Enum.map(fields, fn {f, e} -> {f, eval(e, env)} end)}
@@ -512,6 +514,7 @@ defmodule Accord.TLA.Checker.Eval do
               gen: false
           })
 
+        Value.register_normal(v)
         Process.put(:tla_constants, Map.put(Process.get(:tla_constants) || %{}, key, v))
         v
     end

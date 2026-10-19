@@ -78,12 +78,18 @@ defmodule Accord.TLA.Checker.Parser do
       extends: [],
       constants: [],
       variables: [],
+      # The positions of the declarations of the variables.
+      var_pos: %{},
       units: [],
       assumes: [],
       submodules: [],
       recursive: [],
       # For a module inside another module: the name of the outer module.
-      outer: nil
+      outer: nil,
+      # The texts of the tokens of the file, and its strings, in the order
+      # of their first appearance (the order of the strings of TLC).
+      names: [],
+      strings: []
     ]
   end
 
@@ -211,8 +217,19 @@ defmodule Accord.TLA.Checker.Parser do
     # More top-level modules in the file: they are available as
     # submodules of the first one.
     {extra, _p} = more_modules(p, [])
-    %{mod | file: file, submodules: mod.submodules ++ extra}
+
+    %{
+      mod
+      | file: file,
+        submodules: mod.submodules ++ extra,
+        names: tokens |> Enum.flat_map(&token_name/1) |> Enum.uniq(),
+        strings: for({:str, s, _, _} <- tokens, uniq: true, do: s)
+    }
   end
+
+  defp token_name({type, v, _, _}) when type in [:id, :kw, :op] and is_binary(v), do: [v]
+  defp token_name({:num, n, _, _}) when is_integer(n), do: [Integer.to_string(n)]
+  defp token_name(_), do: []
 
   defp more_modules(p, acc) do
     case raw(p) do
@@ -340,8 +357,16 @@ defmodule Accord.TLA.Checker.Parser do
         units(p, %{mod | constants: mod.constants ++ decls}, false)
 
       {:kw, kw, _, _} when kw in ["VARIABLE", "VARIABLES"] ->
+        i0 = p.pos + 1
         {names, p} = name_list(advance(p))
-        units(p, %{mod | variables: mod.variables ++ names}, false)
+
+        var_pos =
+          for i <- i0..(p.pos - 1)//1,
+              {:id, name, line, col} <- [raw_at(p, i)],
+              into: mod.var_pos,
+              do: {name, {line, col}}
+
+        units(p, %{mod | variables: mod.variables ++ names, var_pos: var_pos}, false)
 
       {:kw, kw, _, _} = t when kw in ["ASSUME", "ASSUMPTION", "AXIOM"] ->
         case assumption(advance(p)) do
@@ -644,8 +669,8 @@ defmodule Accord.TLA.Checker.Parser do
         if at?(p, :kw, "INSTANCE") do
           instance(advance(p), name, [], local?)
         else
-          {body, p} = expr(p, 0)
-          {%{kind: :op, name: name, params: [], body: body, local: local?, pos: pos}, p}
+          {body, p, loc} = body_expr(p)
+          {%{kind: :op, name: name, params: [], body: body, local: local?, pos: pos, loc: loc}, p}
         end
 
       {{:id, name, _, _}, {:op, "(", _, _}, _, _} ->
@@ -655,41 +680,98 @@ defmodule Accord.TLA.Checker.Parser do
         if at?(p, :kw, "INSTANCE") do
           instance(advance(p), name, params, local?)
         else
-          {body, p} = expr(p, 0)
-          {%{kind: :op, name: name, params: params, body: body, local: local?, pos: pos}, p}
+          {body, p, loc} = body_expr(p)
+
+          {%{
+             kind: :op,
+             name: name,
+             params: params,
+             body: body,
+             local: local?,
+             pos: pos,
+             loc: loc
+           }, p}
         end
 
       {{:id, name, _, _}, {:op, "[", _, _}, _, _} ->
         {binds, p} = binders(%{p | pos: p.pos + 2}, true)
         p = p |> expect_op("]") |> expect_op("==")
-        {body, p} = expr(p, 0)
-        {%{kind: :fun, name: name, binds: binds, body: body, local: local?, pos: pos}, p}
+        {body, p, loc} = body_expr(p)
+
+        {%{kind: :fun, name: name, binds: binds, body: body, local: local?, pos: pos, loc: loc},
+         p}
 
       {{:id, a, _, _}, {:op, op, _, _}, {:id, b, _, _}, {:op, "==", _, _}} ->
         p = %{p | pos: p.pos + 4}
-        {body, p} = expr(p, 0)
-        {%{kind: :op, name: op, params: [{a, 0}, {b, 0}], body: body, local: local?, pos: pos}, p}
+        {body, p, loc} = body_expr(p)
+
+        {%{
+           kind: :op,
+           name: op,
+           params: [{a, 0}, {b, 0}],
+           body: body,
+           local: local?,
+           pos: pos,
+           loc: loc
+         }, p}
 
       {{:id, a, _, _}, {:op, op, _, _}, {:op, "==", _, _}, _} when op in @postfix ->
         p = %{p | pos: p.pos + 3}
-        {body, p} = expr(p, 0)
-        {%{kind: :op, name: op, params: [{a, 0}], body: body, local: local?, pos: pos}, p}
+        {body, p, loc} = body_expr(p)
+
+        {%{kind: :op, name: op, params: [{a, 0}], body: body, local: local?, pos: pos, loc: loc},
+         p}
 
       {{:op, "-", _, _}, {:op, ".", _, _}, {:id, a, _, _}, {:op, "==", _, _}} ->
         p = %{p | pos: p.pos + 4}
-        {body, p} = expr(p, 0)
-        {%{kind: :op, name: "-.", params: [{a, 0}], body: body, local: local?, pos: pos}, p}
+        {body, p, loc} = body_expr(p)
+
+        {%{
+           kind: :op,
+           name: "-.",
+           params: [{a, 0}],
+           body: body,
+           local: local?,
+           pos: pos,
+           loc: loc
+         }, p}
 
       {{:op, op, _, _}, {:id, a, _, _}, {:op, "==", _, _}, _} ->
         name = if op == "-", do: "-.", else: op
         p = %{p | pos: p.pos + 3}
-        {body, p} = expr(p, 0)
-        {%{kind: :op, name: name, params: [{a, 0}], body: body, local: local?, pos: pos}, p}
+        {body, p, loc} = body_expr(p)
+
+        {%{
+           kind: :op,
+           name: name,
+           params: [{a, 0}],
+           body: body,
+           local: local?,
+           pos: pos,
+           loc: loc
+         }, p}
 
       _ ->
         error(p, t, "expected a definition, found #{describe(t)}")
     end
   end
+
+  # The body of a definition, and its location `{begin_line,
+  # begin_column, end_line, end_column}` (as TLC's Location).
+  defp body_expr(p) do
+    {_, _, line, col} = raw(p)
+    {body, p2} = expr(p, 0)
+    {_, _, eline, ecol} = last = raw_at(p2, p2.pos - 1)
+    {body, p2, {line, col, eline, ecol + token_length(last) - 1}}
+  end
+
+  defp token_length({:str, s, _, _}), do: String.length(s) + 2
+
+  defp token_length({:num, n, _, _}) when is_integer(n),
+    do: n |> Integer.to_string() |> String.length()
+
+  defp token_length({_, v, _, _}) when is_binary(v), do: String.length(v)
+  defp token_length(_), do: 1
 
   # Operator parameters: `x`, `F(_, _)`, `_ + _`, `-. _`.
   defp params(p, acc) do

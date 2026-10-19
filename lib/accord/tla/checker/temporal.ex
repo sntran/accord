@@ -156,7 +156,8 @@ defmodule Accord.TLA.Checker.Temporal do
       next: MapSet.new()
     }
 
-    {nodes, _} = expand(start, %{}, 1)
+    {nodes, _} = expand(start, %{index: %{}}, 1)
+    nodes = Map.delete(nodes, :index)
 
     succ =
       Enum.reduce(nodes, %{}, fn {name, node}, acc ->
@@ -190,7 +191,45 @@ defmodule Accord.TLA.Checker.Temporal do
             do: name
       end
 
-    %{nodes: graph, init: Enum.sort(init), accept: accept}
+    merge(%{nodes: graph, init: Enum.sort(init), accept: accept}, nodes)
+  end
+
+  # Nodes with the same literals, the same obligations for the next
+  # positions (thus the same successors), and the same acceptance are
+  # equivalent: one node takes their place. This makes the product with
+  # the state graph much smaller.
+  defp merge(t, raw) do
+    key = fn name ->
+      node = Map.fetch!(raw, name)
+      {Map.fetch!(t.nodes, name).lits, node.next, Enum.map(t.accept, &MapSet.member?(&1, name))}
+    end
+
+    rep =
+      t.nodes
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.group_by(key)
+      |> Enum.flat_map(fn {_, [first | _] = names} -> Enum.map(names, &{&1, first}) end)
+      |> Map.new()
+
+    # `cls`: the obligations and the acceptance of a node. The nodes of a
+    # class have the same successors (see Liveness).
+    nodes =
+      for {name, n} <- t.nodes, Map.fetch!(rep, name) == name, into: %{} do
+        {_, next, acc} = key.(name)
+
+        {name,
+         Map.merge(n, %{
+           succ: n.succ |> Enum.map(&Map.fetch!(rep, &1)) |> Enum.uniq() |> Enum.sort(),
+           cls: {next, acc}
+         })}
+      end
+
+    %{
+      nodes: nodes,
+      init: t.init |> Enum.map(&Map.fetch!(rep, &1)) |> Enum.uniq() |> Enum.sort(),
+      accept: Enum.map(t.accept, fn a -> a |> Enum.map(&Map.fetch!(rep, &1)) |> MapSet.new() end)
+    }
   end
 
   # `[]f` is `false R f`; `<>f` is `true U f`.
@@ -207,14 +246,20 @@ defmodule Accord.TLA.Checker.Temporal do
 
   defp subformulas(f), do: [f]
 
+  # `nodes` has the finished nodes, and `nodes.index`: {old, next} => name.
   defp expand(%{new: []} = node, nodes, counter) do
-    case Enum.find(nodes, fn {_, nd} -> nd.old == node.old and nd.next == node.next end) do
-      {name, nd} ->
+    case Map.fetch(nodes.index, {node.old, node.next}) do
+      {:ok, name} ->
+        nd = Map.fetch!(nodes, name)
+
         {Map.put(nodes, name, %{nd | incoming: MapSet.union(nd.incoming, node.incoming)}),
          counter}
 
-      nil ->
-        nodes = Map.put(nodes, node.name, node)
+      :error ->
+        nodes =
+          nodes
+          |> Map.put(node.name, node)
+          |> Map.put(:index, Map.put(nodes.index, {node.old, node.next}, node.name))
 
         fresh = %{
           name: counter,

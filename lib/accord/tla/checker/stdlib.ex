@@ -12,7 +12,7 @@ defmodule Accord.TLA.Checker.Stdlib do
   `Reals` is known but not supported: its operators raise an error.
   """
 
-  alias Accord.TLA.Checker.{Community, Eval, Fingerprint, Random, Value}
+  alias Accord.TLA.Checker.{Community, Context, Eval, Fingerprint, Random, Spec, Value}
   import Bitwise, only: [&&&: 2]
   import Value, only: [error: 1]
 
@@ -351,6 +351,8 @@ defmodule Accord.TLA.Checker.Stdlib do
       "duration" -> 0
       "diameter" -> env.level
       "config" -> config_record(env)
+      "spec" -> spec_record(env)
+      "revision" -> revision_record()
       "all:named" -> named_registers()
       "all" -> index_registers()
       "stats" -> stats_record(env)
@@ -369,9 +371,14 @@ defmodule Accord.TLA.Checker.Stdlib do
   defp op(":>", [k, v], _), do: Value.fun(%{Value.canon(k) => v})
 
   defp op("@@", [f, g], _) do
-    gm = Map.new(Value.pairs(g))
     fm = Map.new(Value.pairs(f))
-    Value.fun(Map.merge(gm, fm))
+    gp = Value.pairs(g)
+    # The domain of f, then the new elements of g (the order of TLC).
+    Value.note_order(
+      Value.written_keys(f) ++ for(k <- Value.written_keys(g), not Map.has_key?(fm, k), do: k)
+    )
+
+    Value.fun(Map.merge(Map.new(gp), fm))
   end
 
   defp op("Permutations", [s], _) do
@@ -423,13 +430,9 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp op("PickSuccessor", [_], _), do: true
 
-  defp op("_Counts", [], _),
-    do: Map.get(Process.get(:tla_registers) || %{}, "s:_possible", Value.fun(%{}))
+  defp op("_Counts", [], _), do: Value.fun(possible_counts())
 
-  defp op("_CheckName", [name], env) do
-    {:fun, counts} = op("_Counts", [], env)
-    Map.get(counts, name, 0) > 0
-  end
+  defp op("_CheckName", [name], _env), do: Map.get(possible_counts(), name, 0) > 0
 
   defp op("_PrintCounts", [], env) do
     IO.puts(Value.show(op("_Counts", [], env)))
@@ -593,22 +596,75 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp register(key), do: error("TLCGet(#{Value.show(key)}) is not supported")
 
-  # The named registers ("s:..."), each as a sequence of one value (one
-  # worker).
-  defp named_registers do
-    (Process.get(:tla_registers) || %{})
-    |> Enum.filter(fn {k, _} -> is_binary(k) and String.starts_with?(k, "s:") end)
-    |> Map.new(fn {k, v} -> {k, Value.tuple([v])} end)
+  # The named registers ("s:..."), each as a sequence of one value for
+  # each worker.
+  defp named_registers, do: all_registers(&(is_binary(&1) and String.starts_with?(&1, "s:")))
+
+  # The registers with an integer index, each as a sequence of one value
+  # for each worker.
+  defp index_registers, do: all_registers(&is_integer/1)
+
+  defp all_registers(key?) do
+    maps = worker_registers()
+    keys = maps |> Enum.flat_map(&Map.keys/1) |> Enum.filter(key?) |> Enum.uniq()
+
+    keys
+    |> Map.new(fn k -> {k, maps |> Enum.map(&Map.get(&1, k, false)) |> Value.tuple()} end)
     |> Value.fun()
   end
 
-  # The registers with an integer index, each as a sequence of one value
-  # (one worker).
-  defp index_registers do
-    (Process.get(:tla_registers) || %{})
-    |> Enum.filter(fn {k, _} -> is_integer(k) end)
-    |> Map.new(fn {k, v} -> {k, Value.tuple([v])} end)
-    |> Value.fun()
+  @doc """
+  The counts of the _POSSIBLE predicates (the register "s:_possible"),
+  added over the workers: a map of names to counts.
+  """
+  def possible_counts do
+    Enum.reduce(worker_registers(), %{}, fn regs, acc ->
+      case Map.get(regs, "s:_possible") do
+        {:fun, m} -> Map.merge(acc, m, fn _, a, b -> a + b end)
+        _ -> acc
+      end
+    end)
+  end
+
+  # The registers of each worker, in order (one map with one worker).
+  defp worker_registers do
+    n = Process.get(:tla_workers, 1)
+    current = Process.get(:tla_registers) || %{}
+
+    if n > 1 do
+      slots =
+        Map.put(Process.get(:tla_worker_regs) || %{}, Process.get(:tla_worker_slot, 1), current)
+
+      for w <- 1..n, do: Map.get(slots, w, Map.get(slots, 1, %{}))
+    else
+      [current]
+    end
+  end
+
+  @doc """
+  Sets the worker that evaluates the next expressions (`nil`: the main
+  thread, which has the registers of the first worker). With more than
+  one worker (option `:workers`), each worker has its registers, as in
+  TLC; a worker starts with the registers that the main thread set.
+  """
+  def switch_worker(w) do
+    n = Process.get(:tla_workers, 1)
+
+    if n > 1 do
+      cur = Process.get(:tla_worker_slot, 1)
+
+      slots =
+        Map.put(Process.get(:tla_worker_regs) || %{}, cur, Process.get(:tla_registers) || %{})
+
+      main = Map.fetch!(slots, 1)
+      slots = Enum.reduce(1..n, slots, &Map.put_new(&2, &1, main))
+      slot = w || 1
+      Process.put(:tla_worker_regs, slots)
+      Process.put(:tla_worker_slot, slot)
+      Process.put(:tla_registers, Map.fetch!(slots, slot))
+    end
+
+    :ok
   end
 
   defp config_record(env) do
@@ -617,10 +673,158 @@ defmodule Accord.TLA.Checker.Stdlib do
     Value.record([
       {"mode", "bfs"},
       {"deadlock", deadlock},
-      {"worker", 1},
-      {"seed", "0"},
+      {"worker", Process.get(:tla_workers, 1)},
+      {"seed", Integer.to_string(Random.seed())},
       {"fingerprint", "0"},
       {"install", ""}
+    ])
+  end
+
+  # TLCGet("revision"): the checker is a development version.
+  defp revision_record do
+    Value.record([
+      {"count", 0},
+      {"timestamp", 0},
+      {"date", "1970-01-01T00:00:00.0Z"},
+      {"tag", "development"},
+      {"calver", "accord"}
+    ])
+  end
+
+  # TLCGet("spec"): the parts of the specification as TLC finds them, with
+  # the locations of their definitions (and the counts of states with
+  # the option `:coverage`).
+  defp spec_record(env) do
+    ctx = env.ctx
+    config = ctx.config
+    spec = Spec.analyze(ctx, config)
+    coverage? = Process.get(:tla_coverage, false)
+    counts = Process.get(:tla_counts) || %{}
+
+    with_counts = fn rec, key ->
+      if coverage? do
+        {g, d} = Map.get(counts, key, {0, 0})
+        Map.put(rec, "coverage", Value.record([{"generated", g}, {"distinct", d}]))
+      else
+        rec
+      end
+    end
+
+    inits =
+      for {e, _, _, _} = c <- spec.init do
+        name = closure_name(e, "Init")
+        ctx |> action_fields(name, c) |> with_counts.(:init)
+      end
+
+    actions =
+      if spec.next do
+        ctx
+        |> Spec.actions(spec.next, config.next || "Next")
+        |> Enum.with_index()
+        |> Enum.map(fn {{c, name}, i} ->
+          ctx |> action_fields(name, c) |> with_counts.({:action, i})
+        end)
+      else
+        []
+      end
+
+    properties = Enum.flat_map(config.properties, &spec_property(ctx, &1, spec))
+    named = fn names -> Enum.map(names, &named_fields(ctx, &1)) end
+
+    variables =
+      for name <- Tuple.to_list(ctx.variables),
+          do: %{"name" => name, "location" => variable_location(ctx, name)}
+
+    def_named = fn names ->
+      Enum.map(names, &%{"name" => &1, "location" => location(ctx, &1, :def)})
+    end
+
+    [
+      {"inits", inits},
+      {"actions", actions},
+      {"temporals", []},
+      {"invariants", named.(config.invariants)},
+      {"impliedinits", for({:init, n} <- properties, do: named_fields(ctx, n))},
+      {"impliedactions", for({:action, n} <- properties, do: named_fields(ctx, n))},
+      {"impliedtemporals", for({:live, n} <- properties, do: named_fields(ctx, n))},
+      {"variables", variables},
+      {"actionconstraints", def_named.(config.action_constraints)},
+      {"constraints", def_named.(config.constraints)}
+    ]
+    |> Enum.map(fn {k, recs} ->
+      {k, recs |> Enum.map(&Value.record(Map.to_list(&1))) |> Value.set()}
+    end)
+    |> Value.record()
+  end
+
+  defp spec_property(ctx, name, spec) do
+    ctx
+    |> Spec.property(name, Map.get(spec, :temporals, []))
+    |> Enum.flat_map(fn
+      {:init, _} -> [{:init, name}]
+      {:action, _, _} -> [{:action, name}]
+      {:live, _, _} -> [{:live, name}]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp closure_name({:name, n, _}, _default), do: n
+  defp closure_name({:app, n, _, _}, _default) when is_binary(n), do: n
+  defp closure_name(_, default), do: default
+
+  defp named_fields(ctx, name), do: %{"name" => name, "location" => location(ctx, name)}
+
+  # An action: its name, the location of its definition, and the values
+  # of the bound names (the context of an action of `\E x \in S: A(x)`).
+  defp action_fields(ctx, name, {_e, _scope, bound, _frames}) do
+    rec = named_fields(ctx, name)
+
+    if bound == %{} do
+      rec
+    else
+      params = bound |> Map.keys() |> Enum.sort()
+
+      rec
+      |> Map.put("context", Value.record(Enum.map(params, &{&1, Map.fetch!(bound, &1)})))
+      |> Map.put("parameters", Value.tuple(params))
+    end
+  end
+
+  # The location of the body of a definition, or (`:def`) of the whole
+  # definition (TLC's OpDefNode location).
+  defp location(ctx, name, part \\ :body) do
+    {loc, module} =
+      case Context.lookup(ctx, ctx.root, name) do
+        {:def, %{loc: {_, _, el, ec}, pos: {l, c}}, sid} when part == :def ->
+          {{l, c, el, ec}, Map.fetch!(ctx.scopes, sid).module}
+
+        {:def, %{loc: loc}, sid} ->
+          {loc, Map.fetch!(ctx.scopes, sid).module}
+
+        _ ->
+          {{0, 0, 0, 0}, ctx.root_module}
+      end
+
+    location_record(loc, module)
+  end
+
+  defp variable_location(ctx, name) do
+    Enum.find_value(ctx.modules, location_record({0, 0, 0, 0}, ctx.root_module), fn {mname, mod} ->
+      case mod |> Map.get(:var_pos, %{}) |> Map.fetch(name) do
+        {:ok, {l, c}} -> location_record({l, c, l, c + String.length(name) - 1}, mname)
+        :error -> nil
+      end
+    end)
+  end
+
+  defp location_record({bl, bc, el, ec}, module) do
+    Value.record([
+      {"beginLine", bl},
+      {"beginColumn", bc},
+      {"endLine", el},
+      {"endColumn", ec},
+      {"module", module}
     ])
   end
 
@@ -635,9 +839,19 @@ defmodule Accord.TLA.Checker.Stdlib do
     ])
   end
 
+  # Some system properties of the Java platform.
+  @java_properties %{
+    "file.separator" => "/",
+    "path.separator" => ":",
+    "line.separator" => "\n"
+  }
+
   # `TLCGet("-Dname")`: a system property of TLC. The checker takes them
   # from the option `:properties`; without a value, the key itself.
   defp system_property(_config, property, key) do
-    Map.get(Process.get(:tla_properties) || %{}, property, key)
+    case Map.fetch(Process.get(:tla_properties) || %{}, property) do
+      {:ok, v} -> v
+      :error -> Map.get(@java_properties, property, key)
+    end
   end
 end
