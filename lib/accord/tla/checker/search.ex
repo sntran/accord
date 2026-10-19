@@ -792,7 +792,9 @@ defmodule Accord.TLA.Checker.Search do
     Random.at_state({id, state})
     next_worker()
     Process.put(:tla_stats_distinct, map_size(st.seen))
-    Process.put(:tla_stats_queue, :queue.len(st.queue))
+    # The length of the queue only when TLCGet asks for it (:queue.len is
+    # linear).
+    Process.put(:tla_stats_queue, {:queue, st.queue})
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, trace(st, id)) end)
 
     {st, any?} =

@@ -89,6 +89,11 @@ defmodule Accord.TLA.Checker.Stdlib do
     ],
     "Toolbox" => []
   }
+  # The module of each native operator (the first module that has it).
+  @module_of @modules
+             |> Enum.reverse()
+             |> Enum.flat_map(fn {mod, names} -> Enum.map(names, &{&1, mod}) end)
+             |> Map.new()
 
   # Native operators with operator parameters: the arity of each parameter.
   @op_params %{
@@ -124,10 +129,7 @@ defmodule Accord.TLA.Checker.Stdlib do
   def op_params(op), do: Map.get(@op_params, op)
 
   @doc "Calls a native operator by name (any module)."
-  def call(op, args, env) do
-    {mod, _} = Enum.find(@modules, fn {_, names} -> op in names end) || {nil, nil}
-    call_native(mod, op, args, env)
-  end
+  def call(op, args, env), do: call_native(Map.get(@module_of, op), op, args, env)
 
   @doc "Calls a native operator with evaluated arguments."
   def call_native(mod, op, args, env) do
@@ -343,7 +345,7 @@ defmodule Accord.TLA.Checker.Stdlib do
     case key do
       "level" -> if env.primed, do: env.level + 1, else: env.level
       "distinct" -> Process.get(:tla_stats_distinct, 0)
-      "queue" -> Process.get(:tla_stats_queue, 0)
+      "queue" -> queue_length()
       "generated" -> Process.get(:tla_stats_generated, 0)
       "duration" -> 0
       "diameter" -> env.level
@@ -695,6 +697,13 @@ defmodule Accord.TLA.Checker.Stdlib do
     end
   end
 
+  defp queue_length do
+    case Process.get(:tla_stats_queue, 0) do
+      {:queue, q} -> :queue.len(q)
+      n -> n
+    end
+  end
+
   # TLCGet("revision"): the checker is a development version.
   defp revision_record do
     Value.record([
@@ -848,7 +857,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       {"diameter", env.level},
       {"distinct", Process.get(:tla_stats_distinct, 0)},
       {"generated", Process.get(:tla_stats_generated, 0)},
-      {"queue", Process.get(:tla_stats_queue, 0)},
+      {"queue", queue_length()},
       {"traces", Process.get(:tla_stats_traces, 0)},
       {"duration", 0}
     ])

@@ -46,7 +46,7 @@ defmodule Accord.TLA.Checker.Value do
     defexception [:message, module: false, fingerprint: false]
   end
 
-  @big_interval 2_000
+  @big_interval 64
   @builtin_sets [:nat, :int, :string, :any]
 
   # -- Construction --
