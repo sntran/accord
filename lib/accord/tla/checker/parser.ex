@@ -148,6 +148,7 @@ defmodule Accord.TLA.Checker.Parser do
     "??" => {9, :left},
     "$" => {9, :left},
     "$$" => {9, :left},
+    "##" => {9, :left},
     "\\uplus" => {9, :left},
     "\\sqcap" => {9, :left},
     "\\sqcup" => {9, :left},
@@ -787,6 +788,9 @@ defmodule Accord.TLA.Checker.Parser do
         {{:op, "_", _, _}, {:op, op, _, _}, {:op, "_", _, _}} ->
           {{op, 2}, %{p | pos: p.pos + 3}}
 
+        {{:op, "-", _, _}, {:op, ".", _, _}, {:op, "_", _, _}} ->
+          {{"-.", 1}, %{p | pos: p.pos + 3}}
+
         {{:op, op, _, _}, {:op, "_", _, _}, _} ->
           {{op, 1}, %{p | pos: p.pos + 2}}
 
@@ -940,9 +944,18 @@ defmodule Accord.TLA.Checker.Parser do
         {e, p} = expr(advance(p), 5)
         postfix(p, {:not, e})
 
+      # `-.(a)`: the prefix minus in the form of an application.
       {:op, "-", _, _} ->
-        {e, p} = expr(advance(p), 13)
-        {{:app, "-.", [e], pos(t)}, p}
+        case {raw_at(p, p.pos + 1), raw_at(p, p.pos + 2)} do
+          {{:op, ".", _, _}, {:op, "(", _, _}} ->
+            p = %{p | pos: p.pos + 3} |> push_limit(:none)
+            {args, p} = args(p)
+            postfix(pop_limit(p), {:app, "-.", args, pos(t)})
+
+          _ ->
+            {e, p} = expr(advance(p), 13)
+            {{:app, "-.", [e], pos(t)}, p}
+        end
 
       {:op, "[]", _, _} ->
         {e, p} = expr(advance(p), 5)
@@ -1119,6 +1132,17 @@ defmodule Accord.TLA.Checker.Parser do
         p = p |> expect_op(")") |> pop_limit()
         {{if(fair == "WF_", do: :wf, else: :sf), sub, a}, p}
 
+      # An infix operator in the prefix form: `+(a, b)`.
+      {:op, op, _, _}
+      when (is_map_key(@infix, op) and op not in ["-", "\\X"]) or op in ["^+", "^*", "^#"] ->
+        if match?({:op, "(", _, _}, raw_at(p, p.pos + 1)) do
+          p = p |> advance() |> advance() |> push_limit(:none)
+          {args, p} = args(p)
+          {{:app, op, args, pos(t)}, pop_limit(p)}
+        else
+          error(p, t, "unexpected #{describe(t)}")
+        end
+
       _ ->
         error(p, t, "unexpected #{describe(t)}")
     end
@@ -1157,6 +1181,12 @@ defmodule Accord.TLA.Checker.Parser do
       case peek(p) do
         {:id, n, _, _} -> {n, advance(p)}
         {:num, n, _, _} -> {n, advance(p)}
+        # `I!-.(a)`: the prefix minus.
+        {:op, "-", _, _} ->
+          if match?({:op, ".", _, _}, raw_at(p, p.pos + 1)),
+            do: {"-.", %{p | pos: p.pos + 2}},
+            else: {"-", advance(p)}
+
         {:op, op, _, _} -> {op, advance(p)}
         tok -> error(p, tok, "expected a name after `!`")
       end
@@ -1193,6 +1223,17 @@ defmodule Accord.TLA.Checker.Parser do
       case {peek(p), raw_at(p, p.pos + 1)} do
         {{:kw, "LAMBDA", _, _}, _} ->
           lambda(advance(p))
+
+        # The prefix minus `-.`, and the operators that are keywords.
+        {{:op, "-", _, _}, {:op, ".", _, _}} ->
+          case raw_at(p, p.pos + 2) do
+            {:op, sep, _, _} when sep in [",", ")"] -> {{:op_arg, "-."}, %{p | pos: p.pos + 2}}
+            _ -> expr(p, 0)
+          end
+
+        {{:kw, kw, _, _}, {:op, sep, _, _}}
+        when sep in [",", ")"] and kw in ~w(SUBSET UNION DOMAIN ENABLED UNCHANGED) ->
+          {{:op_arg, kw}, advance(p)}
 
         {{:op, op, _, _}, {:op, sep, _, _}}
         when sep in [",", ")"] and op not in ["(", "{", "[", "<<", "@"] ->

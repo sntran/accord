@@ -109,6 +109,11 @@ defmodule Accord.TLA.Checker.Search do
       # the result of TLC's iterative deepening, the order of the states is
       # not.
       max_depth: opts[:max_depth],
+      # The liveness check of the simulation: TLC's default
+      # (`:trace`) or its experimental one (`:experimental`, the system
+      # property tlc2.tool.Simulator.experimentalLiveness).
+      sim_liveness: Keyword.get(opts[:simulate] || [], :liveness, :trace),
+      liveness_interval: Keyword.get(opts, :liveness_interval, {30_000, 600_000}),
       generated: 0,
       warnings: [],
       graph: Keyword.get(opts, :graph, false)
@@ -442,6 +447,10 @@ defmodule Accord.TLA.Checker.Search do
       next: spec.next,
       actions_next: if(spec.next, do: Spec.actions(ctx, spec.next, config.next || "Next")),
       fairness: spec.fairness,
+      # The fairness conditions whose action has side effects (Print,
+      # TLCSet): the liveness check evaluates them as TLC does, with the
+      # same count of evaluations.
+      impure: Enum.map(spec.fairness, fn {_, _, {a, scope, bound, _}} -> effects?(ctx, a, scope, bound) end),
       invariants:
         Enum.map(config.invariants, &{&1, root.(&1)}) ++
           for({name, {:invariant, c}} <- obligations, do: {name, c}),
@@ -566,7 +575,20 @@ defmodule Accord.TLA.Checker.Search do
           )
     end
 
+    # TLC checks liveness on the partial graph during the search (the
+    # default -lncheck): the first time 3 s after the start, then each
+    # minute, with at most 20% of the time. The checker is slower than TLC,
+    # so the times are longer (`:liveness_interval`, `{first, every}` in
+    # ms; `nil` checks only at the end, as -lncheck final).
+    if live? do
+      case base.liveness_interval do
+        {first, _every} -> Process.put(:tla_live_timer, {now_ms() + first, 0})
+        nil -> Process.delete(:tla_live_timer)
+      end
+    end
+
     st = if model.next == nil, do: st, else: loop(base, model, st)
+    Process.delete(:tla_live_timer)
 
     stats = stats(st)
 
@@ -657,7 +679,8 @@ defmodule Accord.TLA.Checker.Search do
       generated: st.generated,
       distinct: map_size(st.seen),
       depth: st.depth,
-      left: :queue.len(st.queue)
+      left: :queue.len(st.queue),
+      init: length(st.init_ids)
     }
 
   defp initial_states(base, model, st) do
@@ -709,6 +732,81 @@ defmodule Accord.TLA.Checker.Search do
 
   # A fairness condition of the next-state relation of the search, with
   # no constraint, symmetry, or view.
+  @effects ~w(Print PrintT TLCSet IOExec IOExecTemplate IOEnvExec IOEnvExecTemplate IOPut IOSerialize Serialize)
+
+  # Tells if an expression calls an operator with side effects.
+  defp effects?(ctx, e, scope, bound, seen \\ MapSet.new()) do
+    case e do
+      {:name, n, _} ->
+        name_effects?(ctx, n, scope, bound, seen)
+
+      {:app, n, args, _} ->
+        name_effects?(ctx, n, scope, bound, seen) or
+          Enum.any?(args, &effects?(ctx, &1, scope, bound, seen))
+
+      {:inst, path, name, args, _} ->
+        Enum.any?(args, &effects?(ctx, &1, scope, bound, seen)) or
+          Enum.any?(path, fn {_, a} -> effects?(ctx, a, scope, bound, seen) end) or
+          inst_effects?(ctx, path, name, scope, bound, seen)
+
+      t when is_tuple(t) ->
+        t |> Tuple.to_list() |> Enum.any?(&sub_effects?(ctx, &1, scope, bound, seen))
+
+      l when is_list(l) ->
+        Enum.any?(l, &sub_effects?(ctx, &1, scope, bound, seen))
+
+      _ ->
+        false
+    end
+  end
+
+  defp sub_effects?(ctx, x, scope, bound, seen) when is_tuple(x) or is_list(x),
+    do: effects?(ctx, x, scope, bound, seen)
+
+  defp sub_effects?(ctx, %{} = m, scope, bound, seen) when not is_struct(m),
+    do: m |> Map.values() |> effects?(ctx, scope, bound, seen)
+
+  defp sub_effects?(_ctx, _x, _scope, _bound, _seen), do: false
+
+  defp inst_effects?(ctx, path, name, scope, bound, seen) do
+    case Eval.inst_entry(path, name, %{Eval.new(ctx) | scope: scope, bound: bound}) do
+      {:def, d, sid} -> effects?(ctx, d.body, sid, %{}, MapSet.put(seen, {sid, d.name}))
+      {:native, _, n} -> n in @effects
+      _ -> false
+    end
+  rescue
+    # An instance that the analysis cannot follow can have side effects.
+    _ -> true
+  end
+
+  defp name_effects?(ctx, n, scope, bound, seen) do
+    case Map.fetch(bound, n) do
+      {:ok, {:thunk, _, e, tscope, tbound, _, _}} ->
+        effects?(ctx, e, tscope, tbound, seen)
+
+      {:ok, _} ->
+        false
+
+      :error ->
+        key = {scope, n}
+
+        if MapSet.member?(seen, key) do
+          false
+        else
+          seen = MapSet.put(seen, key)
+
+          case Context.lookup(ctx, scope, n) do
+            {:native, _, name} -> name in @effects
+            {:def, %{kind: :fun} = d, sid} -> effects?(ctx, d.body, sid, %{}, seen)
+            {:def, d, sid} -> effects?(ctx, d.body, sid, %{}, seen)
+            {:alias, sid, target} -> name_effects?(ctx, target, sid, %{}, seen)
+            {:subst, expr, outer, _} -> effects?(ctx, expr, outer, %{}, seen)
+            _ -> false
+          end
+        end
+    end
+  end
+
   defp next_fairness?(model, {_strength, _sub, a}) do
     model.constraints == [] and model.action_constraints == [] and model.perms == [] and
       model.view == nil and model.next != nil and no_pos(a) == no_pos(model.next)
@@ -734,7 +832,32 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # A liveness check of the states that the search expanded (see
+  # `explore/4`). A state in the queue has no steps yet, not even its
+  # stuttering step, as in TLC's behavior graph.
+  defp periodic_liveness(base, model, st) do
+    case Process.get(:tla_live_timer) do
+      {due, size} when st.next_id > size ->
+        if now_ms() >= due do
+          t0 = now_ms()
+          partial = Map.put(st, :no_stutter, MapSet.new(:queue.to_list(st.queue)))
+          result = check_liveness(base, model, partial, stats(st))
+          if result.status != :ok, do: raise(Stop, result: result)
+          {_, every} = base.liveness_interval
+          dt = now_ms() - t0
+          Process.put(:tla_live_timer, {now_ms() + max(every, 4 * dt), st.next_id})
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   defp loop(base, model, st) do
+    periodic_liveness(base, model, st)
+
     case :queue.out(st.queue) do
       {:empty, _} ->
         st
@@ -1187,11 +1310,11 @@ defmodule Accord.TLA.Checker.Search do
       try do
         Eval.gen(e, env, :next)
       rescue
+        # The simulator of TLC reports an error of the next-state relation
+        # (a false Assert too) as an unexpected exception (EC.GENERAL).
         err in Value.Error ->
-          kind = if err.module, do: :error, else: :spec_eval
-
-          raise Stop,
-            result: error_result(model.ctx, Exception.message(err), trace, base, st, kind)
+          result = error_result(model.ctx, Exception.message(err), trace, base, st, :error)
+          raise Stop, result: %{result | kind: :error}
       end
 
     Enum.reduce(successors, {st, []}, fn {p, label}, {st, acc} ->
@@ -1239,14 +1362,29 @@ defmodule Accord.TLA.Checker.Search do
       end)
 
     cache = :ets.new(:tla_live_atoms, [:set, :private])
+    sim_impure(model, cache, ids, states, base.sim_liveness)
 
     gst = %{
       next_id: map_size(ids),
       nodes: nodes,
       edges: edges,
       init_ids: [Map.fetch!(ids, hd(states))],
-      live_cache: cache
+      live_cache: cache,
+      # TLC's experimental liveness simulation gives the last state of
+      # the trace no steps (LiveCheck.checkTrace): no stuttering step,
+      # unless the state is also earlier in the trace.
+      no_stutter:
+        if(base.sim_liveness == :experimental and List.last(states) not in Enum.drop(states, -1),
+          do: MapSet.new([Map.fetch!(ids, List.last(states))]),
+          else: MapSet.new()
+        )
     }
+
+    # A state without steps is in no cycle: TLC does not evaluate the
+    # fairness conditions there.
+    for v <- gst.no_stutter, {_, i} <- Enum.with_index(model.fairness) do
+      :ets.insert_new(cache, {{:fair, i, :enabled, v}, false})
+    end
 
     result =
       try do
@@ -1270,8 +1408,10 @@ defmodule Accord.TLA.Checker.Search do
   defp live_eval(base, model, st, id) do
     to = st.edges |> Map.get(id, []) |> Enum.reverse() |> Enum.map(&elem(&1, 0))
     succs = Enum.uniq(to ++ [id])
-    {state, _, _, _} = Map.fetch!(st.nodes, id)
+    {state, _, _, level} = Map.fetch!(st.nodes, id)
     cache = st.live_cache
+    # TLCGet("level") in the predicates: the level of the state.
+    Process.put(:tla_live_level, level)
 
     # The fairness conditions: first the steps, then ENABLED at the state.
     # A condition of the next-state relation itself (WF_v(Next)) needs no
@@ -1279,6 +1419,21 @@ defmodule Accord.TLA.Checker.Search do
     # removes steps).
     fast = Enum.map(model.fairness, &next_fairness?(model, &1))
     sub_of = fn fc, x -> fc |> elem(1) |> then(&sub_value(model, &1)) |> then(& &1.(x, nil)) end
+
+    # A condition with side effects: the evaluations of TLC. TLC checks
+    # WF_v(A) as []<>(~ENABLED <<A>>_v \/ <<A>>_v) on each step, the
+    # stuttering step too: ENABLED on each step, and A when ENABLED holds.
+    # It checks the ENABLED of SF_v(A) one time on the state.
+    if Enum.any?(model.impure) and :ets.lookup(cache, {:impure, id}) == [] do
+      :ets.insert(cache, {{:impure, id}, true})
+      state_of = fn w -> elem(Map.fetch!(st.nodes, w), 0) end
+      steps = if id in to, do: to, else: to ++ [id]
+
+      for {_tableau, choice} <- impure_solutions(model) do
+        check_state(model, cache, choice, id, state)
+        Enum.each(steps, &check_action(model, cache, choice, id, state, &1, state_of.(&1)))
+      end
+    end
 
     model.fairness
     |> Enum.with_index()
@@ -1348,6 +1503,158 @@ defmodule Accord.TLA.Checker.Search do
     err in Value.Error ->
       raise Stop,
         result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st, :error)
+  end
+
+  # -- Fairness with side effects --
+
+  # TLC checks a liveness property on each disjunct (a "solution") of the
+  # disjunctive normal form of the negation of the property and the
+  # fairness. SF_v(A) is <>[]~ENABLED <<A>>_v \/ []<><<A>>_v, so it gives
+  # two kinds of solutions: one checks ENABLED on the states, the other
+  # checks A on the steps. WF_v(A) is []<>(~ENABLED <<A>>_v \/ <<A>>_v),
+  # a check on the steps: ENABLED at the first state of the step, then A
+  # when ENABLED holds. Each solution evaluates its checks again. For an
+  # action with side effects (Print, TLCSet), the checker does the same
+  # evaluations. `{tableau?, choice}`: `choice` maps a strong condition
+  # to `:en` or `:act`.
+  defp impure_solutions(model) do
+    case Process.get(:tla_impure_solutions) do
+      {^model, sols} ->
+        sols
+
+      _ ->
+        tabs =
+          for {_, f, _} <- model.live, d <- Temporal.dnf(f), do: Temporal.split(d).rest != true
+
+        strong = for {{:strong, _, _}, i} <- Enum.with_index(model.fairness), do: i
+
+        choices =
+          Enum.reduce(strong, [%{}], fn i, acc ->
+            for c <- acc, k <- [:en, :act], do: Map.put(c, i, k)
+          end)
+
+        sols = Enum.take(for(t <- tabs, c <- choices, do: {t, c}), 256)
+        Process.put(:tla_impure_solutions, {model, sols})
+        sols
+    end
+  end
+
+  # The state checks of a solution at the state `id`.
+  defp check_state(model, cache, choice, id, s) do
+    model.fairness
+    |> Enum.with_index()
+    |> Enum.each(fn {fc, i} ->
+      if Enum.at(model.impure, i) and Map.get(choice, i) == :en do
+        en = fair_enabled?(model, fc, s)
+        :ets.insert(cache, {{:fair, i, :enabled, id}, en})
+      end
+    end)
+  end
+
+  # The action checks of a solution on the step from `id` to `wid`.
+  defp check_action(model, cache, choice, id, s, wid, t) do
+    model.fairness
+    |> Enum.with_index()
+    |> Enum.each(fn {{strength, _, _} = fc, i} ->
+      if Enum.at(model.impure, i) do
+        case {strength, Map.get(choice, i)} do
+          {:weak, _} ->
+            en = fair_enabled?(model, fc, s)
+            taken = en and fair_taken?(model, fc, s, t, id == wid)
+            merge_enabled(cache, i, id, en)
+            :ets.insert(cache, {{:fair, i, :taken, id, wid}, taken})
+
+          {:strong, :act} ->
+            :ets.insert(cache, {{:fair, i, :taken, id, wid}, fair_taken?(model, fc, s, t, id == wid)})
+
+          _ ->
+            :ok
+        end
+      end
+    end)
+  end
+
+  defp merge_enabled(cache, i, id, en) do
+    key = {:fair, i, :enabled, id}
+
+    case :ets.lookup(cache, key) do
+      [{_, true}] -> :ok
+      _ -> :ets.insert(cache, {key, en})
+    end
+  end
+
+  # The evaluations of TLC's liveness check of a simulation trace
+  # (LiveCheck1.constructBEGraph): for each solution, the checks of the
+  # first state and of its stuttering step, then for each step to a new
+  # state the checks of the state, of its stuttering step, and of the
+  # step; for a step to a known state, the check of a new step. With a
+  # tableau, TLC checks each state and each step of the trace. With the
+  # experimental liveness of the simulator (LiveCheck), TLC checks each
+  # step of the trace and its stuttering step, as in a search.
+  defp sim_impure(model, cache, ids, states, mode) do
+    if Enum.any?(model.impure) do
+      [s0 | _] = states
+      id = &Map.fetch!(ids, &1)
+      # TLCGet("level"): the level of the first state of the check.
+      at = &Process.put(:tla_live_level, &1)
+      steps = states |> Enum.with_index(1) |> Enum.chunk_every(2, 1, :discard)
+
+      for {tableau, choice} <- impure_solutions(model) do
+        case mode do
+          :experimental ->
+            at.(1)
+            check_state(model, cache, choice, id.(s0), s0)
+
+            Enum.each(steps, fn [{s, l}, {t, _}] ->
+              at.(l)
+              check_state(model, cache, choice, id.(s), s)
+              check_action(model, cache, choice, id.(s), s, id.(s), s)
+              if s != t, do: check_action(model, cache, choice, id.(s), s, id.(t), t)
+            end)
+
+            last = List.last(states)
+            at.(length(states))
+            check_state(model, cache, choice, id.(last), last)
+
+          _ ->
+            at.(1)
+            check_state(model, cache, choice, id.(s0), s0)
+            check_action(model, cache, choice, id.(s0), s0, id.(s0), s0)
+
+            steps
+            |> Enum.reduce({MapSet.new([s0]), MapSet.new()}, fn [{s, l}, {t, lt}], {seen, done} ->
+              cond do
+                tableau ->
+                  at.(lt)
+                  check_state(model, cache, choice, id.(t), t)
+                  at.(l)
+                  check_action(model, cache, choice, id.(s), s, id.(t), t)
+                  at.(lt)
+                  check_action(model, cache, choice, id.(t), t, id.(t), t)
+                  {seen, done}
+
+                not MapSet.member?(seen, t) ->
+                  at.(lt)
+                  check_state(model, cache, choice, id.(t), t)
+                  check_action(model, cache, choice, id.(t), t, id.(t), t)
+                  at.(l)
+                  check_action(model, cache, choice, id.(s), s, id.(t), t)
+                  {MapSet.put(seen, t), MapSet.put(done, {s, t})}
+
+                not MapSet.member?(done, {s, t}) and s != t ->
+                  at.(l)
+                  check_action(model, cache, choice, id.(s), s, id.(t), t)
+                  {seen, MapSet.put(done, {s, t})}
+
+                true ->
+                  {seen, done}
+              end
+            end)
+        end
+      end
+
+      :ok
+    end
   end
 
   # -- The safety part of temporal properties (see SafetyTableau) --
@@ -1554,7 +1861,7 @@ defmodule Accord.TLA.Checker.Search do
       message: nil,
       trace: [],
       loop: nil,
-      stats: %{generated: 0, distinct: 0, depth: 0, left: 0},
+      stats: %{generated: 0, distinct: 0, depth: 0, left: 0, init: 0},
       warnings: [],
       variables: Tuple.to_list(ctx.variables)
     }
@@ -1577,7 +1884,7 @@ defmodule Accord.TLA.Checker.Search do
         stats:
           if(st,
             do: stats(st),
-            else: %{generated: base.generated, distinct: 0, depth: 0, left: 0}
+            else: %{generated: base.generated, distinct: 0, depth: 0, left: 0, init: 0}
           ),
         warnings: base.warnings
     }
@@ -1596,7 +1903,13 @@ defmodule Accord.TLA.Checker.Search do
       end
       |> List.to_tuple()
 
-    graph = %{n: n, states: states, succ: succ, init: Enum.reverse(st.init_ids)}
+    graph = %{
+      n: n,
+      states: states,
+      succ: succ,
+      init: Enum.reverse(st.init_ids),
+      no_stutter: Map.get(st, :no_stutter, MapSet.new())
+    }
 
     conds =
       model.fairness
@@ -1731,7 +2044,8 @@ defmodule Accord.TLA.Checker.Search do
         next: t,
         scope: ascope,
         bound: abound,
-        frames: aframes
+        frames: aframes,
+        level: Process.get(:tla_live_level, 1)
     }
 
     Eval.reset_cache()
@@ -1763,7 +2077,8 @@ defmodule Accord.TLA.Checker.Search do
         scope: scope,
         bound: bound,
         frames: frames,
-        pseudo: true
+        pseudo: true,
+        level: Process.get(:tla_live_level, 1)
     }
 
     current = sub_value.(state, nil)

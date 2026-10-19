@@ -563,8 +563,11 @@ defmodule Accord.TLA.Checker.Context do
                 (root_context?(ctx, scope) or
                    same_definition?(ctx, Map.get(scope.ops, name), root_def))
 
+            # The definition of `name` in the module `mod`: in the module,
+            # and where another module uses it (EXTENDS, INSTANCE).
             {:module, mod} ->
-              scope.module == mod and Map.has_key?(scope.ops, name)
+              Map.has_key?(scope.ops, name) and
+                (scope.module == mod or defined_in?(ctx, Map.get(scope.ops, name), mod))
           end
 
         if applies do
@@ -590,6 +593,10 @@ defmodule Accord.TLA.Checker.Context do
 
     %{ctx | scopes: scopes}
   end
+
+  defp defined_in?(_ctx, {:native, m, _}, mod), do: m == mod
+  defp defined_in?(ctx, {:def, _, sid}, mod), do: Map.fetch!(ctx.scopes, sid).module == mod
+  defp defined_in?(_ctx, _entry, _mod), do: false
 
   defp same_definition?(_ctx, {:native, m, n}, {:native, m, n}), do: true
 

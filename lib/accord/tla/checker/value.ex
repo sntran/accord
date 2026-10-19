@@ -76,7 +76,7 @@ defmodule Accord.TLA.Checker.Value do
 
   def fun(map) do
     n = map_size(map)
-    map = Map.new(map, fn {k, v} -> {k, canon(v)} end)
+    map = Map.new(map, fn {k, v} -> {k, part(v)} end)
 
     if Enum.all?(1..n, &Map.has_key?(map, &1)),
       do: {:seq, List.to_tuple(for i <- 1..n, do: Map.fetch!(map, i))},
@@ -84,7 +84,7 @@ defmodule Accord.TLA.Checker.Value do
   end
 
   @doc "Makes a record from a list of `{field, value}`."
-  def record(fields), do: fun(Map.new(fields, fn {k, v} -> {k, canon(v)} end))
+  def record(fields), do: fun(Map.new(fields, fn {k, v} -> {k, part(v)} end))
 
   # -- Canonical form --
 
@@ -102,6 +102,7 @@ defmodule Accord.TLA.Checker.Value do
     keys = enum(domain)
     fun(Map.new(keys, fn k -> {k, f.(k)} end))
   end
+
 
   # An infinite set stays lazy: TLC can keep it as a value (for example as
   # an element of a set) as long as nothing enumerates it.
@@ -122,6 +123,15 @@ defmodule Accord.TLA.Checker.Value do
 
   @doc "Tells if a value is a lazy set."
   def lazy?(v), do: lazy_set?(v)
+
+  # A part of a function, a record, or a set: a function with an infinite
+  # domain stays lazy (as TLC's FcnLambdaValue) as long as nothing
+  # enumerates it.
+  defp part({:lazy_fun, domain, _} = v) do
+    if infinite?(domain), do: v, else: canon(v)
+  end
+
+  defp part(v), do: canon(v)
 
   defp lazy_set?({:interval, _, _}), do: true
   defp lazy_set?(atom) when atom in [:nat, :int, :string, :any], do: true
@@ -629,7 +639,7 @@ defmodule Accord.TLA.Checker.Value do
 
   def member?(x, :nat), do: if(is_integer(x), do: x >= 0, else: bad_member(x, :nat))
   def member?(x, :int), do: is_integer(x) or bad_member(x, :int)
-  def member?(x, :string), do: is_binary(x)
+  def member?(x, :string), do: is_binary(x) or bad_member(x, :string)
   def member?(_x, :any), do: true
 
   def member?(x, {:subset, s} = set) do
@@ -1238,14 +1248,14 @@ defmodule Accord.TLA.Checker.Value do
     k = canon(x)
 
     if Map.has_key?(m, k),
-      do: {:fun, Map.put(m, k, canon(v))},
+      do: {:fun, Map.put(m, k, part(v))},
       else: error("#{show(x)} is not in the domain of #{show(f)}")
   end
 
   def update({:lazy_fun, d, g} = f, x, v) do
     if infinite?(d) do
       k = canon(x)
-      v = canon(v)
+      v = part(v)
       {:lazy_fun, d, fn y -> if canon(y) == k, do: v, else: g.(y) end}
     else
       update(canon(f), x, v)

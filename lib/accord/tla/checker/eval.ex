@@ -53,10 +53,15 @@ defmodule Accord.TLA.Checker.Eval do
     level: 1,
     # In ENABLED: a variable of an instance that a substitution replaces
     # with an expression can take a value as a pseudo variable, as in TLC.
-    pseudo: false
+    pseudo: false,
+    # In the body of a recursive function definition: function
+    # constructors are lazy (as TLC's FcnLambdaValue), so that the body
+    # can apply the function to a part of its own value.
+    lazy_funs: false
   ]
 
   @core ~w(= /= \\in \\notin \\subseteq \\cup \\cap \\ SUBSET UNION DOMAIN)
+  @expr_ops ["'", "ENABLED", "UNCHANGED", "~", "[]", "<>", "=>", "<=>", "\\equiv", "/\\", "\\/"]
 
   @doc "A new environment for the root scope of a context."
   def new(ctx, opts \\ []) do
@@ -180,6 +185,12 @@ defmodule Accord.TLA.Checker.Eval do
 
   def eval({:tuple, elems}, env), do: Value.tuple(Enum.map(elems, &eval(&1, env)))
 
+  def eval({:func, binds, body}, %{lazy_funs: true} = env) do
+    {domain, _} = fun_domain(binds, env)
+    frozen = freeze(env)
+    {:lazy_fun, domain, fn k -> eval(body, bind_key(frozen, binds, k)) end}
+  end
+
   def eval({:func, binds, body}, env) do
     {domain, keys} = fun_domain(binds, env)
 
@@ -248,6 +259,8 @@ defmodule Accord.TLA.Checker.Eval do
     Value.eq?(eval(e, %{env | primed: true}), eval(e, env))
   end
 
+  # ENABLED is not a constant expression (its level is at least 1).
+  def eval({:enabled, _}, %{state: nil}), do: error("ENABLED is used in a constant expression")
   def eval({:enabled, a}, env), do: enabled?(a, env)
 
   def eval({:box_action, a, sub}, env) do
@@ -284,10 +297,22 @@ defmodule Accord.TLA.Checker.Eval do
 
   # -- Core operators --
 
+  # `x \\in {y \\in S : P}`: TLC does not enumerate the set (SetPredValue):
+  # x is in S, and P holds for x.
+  defp member?(x, {:set_filter, {target, set}, pred}, env),
+    do: Value.member?(x, set |> eval(env) |> normal_base()) and bool(pred, bind(env, target, x))
+
+  defp member?(x, set, env), do: Value.member?(x, eval(set, env))
+
+  # TLC normalizes the set of a set filter (an error for a set of values
+  # that it cannot compare).
+  defp normal_base(%MapSet{} = s), do: Value.normalize!(s)
+  defp normal_base(s), do: s
+
   defp core("=", [a, b], env), do: Value.eq?(eval(a, env), eval(b, env))
   defp core("/=", [a, b], env), do: not Value.eq?(eval(a, env), eval(b, env))
-  defp core("\\in", [a, b], env), do: Value.member?(eval(a, env), eval(b, env))
-  defp core("\\notin", [a, b], env), do: not Value.member?(eval(a, env), eval(b, env))
+  defp core("\\in", [a, b], env), do: member?(eval(a, env), b, env)
+  defp core("\\notin", [a, b], env), do: not member?(eval(a, env), b, env)
   defp core("\\subseteq", [a, b], env), do: Value.subseteq?(eval(a, env), eval(b, env))
   defp core("\\cup", [a, b], env), do: Value.union(eval(a, env), eval(b, env))
   defp core("\\cap", [a, b], env), do: Value.intersection(eval(a, env), eval(b, env))
@@ -383,6 +408,10 @@ defmodule Accord.TLA.Checker.Eval do
     case Map.fetch(env.bound, op) do
       {:ok, {:let_def, d, closure}} ->
         call_let(d, op, closure, prepare(args, d.params, env), env)
+
+      # A built-in operator that takes expressions, not values (as `'`).
+      {:ok, {:op_value, _, _, {:named, sym, _}}} when sym in @expr_ops ->
+        expr_op(sym, args, env)
 
       {:ok, {:op_value, _, _, _} = opv} ->
         apply_op(opv, Enum.map(args, &arg_value(&1, env)), env)
@@ -733,7 +762,25 @@ defmodule Accord.TLA.Checker.Eval do
       {:op_value, "LAMBDA", length(params),
        {:lambda, params, body, env.scope, env.bound, env.frames}}
 
-  def op_value({:op_arg, sym}, env), do: {:op_value, sym, 2, {:named, sym, env.scope}}
+  def op_value({:op_arg, sym}, env), do: {:op_value, sym, op_arity(sym), {:named, sym, env.scope}}
+
+  defp op_arity(sym) when sym in ["=>", "<=>", "\\equiv", "/\\", "\\/"], do: 2
+  defp op_arity(sym) when sym in @expr_ops or sym in ~w(-. SUBSET UNION DOMAIN ^+ ^* ^#), do: 1
+  defp op_arity(_), do: 2
+
+  # The built-in operators that an argument can name, and that act on
+  # expressions.
+  defp expr_op("'", [a], env), do: eval({:prime, a}, env)
+  defp expr_op("ENABLED", [a], env), do: eval({:enabled, a}, env)
+  defp expr_op("UNCHANGED", [a], env), do: eval({:unchanged, a}, env)
+  defp expr_op("~", [a], env), do: eval({:not, a}, env)
+  defp expr_op("[]", [a], env), do: eval({:always, a}, env)
+  defp expr_op("<>", [a], env), do: eval({:eventually, a}, env)
+  defp expr_op("=>", [a, b], env), do: eval({:implies, a, b}, env)
+  defp expr_op(op, [a, b], env) when op in ["<=>", "\\equiv"], do: eval({:equiv, a, b}, env)
+  defp expr_op("/\\", [a, b], env), do: eval({:and, [a, b]}, env)
+  defp expr_op("\\/", [a, b], env), do: eval({:or, [a, b]}, env)
+  defp expr_op(sym, args, _env), do: error("the operator #{sym} takes 1 argument, not #{length(args)}")
 
   def op_value({:name, n, _}, env) do
     case Map.fetch(env.bound, n) do
@@ -759,6 +806,9 @@ defmodule Accord.TLA.Checker.Eval do
 
       {:let, d, closure} ->
         call_let(d, d.name, closure, values, env)
+
+      {:named, name, _scope} when name in @expr_ops ->
+        expr_op(name, exprs, env)
 
       {:named, name, scope} ->
         env2 = %{env | scope: scope}
@@ -996,8 +1046,31 @@ defmodule Accord.TLA.Checker.Eval do
   defp fun_def_value(d, env) do
     {domain, _} = fun_domain(d.binds, env)
     frozen = freeze(env)
+    frozen = if recursive?(d), do: %{frozen | lazy_funs: true}, else: frozen
     {:lazy_fun, domain, fn k -> eval(d.body, bind_key(frozen, d.binds, k)) end}
   end
+
+  # A function definition that uses its own name in its body.
+  defp recursive?(d) do
+    key = {:tla_recursive, d.name, :erlang.phash2(d.body)}
+
+    case Process.get(key) do
+      nil ->
+        v = uses_name?(d.body, d.name)
+        Process.put(key, v)
+        v
+
+      v ->
+        v
+    end
+  end
+
+  defp uses_name?({:name, n, _}, n), do: true
+  defp uses_name?({:app, n, _, _}, n), do: true
+  defp uses_name?(t, n) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&uses_name?(&1, n))
+  defp uses_name?(l, n) when is_list(l), do: Enum.any?(l, &uses_name?(&1, n))
+  defp uses_name?(%{} = m, n) when not is_struct(m), do: m |> Map.values() |> uses_name?(n)
+  defp uses_name?(_, _), do: false
 
   # An environment for a closure: no generation, no partial state.
   defp freeze(env), do: %{env | gen: false}
@@ -1031,8 +1104,39 @@ defmodule Accord.TLA.Checker.Eval do
   @doc "`ENABLED a` in the current state."
   def enabled?(a, env) do
     if env.primed, do: error("ENABLED inside a primed expression")
-    env = %{env | next: %{}, gen: true, label_mode: false, pseudo: true}
+    # As TLC's Context.branch: the substitutions of the instances that
+    # are open here do not give the primed variables inside ENABLED. A
+    # primed variable of such an instance is a free (pseudo) variable.
+    # The cut is in `frames`, so that an argument that the caller gave
+    # before ENABLED (a thunk with its own frames) is not cut.
+    chain = scope_chain(env.ctx, env.scope, MapSet.new())
+    frames = Map.update(env.frames, :cut, chain, &MapSet.union(&1, chain))
+    env = %{env | next: %{}, gen: true, label_mode: false, pseudo: true, frames: frames}
     gen(a, env, :next) != []
+  end
+
+  # The scope and the scopes of the instances that contain it.
+  defp scope_chain(ctx, sid, acc) do
+    if MapSet.member?(acc, sid) do
+      acc
+    else
+      acc = MapSet.put(acc, sid)
+
+      ctx.scopes
+      |> Map.fetch!(sid)
+      |> Map.fetch!(:ops)
+      |> Enum.reduce(acc, fn
+        {_, {:subst, _, outer, _}}, acc -> scope_chain(ctx, outer, acc)
+        _, acc -> acc
+      end)
+    end
+  end
+
+  defp cut?(env) do
+    case env.frames do
+      %{cut: scopes} -> env.pseudo and MapSet.member?(scopes, env.scope)
+      _ -> false
+    end
   end
 
   # -- Generation --
@@ -1597,6 +1701,15 @@ defmodule Accord.TLA.Checker.Eval do
 
   defp def_body(_, _env), do: :no
 
+  defp subst_var(n, env) do
+    {:subst, expr, outer, frame} = Context.lookup(env.ctx, env.scope, n)
+
+    case var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
+      :no when env.pseudo -> {:ok, {:pseudo, env.scope, n}}
+      other -> other
+    end
+  end
+
   defp var_of_entry(n, env) do
     case Context.lookup(env.ctx, env.scope, n) do
       {:var, i} ->
@@ -1612,11 +1725,11 @@ defmodule Accord.TLA.Checker.Eval do
           :no -> :no
         end
 
-      {:subst, expr, outer, frame} ->
-        case var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
-          :no when env.pseudo -> {:ok, {:pseudo, env.scope, n}}
-          other -> other
-        end
+      {:subst, _, _, _} when env.pseudo ->
+        if cut?(env), do: {:ok, {:pseudo, env.scope, n}}, else: subst_var(n, env)
+
+      {:subst, _, _, _} ->
+        subst_var(n, env)
 
       _ ->
         :no
@@ -1675,9 +1788,13 @@ defmodule Accord.TLA.Checker.Eval do
         unchanged_vars(d.body, %{env | scope: sid, bound: %{}})
 
       {:subst, expr, outer, frame} ->
-        case unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
-          :complex when env.pseudo -> {:ok, [{:pseudo, env.scope, n}]}
-          other -> other
+        if cut?(env) do
+          {:ok, [{:pseudo, env.scope, n}]}
+        else
+          case unchanged_vars(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
+            :complex when env.pseudo -> {:ok, [{:pseudo, env.scope, n}]}
+            other -> other
+          end
         end
 
       _ ->

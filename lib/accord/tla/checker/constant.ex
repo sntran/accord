@@ -144,10 +144,15 @@ defmodule Accord.TLA.Checker.Constant do
       {:value, _} -> true
       {:def, d, sid} -> body?(d, ctx, sid)
       {:alias, sid, target} -> entry?(Context.lookup(ctx, sid, target), ctx)
-      {:subst, expr, outer, _} -> expr?(expr, ctx, outer, MapSet.new())
+      {:subst, expr, outer, frame} -> not let_frame?(ctx, frame) and expr?(expr, ctx, outer, MapSet.new())
       _ -> false
     end
   end
+
+  # A substitution of an INSTANCE inside LET can give a name of the LET
+  # (a state expression), which the analysis does not see.
+  defp let_frame?(ctx, frame),
+    do: Enum.any?(ctx.let_instances, fn {_, {_, f}} -> f == frame end)
 
   # A definition with parameters: its body with the parameters as local
   # names (the arguments are checked where it is applied).

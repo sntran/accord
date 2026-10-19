@@ -394,7 +394,24 @@ defmodule Accord.TLA.Checker.Spec do
         name_level(n, [], env, seen)
 
       {:app, n, args, _} ->
-        max_level([name_level(n, args, env, seen) | Enum.map(args, &level(&1, env, seen))])
+        arg_levels = Enum.map(args, &level(&1, env, seen))
+
+        entry =
+          if Map.has_key?(env.bound, n), do: nil, else: Context.lookup(env.ctx, env.scope, n)
+
+        case app_level(entry, arg_levels, env, seen) do
+          nil -> max_level([name_level(n, args, env, seen) | arg_levels])
+          l -> l
+        end
+
+      {:inst, path, name, args, _} when args != [] and not is_integer(name) ->
+        {_, env2} = navigate(Enum.map(path, fn {s, _} -> {s, []} end), env)
+        arg_levels = Enum.map(args, &level(&1, env, seen))
+
+        case app_level(Context.lookup(env.ctx, env2.scope, name), arg_levels, env2, seen) do
+          nil -> max_level([inst_level(path, name, args, env, seen) | arg_levels])
+          l -> l
+        end
 
       {:inst, path, name, args, _} ->
         inst_level(path, name, args, env, seen)
@@ -452,6 +469,10 @@ defmodule Accord.TLA.Checker.Spec do
       {:ok, {:thunk, _, e, scope, bound, _, _}} ->
         level(e, %{env | scope: scope, bound: bound}, seen)
 
+      # A parameter of an operator: the level of its argument.
+      {:ok, {:level, l}} ->
+        l
+
       {:ok, _} ->
         :state
 
@@ -496,6 +517,34 @@ defmodule Accord.TLA.Checker.Spec do
         :state
     end
   end
+
+  # The level of `Op(args)` for a definition with parameters: the level
+  # of the body, with each parameter at the level of its argument. Thus
+  # an argument under ENABLED does not give its level to the result (as
+  # SANY). `nil` when the entry is not such a definition.
+  defp app_level({:def, %{kind: :op, params: ps} = d, sid}, arg_levels, env, seen)
+       when ps != [] and length(ps) == length(arg_levels) do
+    key = {sid, d.name}
+
+    if MapSet.member?(seen, key) do
+      nil
+    else
+      memo = {env.ctx.id, key, arg_levels}
+
+      case Map.get(Process.get(:tla_levels) || %{}, memo) do
+        nil ->
+          bound = ps |> Enum.map(&elem(&1, 0)) |> Enum.zip(Enum.map(arg_levels, &{:level, &1})) |> Map.new()
+          l = level(d.body, %{env | scope: sid, bound: bound}, MapSet.put(seen, key))
+          Process.put(:tla_levels, Map.put(Process.get(:tla_levels) || %{}, memo, l))
+          l
+
+        l ->
+          l
+      end
+    end
+  end
+
+  defp app_level(_entry, _arg_levels, _env, _seen), do: nil
 
   defp inst_level(path, name, _args, env, seen) when is_integer(name) do
     {:def, _d, sid} = entry = Eval.inst_entry(path, name, env)

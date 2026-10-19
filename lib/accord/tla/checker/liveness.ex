@@ -259,7 +259,12 @@ defmodule Accord.TLA.Checker.Liveness do
 
       {{:value, {v, q} = node}, queue} ->
         x = Map.fetch!(index, node)
-        steps = [{v, nil} | elem(graph.succ, v)]
+        # `no_stutter`: the states without a stuttering step (the last
+        # state of a trace in TLC's experimental liveness simulation).
+        steps =
+          if MapSet.member?(Map.get(graph, :no_stutter, MapSet.new()), v),
+            do: elem(graph.succ, v),
+            else: [{v, nil} | elem(graph.succ, v)]
 
         {queue, index, parents, edges} =
           Enum.reduce(steps, {queue, index, parents, edges}, fn {w, label}, acc ->

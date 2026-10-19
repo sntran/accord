@@ -103,7 +103,7 @@ defmodule Accord.TLA.Checker.Config do
   end
 
   defp tokens(text) do
-    ~r/"(?:[^"\\]|\\.)*"|<-|-?\d+|[A-Za-z0-9_]+|[{}\[\](),=]/
+    ~r/"(?:[^"\\]|\\.)*"|<-|[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*|-?\d+|\\[A-Za-z]+|[{}\[\](),=]|[-+*\/^&|$%#@!?<>=.:~]+/
     |> Regex.scan(text)
     |> List.flatten()
   end
