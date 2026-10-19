@@ -107,6 +107,56 @@ config only. It does not use the TLA+ passes, so a defect in the
 translation makes the explorer and TLC disagree. `Accord.CrossCheck`
 compares the two. See ADR-012 and `docs/cross-check.md`.
 
+## Native TLA+ checker
+
+The `.tla` and `.cfg` files go to a model checker. The default is
+`Accord.TLA.Checker`, a TLA+ model checker in Elixir; TLC is an option
+for a comparison (`Accord.TLA.Engine`). See ADR-013.
+
+```
+.tla + .cfg ──▶ Lexer ──▶ Parser ──▶ Context (modules, scopes, config)
+                                          │
+                      Semantic (the checks of SANY; an error stops here)
+                                          │
+                     Spec (Init, actions, properties) ◀──┘
+                                          │
+              Search (BFS, the order of TLC) ──▶ Liveness (SCC, fairness)
+                                          │
+                       Eval (evaluation and generation of next states)
+```
+
+- `Lexer`, `Parser`: the TLA+ syntax, with the column rules of `/\` and
+  `\/` lists. `Config`: the `.cfg` syntax.
+- `Context`: the root module, the modules that it extends or
+  instantiates, the config values and replacements, and one scope for
+  each module.
+- `Semantic`: the semantic checks of SANY (names, arguments, `INSTANCE`,
+  `RECURSIVE`, labels, proofs), the level checks (`Semantic.Level`, a
+  port of the level checker of SANY), and the warnings of SANY
+  (`Semantic.Lint`). An error stops the check with `ERROR_SPEC_PARSE`,
+  as in TLC. `StandardModules` has the texts of the standard modules of
+  SANY, for the names and the levels of their operators.
+- `Eval`: evaluation, and the generation of next states with the rules
+  of TLC (conjuncts from left to right; `x' = e` and `x' \in S` assign).
+  `Stdlib` and `Community` are the standard and community modules in
+  Elixir.
+- `Spec`: the parts of the specification, the split of the next-state
+  action into named actions, and the properties as obligations.
+- `Search`: the breadth-first search, with the order of the checks of
+  TLC. `Liveness` and `Temporal`: the liveness check (tableau, product
+  graph, strongly connected components, fairness).
+- `Machine`: one step at a time, for the runtime monitor of `Accord.Spec`.
+
+## Contracts in TLA+ files
+
+`Accord.Spec` is a second source of contracts: a hand-written TLA+ file
+in place of the IR. `Accord.Spec.Monitor` maps each message to a TLA+
+action with the callbacks of the contract module, and computes the next
+states with `Accord.TLA.Checker.Machine`. The blame rules are those of
+the IR monitor: a call or a cast that the specification does not allow
+blames the client, a wrong reply or event blames the server. See
+ADR-014.
+
 ## Blame assignment semantics
 
 When the monitor detects a protocol violation, it assigns blame to one of three

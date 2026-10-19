@@ -192,8 +192,17 @@ real stuck state. Checks the model cannot express (`ordered`, `precedence`,
 keyed correspondence) are labeled runtime-only in the spec and in the check
 output.
 
-TLC requires Java and `tla2tools.jar`. Set the `TLA2TOOLS_JAR` environment
-variable, place it at `~/.tla/tla2tools.jar`, or in the project root.
+The checker is `Accord.TLA.Checker`, a TLA+ model checker in Elixir. It
+reads the `.tla` and `.cfg` files and checks them with the rules of TLC,
+so Java is not necessary. `--engine tlc` (or `ACCORD_TLA_ENGINE=tlc`)
+runs TLC in its place, for a comparison with the reference checker; TLC
+needs Java and `tla2tools.jar` (set `TLA2TOOLS_JAR`, or put it at
+`~/.tla/tla2tools.jar` or in the project root).
+
+The native checker passes the test models of TLC and the models of the
+TLA+ Examples repository, with the same counts of states as TLC. See
+[`docs/tla-conformance.md`](docs/tla-conformance.md) for the results and
+for the models that it does not run, with the reason for each.
 
 ## Native explorer and cross-check
 
@@ -216,6 +225,46 @@ mix accord.explore                     # check all protocols, no Java
 mix accord.crosscheck                  # compare with TLC
 mix accord.crosscheck --random 50      # 50 random protocols
 ```
+
+## TLA+ files as contracts
+
+You can also write the contract directly in TLA+, as other TLA+ users do,
+and monitor a real process against it:
+
+```tla
+---- MODULE Lock ----
+CONSTANT Clients
+VARIABLE holder
+Init == holder = "none"
+Acquire(c, r) ==
+    \/ holder = "none" /\ r = "ok" /\ holder' = c
+    \/ holder # "none" /\ r = "busy" /\ UNCHANGED holder
+Release(c, r) == holder = c /\ r = "ok" /\ holder' = "none"
+Next == \E c \in Clients, r \in {"ok", "busy"} : Acquire(c, r) \/ Release(c, r)
+====
+```
+
+```elixir
+defmodule Lock.Contract do
+  use Accord.Spec, file: "Lock.tla"
+end
+
+{:ok, monitor} = Accord.Spec.Monitor.start_link(Lock.Contract, upstream: server)
+:ok = Accord.Spec.Monitor.call(monitor, {:acquire, :c1})
+```
+
+Each message names a TLA+ action. By default the name matches: the call
+`{:acquire, :c1}` with the reply `:ok` is the step `Acquire(c1, "ok")`.
+For other messages, override the callbacks `handle_call/2`,
+`handle_cast/1`, and `handle_info/1` of the `Accord.Spec` behaviour; each
+gives `{:action, name, args}` or `:ignore`.
+
+The monitor keeps the states of the specification that the run can be
+in. When a message is not a step of the specification, the monitor finds
+the side to blame: the client, when the action does not allow the request
+with any reply; the server, when the action allows other replies only.
+The model checker (`mix accord.check --extra Lock.tla`) checks the same
+file.
 
 ## Rolling upgrades
 

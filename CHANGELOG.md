@@ -4,6 +4,58 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Native TLA+ model checker
+
+- `Accord.TLA.Checker` — a TLA+ model checker in Elixir. It has a lexer,
+  a parser, and an evaluator for TLA+, and it reads `.tla` and `.cfg`
+  files. It follows the rules of TLC: the generation of next states, the
+  split of the next-state action into actions, the order of the checks,
+  the counts of states, the error traces, and the exit codes. It checks
+  invariants, action properties, liveness (with weak and strong
+  fairness), deadlock, `ASSUME`, `CONSTRAINT`, `ACTION_CONSTRAINT`,
+  `SYMMETRY`, `VIEW`, `POSTCONDITION`, and `_POSSIBLE`. The standard
+  modules and many community modules are in Elixir.
+- `Accord.TLA.Engine` — runs a check with the native checker (the
+  default) or with TLC (`engine: :tlc`, or `ACCORD_TLA_ENGINE=tlc`).
+  `mix accord.check`, `--extra`, `Accord.TLA.TraceSpec`,
+  `Accord.Test.TLACheck`, and the trace check of the exerciser use it, so
+  Java is not necessary. `mix accord.check --engine tlc` and
+  `mix accord.crosscheck --reference tlc` use TLC.
+- The random values (`RandomElement`, the `Randomization` module) are
+  the values of TLC for the same seed (`:seed`): the checker has the
+  generator of `java.util.Random`, the algorithms of TLC, and the
+  fingerprints of TLC (`TLCFP`).
+- Strings and model values are in the order of TLC (the order in which
+  TLC first makes them), for sets, `CHOOSE`, and printing.
+- Modes of TLC: random simulation (`:simulate`, TLC's `-simulate` with
+  `num` and `-depth`), `:continue` (`-continue`), `:max_depth` (the
+  results of `-dfid`), `:stop_after` (time-bound checking), `:workers`
+  (the registers of each worker), and `:coverage` (the counts of states
+  of each action in `TLCGet("spec")`).
+- `TLCGet("spec")`, `TLCGet("revision")`, and `TLCSet("exit", TRUE)`.
+- `Accord.TLA.Checker.Semantic` — the semantic checks of SANY: names,
+  arguments, `INSTANCE` substitutions, `RECURSIVE`, levels (a port of
+  the level checker of SANY), labels, subexpression names, proofs, and
+  the warnings of SANY (conflicts of names, record fields, PlusCal
+  checksums). The checker stops on a semantic error with
+  `ERROR_SPEC_PARSE`, as TLC does.
+- `docs/tla-conformance.md` — the results of the test suite of TLC, of
+  the tests of SANY, and of the TLA+ Examples, and the tests that the
+  checker does not run.
+- The check cache key has the engine and its version.
+- `Accord.TLA.Checker.Machine` — runs the actions of a specification one
+  step at a time, for runtime monitors.
+
+### TLA+ files as contracts
+
+- `Accord.Spec` — a behaviour for contracts in a TLA+ file:
+  `use Accord.Spec, file: "lock.tla"`. The callbacks `handle_call/2`,
+  `handle_cast/1`, and `handle_info/1` map messages to TLA+ actions; the
+  default callbacks match by name.
+- `Accord.Spec.Monitor` — a proxy process that monitors a server against
+  the TLA+ contract, with blame on the client or the server.
+- `Accord.Violation` has the new kind `:spec_error`.
+
 ### Native explorer and cross-check
 
 - `Accord.Explore` — a native explicit-state model checker. It runs the

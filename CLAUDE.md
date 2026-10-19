@@ -1,6 +1,6 @@
 # Accord
 
-Protocol contracts for Elixir in the lineage of Joe Armstrong's UBF (2002): one specification, checked twice — a runtime blame-assigning monitor and a TLA+ model checked by TLC.
+Protocol contracts for Elixir in the lineage of Joe Armstrong's UBF (2002): one specification, checked twice — a runtime blame-assigning monitor and a TLA+ model checked by the native Elixir checker (or TLC).
 
 ## What it does
 
@@ -9,13 +9,13 @@ Accord lets you declare a two-party protocol (states, transitions with typed rep
 1. Builds an intermediate representation (IR) from the DSL.
 2. Validates the IR through a pipeline of passes (errors E001–E061, warnings W001–W005).
 3. Generates a runtime monitor (gen_statem proxy) that checks messages at runtime, with blame derived from message direction (`:client` | `:server` | `:property`, labeled with declared role names). Monitors can arm `state_timeout` transitions and capture traces (`trace_sink:`).
-4. Generates a TLA+ specification for exhaustive model checking with TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks, `exclusive`, and `distinct`). Captured runtime traces replay against the spec (`Accord.TLA.TraceSpec`, ADR-010); the exerciser samples one per run (`trace_check:`).
+4. Generates a TLA+ specification for exhaustive model checking with the native checker (`Accord.TLA.Checker`, no Java) or TLC — strict by default (`tla: :strict | :warn | :off`), including multi-session checking (`sessions: N` with `shared:` tracks, `exclusive`, and `distinct`). Captured runtime traces replay against the spec (`Accord.TLA.TraceSpec`, ADR-010); the exerciser samples one per run (`trace_check:`).
 
 `mix accord.check` caches passes by content hash (`--force` bypasses), reports stats, dumps raw TLC output (`--dump`), and checks hand-written extension modules (`--extra`). Protocol constants (`const :name, value`) substitute at compile time into every captured expression. `mix accord.compat` gates rolling upgrades: snapshot the released IR, then check old-client compatibility against every change (C001–C010, ADR-011).
 
 ## Architecture
 
-For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–011); the redesign rationale and soundness review are in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md) and [`docs/soundness-review-2026-07.md`](docs/soundness-review-2026-07.md), and open expressiveness work in [`docs/design-expressiveness-roadmap.md`](docs/design-expressiveness-roadmap.md).
+For the two-pipeline design, blame semantics, the runtime-vs-TLC coverage table, closure lifting, pass ordering, error reporting, and module dependency rules, see [`docs/architecture.md`](docs/architecture.md). Design decisions live in [`docs/decisions/`](docs/decisions/) (ADR-001–014); the redesign rationale and soundness review are in [`docs/design-review-2026-07.md`](docs/design-review-2026-07.md) and [`docs/soundness-review-2026-07.md`](docs/soundness-review-2026-07.md), and open expressiveness work in [`docs/design-expressiveness-roadmap.md`](docs/design-expressiveness-roadmap.md).
 
 The IR (`Accord.IR`) is the single source of truth. Two pipelines flow from it:
 
@@ -40,8 +40,13 @@ Coverage is deliberately asymmetric and always declared: constructs TLC cannot e
 | `Accord.TLA.Files` | Single source of `_build/accord/` artifact paths (write/delete) |
 | `Accord.TLA.TLCParser` / `ViolationReport` | TLC stdout → structured results → pentiment diagnostics |
 | `Accord.Violation` | Violation structs with direction-derived blame |
+| `Accord.TLA.Checker` | TLA+ model checker in Elixir (Lexer, Parser, Config, Context, Eval, Stdlib, Community, Spec, Search, Liveness, Temporal); follows TLC rules and counts |
+| `Accord.TLA.Checker.Semantic` | Semantic checks of SANY (names, INSTANCE, RECURSIVE, labels, proofs; `Level`: port of SANY's level checker; `Lint`: SANY warnings); errors stop the checker with `ERROR_SPEC_PARSE` |
+| `Accord.TLA.Checker.Machine` | Runs actions one step at a time (open last parameter for replies), for runtime monitors |
+| `Accord.TLA.Engine` | Runs a check with the native checker (default) or TLC (`engine: :tlc`, `ACCORD_TLA_ENGINE`) |
+| `Accord.Spec` / `Accord.Spec.Monitor` | Contracts in hand-written TLA+ files: behaviour callbacks map messages to actions; proxy monitor with client/server blame |
 | `Accord.Compat` | Static rolling-upgrade simulation over two IRs (C001–C010) + `Snapshot` persistence |
-| `Accord.Test.*` | Shipped harnesses: ProtocolExerciser (propcheck + sampled trace replay), TLACheck (real TLC assertions), TraceCheck, FaultyServer |
+| `Accord.Test.*` | Shipped harnesses: ProtocolExerciser (propcheck + sampled trace replay), TLACheck (model-check assertions, native or TLC), TraceCheck, FaultyServer |
 
 ### Closure lifting
 
@@ -51,7 +56,7 @@ Guards, updates, invariants, and other user-provided functions are anonymous clo
 
 ```bash
 mix test                      # run all tests (includes :tlc tests when tla2tools.jar is available)
-mix test --only tlc           # only the real-TLC integration tests
+mix test --only tlc           # only the tests that need TLC (Java)
 mix format                    # format code
 mix dialyzer                  # static analysis
 mix accord.check              # model-check all protocols (deadlock on by default)
@@ -60,7 +65,7 @@ mix run examples/job_queue/demo.exs   # run an example demo
 
 ## Examples
 
-`examples/` compiles in dev and test (never :prod), so protocol compilation — full validation plus strict TLA+ emission — runs on every example in CI. Each pedagogical example ships a correct server, a seeded design bug pinned by a real TLC run in `test/examples/`, and a demo script. Pedagogical order: circuit_breaker → payment → job_queue (flagship) → genstage_demand. The multi-session showcase is `test/support/protocols/distributed_lock.ex`.
+`examples/` compiles in dev and test (never :prod), so protocol compilation — full validation plus strict TLA+ emission — runs on every example in CI. Each pedagogical example ships a correct server, a seeded design bug pinned by a real model-check run in `test/examples/`, and a demo script. Pedagogical order: circuit_breaker → payment → job_queue (flagship) → genstage_demand. The multi-session showcase is `test/support/protocols/distributed_lock.ex`.
 
 Two examples run the monitor against **real third-party servers** (as dev/test deps): `http2` wires the stream monitor between a raw client and a live Bandit to catch RFC 9113 divergences (see `docs/case-study-http2-bandit.md`), and `phoenix_channels` model-checks the Phoenix Channels lifecycle and taps a real Phoenix endpoint via a one-line wrapping serializer to catch channel-protocol bugs Phoenix leaves unenforced (see `docs/case-study-phoenix-channels.md`).
 
@@ -69,7 +74,7 @@ Two examples run the monitor against **real third-party servers** (as dev/test d
 - Unit tests mirror `lib/` structure in `test/accord/`; example tests in `test/examples/`.
 - Property-based tests (propcheck statem) live in `test/property/`.
 - Test support modules (protocols, servers) in `test/support/`; reusable harnesses ship in `lib/accord/test/`.
-- TLC-dependent tests carry `@tag :tlc` + `:tmp_dir`; `test_helper.exs` excludes them when `tla2tools.jar` is absent.
+- Model-check tests use the native checker by default (`ACCORD_TLA_ENGINE=tlc` runs them with TLC). Tests that need TLC itself carry `@tag :tlc` + `:tmp_dir`; `test_helper.exs` excludes them when `tla2tools.jar` is absent.
 - Use `@moduletag :capture_log` for tests that trigger logged violations.
 - Use `:sys.get_state/1` as a synchronous barrier instead of `timer.sleep`.
 

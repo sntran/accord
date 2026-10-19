@@ -16,3 +16,5 @@ This directory contains architectural decision records (ADRs) for the accord2 pr
 | [010](010-trace-validation.md) | Runtime traces replay against the generated spec via TLC — the only check that can catch accord's own TLA+ compiler mistranslating the protocol. |
 | [011](011-compat-checking.md) | Rolling-upgrade safety via static compatibility checking (`Accord.Compat`) against IR snapshots — the consumer shipped instead of a version macro. |
 | [012](012-native-explorer-cross-check.md) | A native explorer runs the protocol functions on the finite model without TLC, and a cross-check compares it with TLC to find defects in either checker or in the TLA+ translation. |
+| [013](013-native-tla-checker.md) | A TLA+ model checker in Elixir reads `.tla` and `.cfg` files with the rules of TLC; it is the default engine, so accord needs no Java, and TLC stays as an optional reference. |
+| [014](014-tla-file-contracts.md) | `Accord.Spec` makes a contract from a hand-written TLA+ file; behaviour callbacks map messages to actions (name matching by default), and the monitor blames the client or the server. |
