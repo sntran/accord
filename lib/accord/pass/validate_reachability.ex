@@ -9,8 +9,6 @@ defmodule Accord.Pass.ValidateReachability do
   All issues are warnings (logged, not fatal). Returns `{:ok, ir}` always.
   """
 
-  require Logger
-
   alias Accord.IR
   alias Pentiment.Report
 

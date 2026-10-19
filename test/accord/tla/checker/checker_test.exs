@@ -142,6 +142,82 @@ defmodule Accord.TLA.CheckerTest do
     end
   end
 
+  describe "TLC rules" do
+    test "Tail of a string is a string (Head is an error)", %{tmp_dir: dir} do
+      ok =
+        check(
+          dir,
+          "Str",
+          "EXTENDS Sequences\nASSUME Tail(\"abc\") = \"bc\" /\\ Tail(\"a\") = \"\"",
+          ""
+        )
+
+      assert ok.status == :ok
+
+      r = check(dir, "Str2", "EXTENDS Sequences\nASSUME Head(\"abc\") = \"a\"", "")
+      assert r.kind == :assumption
+
+      assert r.message =~
+               "Evaluating assumption line 3, col 8 to line 3, col 24 of module Str2 failed."
+    end
+
+    test "an operator argument that reads a variable in an initial predicate", %{tmp_dir: dir} do
+      # The value of `var` (the argument `s`) changes while the initial
+      # predicate assigns s: the cache of argument values must see it.
+      tla = """
+      EXTENDS Integers
+      VARIABLE s
+      InitExit(var, S) == \\E val \\in S : (var = val /\\ var > 0)
+      Init == InitExit(s, {0, 1})
+      Next == UNCHANGED s
+      """
+
+      r = check(dir, "ArgInit", tla, "INIT Init\nNEXT Next\n")
+      assert r.status == :ok
+      assert r.stats.distinct == 1
+    end
+
+    test "the time limit holds for the initial states", %{tmp_dir: dir} do
+      tla = "EXTENDS Naturals\nVARIABLE x\nInit == x \\in 1..100000\nNext == UNCHANGED x"
+      r = check(dir, "Slow", tla, "INIT Init\nNEXT Next\n", stop_after: 0)
+      assert r.status == :incomplete
+    end
+  end
+
+  describe "fairness in a property" do
+    # `F => P` with 16 strong fairness conditions in F: TLC's form has
+    # 2^16 disjuncts; the checker adds F to the fairness of the
+    # specification for this property. The verdicts are those of TLC.
+    defp fair16(k) do
+      sf = Enum.map_join(1..k, " /\\ ", &"SF_vars(B(#{&1}))")
+
+      """
+      EXTENDS Naturals
+      VARIABLE st, c
+      vars == <<st, c>>
+      Init == st = "idle" /\\ c = 0
+      A(i) == st = "idle" /\\ st' = "busy" /\\ c' = i
+      B(i) == st = "busy" /\\ c = i /\\ st' = "done" /\\ UNCHANGED c
+      R == st = "done" /\\ st' = "idle" /\\ c' = 0
+      Next == R \\/ \\E i \\in 1..16 : A(i) \\/ B(i)
+      Spec == Init /\\ [][Next]_vars
+      Prop == (#{sf}) => (st = "busy" ~> st = "done")
+      """
+    end
+
+    test "holds with all the conditions", %{tmp_dir: dir} do
+      r = check(dir, "Fair16", fair16(16), "SPECIFICATION Spec\nPROPERTY Prop\n")
+      assert r.status == :ok
+      assert {r.stats.generated, r.stats.distinct} == {49, 33}
+    end
+
+    test "is violated without one condition", %{tmp_dir: dir} do
+      r = check(dir, "Fair15", fair16(15), "SPECIFICATION Spec\nPROPERTY Prop\n")
+      assert r.status == :violated
+      assert r.kind == :temporal
+    end
+  end
+
   describe "modules" do
     test "an instance inside LET", %{tmp_dir: dir} do
       File.write!(

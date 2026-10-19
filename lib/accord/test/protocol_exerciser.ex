@@ -605,8 +605,6 @@ defmodule Accord.Test.ProtocolExerciser do
     }
   end
 
-  defp transition_info(nil), do: nil
-
   defp transition_info(transition) do
     %{
       pattern: transition.message_pattern,

@@ -138,8 +138,7 @@ defmodule Accord.TLA.Checker.ValueStream do
   end
 
   defp read_unique_string(<<_tok::32, _loc::32, len::signed-32, rest::binary>>) do
-    <<bytes::binary-size(len), rest::binary>> = rest
-    {bytes, rest}
+    {binary_part(rest, 0, len), binary_part(rest, len, byte_size(rest) - len)}
   end
 
   defp read_nat(<<n::signed-16, rest::binary>>) when n >= 0, do: {n, rest}

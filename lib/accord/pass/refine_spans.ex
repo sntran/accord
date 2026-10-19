@@ -64,7 +64,6 @@ defmodule Accord.Pass.RefineSpans do
 
   defp message_pattern_string(_), do: nil
 
-  defp refine_span_to_token(nil, _lines, _target), do: nil
   defp refine_span_to_token(span, _lines, nil), do: span
 
   defp refine_span_to_token(%Span.Position{start_line: line} = span, lines, target) do

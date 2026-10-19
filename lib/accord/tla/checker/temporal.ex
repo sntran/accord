@@ -334,5 +334,4 @@ defmodule Accord.TLA.Checker.Temporal do
 
   defp contra({:lit, id, pol}), do: {:lit, id, not pol}
   defp contra(true), do: false
-  defp contra(false), do: true
 end

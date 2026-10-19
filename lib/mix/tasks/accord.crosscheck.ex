@@ -124,7 +124,7 @@ defmodule Mix.Tasks.Accord.Crosscheck do
       |> Enum.map(fn {:ok, report} -> report end)
 
     if Keyword.get(opts, :keep, false) do
-      Mix.shell().info("TLC files are in #{root}")
+      Mix.shell().info("The TLA+ files are in #{root}")
     else
       File.rm_rf(root)
     end

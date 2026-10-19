@@ -175,11 +175,7 @@ defmodule Accord.TLA.TLCParser do
 
           # Non-assignment, non-state line after trace starts — end of trace.
           true ->
-            if current != [] do
-              {[Enum.reverse(current) | blocks], []}
-            else
-              {blocks, current}
-            end
+            {[Enum.reverse(current) | blocks], []}
         end
       end)
 

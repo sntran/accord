@@ -51,7 +51,15 @@ defmodule Accord.TLA.Checker.Random do
   def at_state({_id, _values} = current), do: Process.put(:tla_random_state, current)
 
   defp generator do
-    g = Process.get(:tla_random) || (setup() && Process.get(:tla_random))
+    g =
+      case Process.get(:tla_random) do
+        nil ->
+          setup()
+          Process.get(:tla_random)
+
+        g ->
+          g
+      end
 
     case Process.get(:tla_random_state) do
       {id, values} when g.at != id ->

@@ -39,6 +39,27 @@ All notable changes to this project are documented in this file.
   the warnings of SANY (conflicts of names, record fields, PlusCal
   checksums). The checker stops on a semantic error with
   `ERROR_SPEC_PARSE`, as TLC does.
+- The parser uses the precedence ranges of SANY: two operators next to
+  each other whose ranges overlap (`1 < 2 < 3`, `a * -b`, `[]x = 1`,
+  `P \/ Q /\ R`, `A => B => C`) are a parse error, as in TLC, unless
+  they are the same left-associative operator.
+- A liveness property `F => P`, where F is a conjunction of `WF_` and
+  `SF_` conditions (the form that accord writes for `assuming:`), is
+  checked as `P` with F as more fairness for this property: one check in
+  place of 2^n checks for n strong conditions. The verdict is the same.
+- Faster evaluation: the arguments of an operator are evaluated one time
+  in an action (the key has the partial next state), a definition of
+  state or action level is evaluated one time for each state (unless its
+  value can change: random values, `TLCGet`, side effects), and a set
+  filter of a large set is lazy, as TLC's `SetPredValue` (`x \in D`
+  does not enumerate D).
+- The liveness check keeps the values of its predicates in a bit set for
+  each state and step: less memory.
+- `Tail` of a string gives a string, as in TLC. The message of an
+  assumption that fails gives its range, as in TLC. The time limit
+  (`:stop_after`) holds also for the initial states.
+- No compile warnings with Elixir 1.20 (a binary match with a size from
+  outside the match, clauses that cannot match, an unused `require`).
 - `docs/tla-conformance.md` — the results of the test suite of TLC, of
   the tests of SANY, and of the TLA+ Examples, and the tests that the
   checker does not run.

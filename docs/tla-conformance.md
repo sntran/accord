@@ -151,6 +151,13 @@ The checks of SANY that the checker has:
   4801), record fields with the name of a definition (4802), and the
   checksums of PlusCal translations (4803 to 4805).
 
+The parser also has the precedence check of SANY (`OperatorStack.java`):
+each operator has a precedence range and an associativity, and two
+operators next to each other whose ranges overlap are a parse error,
+unless they are the same left-associative operator (for example
+`1 < 2 < 3`, `a * -b`, `[]x = 1`, `P \/ Q /\ R`, `A => B => C`). The
+parser tests have 52 expressions with the result of SANY for each.
+
 The checksum of a PlusCal algorithm is the CRC32 of the syntax tree that
 the PlusCal translator makes. The checker has no PlusCal translator.
 Thus it finds a changed algorithm only when the recorded checksum is not
@@ -167,20 +174,19 @@ that the manifests give a run time of 30 seconds or less for (with TLC).
 
 | Result | Models |
 |---|---|
-| Same result and same counts of states as the manifest, in 120 seconds or less | 125 |
-| Same result and same counts of states, in more than 120 seconds (up to 25 minutes) | 7 |
-| Not finished (time or memory limit) | 8 |
+| Same result and same counts of states as the manifest, in 120 seconds or less | 126 |
+| Same result and same counts of states, in more than 120 seconds (up to 25 minutes) | 8 |
+| Not finished (time or memory limit) | 6 |
 | Different | 0 |
 
-The 7 slow models are `MCCRDT`, `BufferedRandomAccessFile`,
-`MCCheckpointCoordinationFailure`, `MCDisruptor_MPMC`, `MCbtree`,
-`FastPaxos`, and `EWD998PCal`. The 8 models that do not finish are
-`GameOfLife`, `MCQuicksort`, and `TLCSailfish1` (not finished in 25
-minutes), and `MCBakery`,
-`MultiPaxos_MC_small`, `MCLamportMutex`, `CoffeeCan1000Beans`, and
-`MCNanoMedium` (more than 3 GB of memory). The checker keeps each state
-as an Elixir term, which takes more memory than the fingerprints and
-the compact states of TLC.
+The 8 slow models are `MCCRDT`, `GameOfLife` (115 seconds when it runs
+alone), `BufferedRandomAccessFile`, `MCCheckpointCoordinationFailure`,
+`MCDisruptor_MPMC`, `MCbtree`, `FastPaxos`, and `EWD998PCal`. The 6
+models that do not finish are `TLCSailfish1` (not finished in 25
+minutes), and `MCBakery`, `MultiPaxos_MC_small`, `MCLamportMutex`,
+`CoffeeCan1000Beans`, and `MCNanoMedium` (more than 3 GB of memory). The
+checker keeps each state as an Elixir term, which takes more memory than
+the fingerprints and the compact states of TLC.
 
 ## Tests that the script does not run
 

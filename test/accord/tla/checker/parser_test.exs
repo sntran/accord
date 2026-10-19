@@ -30,9 +30,10 @@ defmodule Accord.TLA.Checker.ParserTest do
     end
 
     test "logic" do
-      assert e("a /\\ b \\/ c") == {:or, [{:and, [n("a"), n("b")]}, n("c")]}
+      assert e("(a /\\ b) \\/ c") == {:or, [{:and, [n("a"), n("b")]}, n("c")]}
       assert e("~a /\\ b") == {:and, [{:not, n("a")}, n("b")]}
-      assert e("a => b => c") == {:implies, n("a"), {:implies, n("b"), n("c")}}
+      assert e("a => (b => c)") == {:implies, n("a"), {:implies, n("b"), n("c")}}
+      assert e("a => b /\\ c") == {:implies, n("a"), {:and, [n("b"), n("c")]}}
       assert e("x \\in S \\cup T") == app("\\in", [n("x"), app("\\cup", [n("S"), n("T")])])
     end
 
@@ -168,6 +169,87 @@ defmodule Accord.TLA.Checker.ParserTest do
     assert mod.constants == [{"N", 0}, {"F", 1}]
     assert mod.variables == ["x"]
     assert Enum.map(mod.units, & &1.name) == ["Init", "Inc", "f", "++", "Next"]
-    assert [{_, _}] = mod.assumes
+    assert [{_, _, _}] = mod.assumes
+  end
+
+  # The results of SANY (TLC 2026.10.15) for each expression: true if
+  # SANY parses it, false for a precedence conflict.
+  @sany_cases [
+    {"TRUE => FALSE => TRUE", false},
+    {"{1} \\cup {2} \\cap {3} = {1}", false},
+    {"1 < 2 < 3", false},
+    {"1 = 1 = TRUE", false},
+    {"2^3^2 = 64", false},
+    {"1 .. 2 .. 3 = {}", false},
+    {"1 \\div 2 * 3 = 0", false},
+    {"7 \\div -2", false},
+    {"a * -b", false},
+    {"a + -b", true},
+    {"a - -b", true},
+    {"a ^ -b", false},
+    {"- - a", true},
+    {"~ ~ P", true},
+    {"~ -a", true},
+    {"[]x = 1", false},
+    {"<>x = 1", false},
+    {"ENABLED x' = x", false},
+    {"UNCHANGED x /\\ P", true},
+    {"UNCHANGED <<x>> = TRUE", false},
+    {"[]P /\\ Q", true},
+    {"[]<>P", true},
+    {"~ [] P", true},
+    {"SUBSET a \\cup b", true},
+    {"SUBSET a \\X b", false},
+    {"SUBSET a + b", false},
+    {"-a * b", true},
+    {"-a'", true},
+    {"[]x'", false},
+    {"a + b * c - d", true},
+    {"a * b / c", false},
+    {"a / b / c", false},
+    {"a \\o b \\o c", true},
+    {"(1 :> 2) @@ (2 :> 3) @@ (3 :> 4)", true},
+    {"a :> b :> c", false},
+    {"a \\in b \\in c", false},
+    {"a | b || c", false},
+    {"a \\cdot b \\cdot c", true},
+    {"a \\cdot b = c", false},
+    {"P => Q /\\ R", true},
+    {"P \\/ Q /\\ R", false},
+    {"P <=> Q <=> R", false},
+    {"P ~> Q ~> R", false},
+    {"P => Q <=> R", true},
+    {"a \\X b \\X c", true},
+    {"a \\X b \\cup c", true},
+    {"a ++ b + c", false},
+    {"a + b .. c", true},
+    {"a \\ b \\cup c", false},
+    {"~ a = b", true},
+    {"-r.f", true},
+    {"a ** b * c", false}
+  ]
+
+  describe "precedence conflicts (as SANY)" do
+    for {src, ok} <- @sany_cases do
+      test src do
+        result =
+          try do
+            Parser.parse_expression(unquote(src))
+            true
+          rescue
+            Parser.Error -> false
+          end
+
+        assert result == unquote(ok)
+      end
+    end
+
+    test "the tree without a conflict" do
+      assert e("a + b * c - d") ==
+               app("+", [n("a"), app("-", [app("*", [n("b"), n("c")]), n("d")])])
+
+      assert e("~ a = b") == {:not, app("=", [n("a"), n("b")])}
+      assert e("SUBSET a \\cup b") == app("\\cup", [app("SUBSET", [n("a")]), n("b")])
+    end
   end
 end

@@ -568,11 +568,6 @@ defmodule Accord.TLA.Checker.Spec do
     end
   end
 
-  defp inst_level(path, name, _args, env, seen) when is_integer(name) do
-    {:def, _d, sid} = entry = Eval.inst_entry(path, name, env)
-    entry_level(entry, %{env | scope: sid}, seen)
-  end
-
   defp inst_level(path, name, _args, env, seen) do
     {_, env2} = navigate(Enum.map(path, fn {s, _} -> {s, []} end), env)
     entry_level(Context.lookup(env.ctx, env2.scope, name), env2, seen)
@@ -594,9 +589,16 @@ defmodule Accord.TLA.Checker.Spec do
   - `{:init, pred}` — a state predicate on the initial states.
   - `{:invariant, pred}` — `[]P` with `P` a state predicate.
   - `{:action, a, sub}` — `[][A]_sub`, on each step.
-  - `{:live, formula, atoms}` — the negation of a temporal formula, for
-    the liveness check (see `Accord.TLA.Checker.Temporal`). `atoms` maps
-    an atom id to `{:state | :action, closure}`.
+  - `{:live, formula, atoms, alt}` — the negation of a temporal formula,
+    for the liveness check (see `Accord.TLA.Checker.Temporal`). `atoms`
+    maps an atom id to `{:state | :action, closure}`. For a property
+    `F => P` where `F` is a conjunction of `WF_` and `SF_` conditions,
+    `alt` is `{formula, atoms, fairness}`: the negation of `P` alone, and
+    the conditions of `F` (in the form of the fairness of `analyze/2`).
+    `Spec => (F => P)` is `(Spec /\\ F) => P`, so the search can check `P`
+    with `F` as more fairness of the specification: one check in place
+    of the 2^n disjuncts that the strong conditions of `F` give. Else
+    `alt` is nil.
   """
   def property(ctx, name, assumptions \\ []) do
     env = Eval.new(ctx)
@@ -670,6 +672,7 @@ defmodule Accord.TLA.Checker.Spec do
           do: ltl(a, %{env | scope: scope, bound: bound, frames: frames}, true)
 
     raw = {:and, [ltl(e, env, false) | assumptions]}
+
     formula = Temporal.simplify(raw)
 
     # TLC finds a tautology only when FALSE comes up through \/ and /\
@@ -677,7 +680,67 @@ defmodule Accord.TLA.Checker.Spec do
     # no counterexample, but it is not a tautology for TLC: {:or, []}.
     formula = if formula == false and not shallow_false?(raw), do: {:or, []}, else: formula
     {formula, atoms} = number_atoms(formula)
-    [{:live, formula, atoms}]
+    [{:live, formula, atoms, fair_implication(e, env, assumptions)}]
+  end
+
+  # `F => P` with F a conjunction of WF_ and SF_ conditions: the negation
+  # of P (with the assumptions), and the conditions of F.
+  defp fair_implication(e, env, assumptions) do
+    with {:ok, {{:implies, f, p}, penv}} <- implication(e, env),
+         {:ok, fairness} <- fair_terms(f, penv) do
+      raw = {:and, [ltl(p, penv, false) | assumptions]}
+      formula = Temporal.simplify(raw)
+      formula = if formula == false and not shallow_false?(raw), do: {:or, []}, else: formula
+      {formula, atoms} = number_atoms(formula)
+      {formula, atoms, fairness}
+    else
+      _ -> nil
+    end
+  rescue
+    # A part that the checker cannot use in this form: the full formula.
+    _ in [Value.Error, CannotHandle] -> nil
+  end
+
+  defp implication({:implies, _, _} = e, env), do: {:ok, {e, env}}
+  defp implication({:label, _, _, e}, env), do: implication(e, env)
+
+  defp implication(e, env) do
+    case expand(e, env) do
+      {:ok, {body, env2}} -> implication(body, env2)
+      :error -> :error
+    end
+  end
+
+  defp fair_terms({kind, sub, a}, env) when kind in [:wf, :sf],
+    do: {:ok, [{strength(kind), closure(sub, env), closure(a, env)}]}
+
+  defp fair_terms({:and, items}, env) do
+    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+      case fair_terms(item, env) do
+        {:ok, fs} -> {:cont, {:ok, acc ++ fs}}
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp fair_terms({:label, _, _, e}, env), do: fair_terms(e, env)
+
+  defp fair_terms({:forall, binds, body}, env) do
+    env
+    |> bindings(binds)
+    |> Enum.reduce_while({:ok, []}, fn benv, {:ok, acc} ->
+      case fair_terms(body, benv) do
+        {:ok, fs} -> {:cont, {:ok, acc ++ fs}}
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp fair_terms(e, env) do
+    case expand(e, env) do
+      {:ok, {body, env2}} -> fair_terms(body, env2)
+      :error -> :error
+    end
   end
 
   # The value of a boolean expression that needs no state, or :error.

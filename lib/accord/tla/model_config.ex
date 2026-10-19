@@ -88,8 +88,8 @@ defmodule Accord.TLA.ModelConfig do
     project_config = load_project_config(project_root)
     protocol_config = load_file_config(protocol_path)
 
-    config = merge(protocol_config, project_config)
-    %{config | max_list_length: config.max_list_length || 3}
+    # `merge/2` gives a max_list_length (3 by default).
+    merge(protocol_config, project_config)
   end
 
   @doc """

@@ -208,8 +208,8 @@ defmodule Accord.TLA.Checker.Stdlib do
   # -- Sequences --
 
   defp op("Seq", [s], _), do: {:seq_set, s}
-  # A string is also a sequence (of characters) for Len, \o and SubSeq,
-  # as in TLC.
+  # A string is also a sequence (of characters) for Len, \o, SubSeq,
+  # and Tail, as in TLC.
   defp op("Len", [s], _) when is_binary(s), do: String.length(s)
   defp op("Len", [s], _), do: s |> seq() |> tuple_size()
   defp op("\\o", [a, b], _) when is_binary(a) and is_binary(b), do: a <> b
@@ -222,6 +222,13 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp op("Append", [s, e], _),
     do: {:seq, s |> Value.seq_list() |> Kernel.++([Value.canon(e)]) |> List.to_tuple()}
+
+  # TLC: Tail of a string is a string; Head of a string is an error.
+  defp op("Head", [s], _) when is_binary(s),
+    do: error("The argument of Head should be a sequence, but instead it is:\n#{Value.show(s)}")
+
+  defp op("Tail", [""], _), do: error("Attempted to apply Tail to the empty sequence.")
+  defp op("Tail", [s], _) when is_binary(s), do: String.slice(s, 1..-1//1)
 
   defp op("Head", [s], _) do
     case seq(s) do
@@ -810,7 +817,7 @@ defmodule Accord.TLA.Checker.Stdlib do
     |> Enum.flat_map(fn
       {:init, _} -> [{:init, name}]
       {:action, _, _} -> [{:action, name}]
-      {:live, _, _} -> [{:live, name}]
+      {:live, _, _, _} -> [{:live, name}]
       _ -> []
     end)
     |> Enum.uniq()

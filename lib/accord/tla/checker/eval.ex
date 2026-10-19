@@ -35,7 +35,7 @@ defmodule Accord.TLA.Checker.Eval do
   names the actions of `Next`.
   """
 
-  alias Accord.TLA.Checker.{Community, Constant, Context, Stdlib, Value}
+  alias Accord.TLA.Checker.{Community, Constant, Context, Purity, Stdlib, Value}
   import Value, only: [error: 1]
 
   defstruct [
@@ -171,7 +171,10 @@ defmodule Accord.TLA.Checker.Eval do
   def eval({:set_filter, {target, set}, pred}, env) do
     s = eval(set, env)
 
-    if Value.infinite?(s) do
+    # As TLC (SetPredValue), a filter of an infinite or a large set is
+    # lazy: `x \\in D` tests x, and the filter is enumerated only when a
+    # caller needs its elements.
+    if Value.infinite?(s) or Value.lazy_over?(s, 1_000) do
       frozen = freeze(env)
       {:filter, s, fn x -> bool(pred, bind(frozen, target, x)) end}
     else
@@ -443,9 +446,20 @@ defmodule Accord.TLA.Checker.Eval do
       # A definition of constant level: one evaluation (as TLC, which
       # evaluates them before the search).
       {:def, %{kind: :op, params: []} = d, sid} when args == [] ->
-        if Constant.definition?(env.ctx, sid, d),
-          do: constant_value(d, sid, env),
-          else: eval(d.body, %{env | scope: sid, bound: %{}})
+        cond do
+          Constant.definition?(env.ctx, sid, d) ->
+            constant_value(d, sid, env)
+
+          # A definition of state or action level: one evaluation for each
+          # state (or step), unless its value can change between two
+          # evaluations (random values, side effects).
+          not env.gen and stable?(env.ctx, sid, d) ->
+            key = {:def, sid, d.name, env.state, env.primed, env.next, env.frames}
+            cached(key, fn -> eval(d.body, %{env | scope: sid, bound: %{}}) end)
+
+          true ->
+            eval(d.body, %{env | scope: sid, bound: %{}})
+        end
 
       {:def, %{kind: :op} = d, sid} ->
         values = prepare(args, d.params, caller)
@@ -536,6 +550,22 @@ defmodule Accord.TLA.Checker.Eval do
 
       {:instance, _, _, _} ->
         error("the instance #{name} is used without `!`")
+    end
+  end
+
+  # A definition whose value is a function of the state (see
+  # `Accord.TLA.Checker.Purity.volatile?/4`).
+  defp stable?(ctx, sid, d) do
+    key = {:tla_stable, ctx.id, sid, d.name}
+
+    case Process.get(key) do
+      nil ->
+        v = not Purity.volatile?(ctx, d.body, sid, %{})
+        Process.put(key, v)
+        v
+
+      v ->
+        v
     end
   end
 
@@ -740,9 +770,45 @@ defmodule Accord.TLA.Checker.Eval do
   defp force({:thunk, ref, e, scope, bound, frames, cacheable}, env) do
     env2 = %{env | scope: scope, bound: bound, frames: frames}
 
-    if cacheable and not env.gen,
-      do: cached({ref, env.primed}, fn -> eval(e, env2) end),
-      else: eval(e, env2)
+    cond do
+      cacheable and not env.gen ->
+        cached({ref, env.primed}, fn -> eval(e, env2) end)
+
+      # In the generation of states, the value can read the variables
+      # that the action assigned so far: the key has them (the partial
+      # next state, or the partial state of an initial predicate).
+      env.gen and stable_thunk?(env.ctx, ref, e, scope, bound) ->
+        partial = if is_map(env.state), do: env.state
+        cached({ref, env.primed, env.next, partial}, fn -> eval(e, env2) end)
+
+      true ->
+        eval(e, env2)
+    end
+  end
+
+  # A thunk whose value is a function of the state and the next state:
+  # true when no definition of the specification calls an operator whose
+  # value can change between two evaluations (see `stable?/3`).
+  defp stable_thunk?(ctx, _ref, _e, _scope, _bound) do
+    key = {:tla_stable_spec, ctx.id}
+
+    case Process.get(key) do
+      nil ->
+        v =
+          not Enum.any?(ctx.scopes, fn {sid, scope} ->
+            Enum.any?(scope.ops, fn
+              {_, {:def, d, ^sid}} -> Purity.volatile?(ctx, d.body, sid, %{})
+              {_, {:subst, expr, outer, _}} -> Purity.volatile?(ctx, expr, outer, %{})
+              _ -> false
+            end)
+          end)
+
+        Process.put(key, v)
+        v
+
+      v ->
+        v
+    end
   end
 
   defp cached(key, fun) do

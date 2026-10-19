@@ -104,93 +104,112 @@ defmodule Accord.TLA.Checker.Parser do
     ]
   end
 
+  # The infix operators of SANY (tla2sany/parser/Operators.java): name =>
+  # {low, high, associativity}. The precedence of an operator is a range
+  # (10 to 170). Two operators next to each other with no parentheses
+  # must have ranges that do not overlap, or be the same left-associative
+  # operator; else SANY reports a precedence conflict. `:and`, `:or`,
+  # and `:times` are left-associative.
   @infix %{
-    "=>" => {1, :right},
-    "<=>" => {2, :none},
-    "~>" => {2, :none},
-    "-+->" => {2, :none},
-    "/\\" => {3, :and},
-    "\\/" => {3, :or},
-    "=" => {5, :none},
-    "/=" => {5, :none},
-    "<" => {5, :none},
-    ">" => {5, :none},
-    "<=" => {5, :none},
-    ">=" => {5, :none},
-    "\\in" => {5, :none},
-    "\\notin" => {5, :none},
-    "\\subseteq" => {5, :none},
-    "\\subset" => {5, :none},
-    "\\supseteq" => {5, :none},
-    "\\supset" => {5, :none},
-    "\\prec" => {5, :none},
-    "\\succ" => {5, :none},
-    "\\preceq" => {5, :none},
-    "\\succeq" => {5, :none},
-    "\\sqsubset" => {5, :none},
-    "\\sqsupset" => {5, :none},
-    "\\sqsubseteq" => {5, :none},
-    "\\sqsupseteq" => {5, :none},
-    "\\ll" => {5, :none},
-    "\\gg" => {5, :none},
-    "\\sim" => {5, :none},
-    "\\simeq" => {5, :none},
-    "\\asymp" => {5, :none},
-    "\\approx" => {5, :none},
-    "\\cong" => {5, :none},
-    "\\doteq" => {5, :none},
-    "\\propto" => {5, :none},
-    "|-" => {5, :none},
-    "-|" => {5, :none},
-    "|=" => {5, :none},
-    "=|" => {5, :none},
-    ":=" => {5, :none},
-    "::=" => {5, :none},
-    "\\cdot" => {5, :left},
-    "@@" => {6, :left},
-    ":>" => {7, :none},
-    "<:" => {7, :none},
-    "\\cup" => {8, :left},
-    "\\cap" => {8, :left},
-    "\\" => {8, :none},
-    ".." => {9, :none},
-    "..." => {9, :none},
-    "!!" => {9, :none},
-    "??" => {9, :left},
-    "$" => {9, :left},
-    "$$" => {9, :left},
-    "##" => {9, :left},
-    "\\uplus" => {9, :left},
-    "\\sqcap" => {9, :left},
-    "\\sqcup" => {9, :left},
-    "\\wr" => {9, :none},
-    "+" => {10, :left},
-    "++" => {10, :left},
-    "(+)" => {10, :left},
-    "%" => {10, :none},
-    "%%" => {10, :left},
-    "|" => {10, :left},
-    "||" => {10, :left},
-    "\\X" => {10, :times},
-    "-" => {11, :left},
-    "--" => {11, :left},
-    "(-)" => {11, :left},
-    "*" => {13, :left},
-    "**" => {13, :left},
-    "/" => {13, :none},
-    "//" => {13, :none},
-    "\\div" => {13, :none},
-    "\\o" => {13, :left},
-    "&" => {13, :left},
-    "&&" => {13, :left},
-    "(.)" => {13, :left},
-    "(/)" => {13, :none},
-    "(\\X)" => {13, :left},
-    "\\star" => {13, :left},
-    "\\bullet" => {13, :left},
-    "\\bigcirc" => {13, :left},
-    "^" => {14, :none},
-    "^^" => {14, :none}
+    "=>" => {10, 10, :none},
+    "<=>" => {20, 20, :none},
+    "~>" => {20, 20, :none},
+    "-+->" => {20, 20, :none},
+    "/\\" => {30, 30, :and},
+    "\\/" => {30, 30, :or},
+    "=" => {50, 50, :none},
+    "/=" => {50, 50, :none},
+    "<" => {50, 50, :none},
+    ">" => {50, 50, :none},
+    "<=" => {50, 50, :none},
+    ">=" => {50, 50, :none},
+    "\\in" => {50, 50, :none},
+    "\\notin" => {50, 50, :none},
+    "\\subseteq" => {50, 50, :none},
+    "\\subset" => {50, 50, :none},
+    "\\supseteq" => {50, 50, :none},
+    "\\supset" => {50, 50, :none},
+    "\\prec" => {50, 50, :none},
+    "\\succ" => {50, 50, :none},
+    "\\preceq" => {50, 50, :none},
+    "\\succeq" => {50, 50, :none},
+    "\\sqsubset" => {50, 50, :none},
+    "\\sqsupset" => {50, 50, :none},
+    "\\sqsubseteq" => {50, 50, :none},
+    "\\sqsupseteq" => {50, 50, :none},
+    "\\ll" => {50, 50, :none},
+    "\\gg" => {50, 50, :none},
+    "\\sim" => {50, 50, :none},
+    "\\simeq" => {50, 50, :none},
+    "\\asymp" => {50, 50, :none},
+    "\\approx" => {50, 50, :none},
+    "\\cong" => {50, 50, :none},
+    "\\doteq" => {50, 50, :none},
+    "\\propto" => {50, 50, :none},
+    "|-" => {50, 50, :none},
+    "-|" => {50, 50, :none},
+    "|=" => {50, 50, :none},
+    "=|" => {50, 50, :none},
+    ":=" => {50, 50, :none},
+    "::=" => {50, 50, :none},
+    "\\cdot" => {50, 140, :left},
+    "@@" => {60, 60, :left},
+    ":>" => {70, 70, :none},
+    "<:" => {70, 70, :none},
+    "\\cup" => {80, 80, :left},
+    "\\cap" => {80, 80, :left},
+    "\\" => {80, 80, :none},
+    ".." => {90, 90, :none},
+    "..." => {90, 90, :none},
+    "!!" => {90, 130, :none},
+    "??" => {90, 130, :left},
+    "$" => {90, 130, :left},
+    "$$" => {90, 130, :left},
+    "##" => {90, 130, :left},
+    "\\uplus" => {90, 130, :left},
+    "\\sqcap" => {90, 130, :left},
+    "\\sqcup" => {90, 130, :left},
+    "\\wr" => {90, 140, :none},
+    "+" => {100, 100, :left},
+    "++" => {100, 100, :left},
+    "(+)" => {100, 100, :left},
+    "%" => {100, 110, :none},
+    "%%" => {100, 110, :left},
+    "|" => {100, 110, :left},
+    "||" => {100, 110, :left},
+    "\\X" => {100, 130, :times},
+    "-" => {110, 110, :left},
+    "--" => {110, 110, :left},
+    "(-)" => {110, 110, :left},
+    "*" => {130, 130, :left},
+    "**" => {130, 130, :left},
+    "/" => {130, 130, :none},
+    "//" => {130, 130, :none},
+    "\\div" => {130, 130, :none},
+    "\\o" => {130, 130, :left},
+    "&" => {130, 130, :left},
+    "&&" => {130, 130, :left},
+    "(.)" => {130, 130, :left},
+    "(/)" => {130, 130, :none},
+    "(\\X)" => {130, 130, :left},
+    "\\star" => {130, 130, :left},
+    "\\bullet" => {130, 130, :left},
+    "\\bigcirc" => {130, 130, :left},
+    "^" => {140, 140, :none},
+    "^^" => {140, 140, :none}
+  }
+
+  # The prefix operators: {low, high}.
+  @prefix_ranges %{
+    "~" => {40, 40},
+    "-." => {120, 120},
+    "[]" => {40, 150},
+    "<>" => {40, 150},
+    "ENABLED" => {40, 150},
+    "UNCHANGED" => {40, 150},
+    "SUBSET" => {100, 130},
+    "UNION" => {100, 130},
+    "DOMAIN" => {100, 130}
   }
 
   @postfix ["'", "^+", "^*", "^#"]
@@ -202,7 +221,7 @@ defmodule Accord.TLA.Checker.Parser do
 
   defstruct toks: {}, pos: 0, n: 0, limits: [], file: nil
 
-  @doc "The infix operator table: name to `{precedence, associativity}`."
+  @doc "The infix operator table: name to `{low, high, associativity}` (SANY's ranges)."
   @spec infix_ops() :: map()
   def infix_ops, do: @infix
 
@@ -325,6 +344,20 @@ defmodule Accord.TLA.Checker.Parser do
 
   defp pos({_, _, line, col}), do: {line, col}
 
+  # The position of the last character of a token (for the range of an
+  # expression in a message, as TLC gives it).
+  defp end_pos({kind, v, line, col}) do
+    len =
+      case {kind, v} do
+        {:str, s} when is_binary(s) -> String.length(s) + 2
+        {:num, n} when is_integer(n) -> n |> Integer.to_string() |> String.length()
+        {_, s} when is_binary(s) -> String.length(s)
+        _ -> 1
+      end
+
+    {line, col + len - 1}
+  end
+
   defp describe({:eof, _, _, _}), do: "the end of the module"
   defp describe({:offside, _, _, _}), do: "a token to the left of the junction list"
   defp describe({:module_end, _, _, _}), do: "the end of the module"
@@ -394,9 +427,9 @@ defmodule Accord.TLA.Checker.Parser do
           {:skip, p} ->
             units(p, mod, false)
 
-          {name, e, p} ->
+          {name, e, p, range} ->
             mod = add_order(mod, :assume, name, t)
-            mod = %{mod | assumes: mod.assumes ++ [{e, pos(t)}]}
+            mod = %{mod | assumes: mod.assumes ++ [{e, pos(t), range}]}
 
             mod =
               if name,
@@ -885,9 +918,13 @@ defmodule Accord.TLA.Checker.Parser do
         {:skip, skip_unit(p)}
 
       _ ->
+        start = pos(raw(p))
         {e, p} = expr(p, 0)
+        range = {start, end_pos(raw_at(p, p.pos - 1))}
 
-        if at?(p, :kw, "PROVE") or op?(p, ","), do: {:skip, skip_unit(p)}, else: {name, e, p}
+        if at?(p, :kw, "PROVE") or op?(p, ","),
+          do: {:skip, skip_unit(p)},
+          else: {name, e, p, range}
     end
   end
 
@@ -1290,12 +1327,17 @@ defmodule Accord.TLA.Checker.Parser do
 
   # -- Expressions --
 
-  defp expr(p, min) do
-    {left, p} = unary(p)
-    infix_loop(p, left, min)
+  # `ctx`: the operator at the left of the expression (an infix or a
+  # prefix operator, `{name, low, high, left_assoc}`), for the check of
+  # precedence conflicts (SANY's OperatorStack). The precedence climbing
+  # uses the low end of each range; without a conflict, this gives the
+  # same tree as SANY.
+  defp expr(p, min, ctx \\ nil) do
+    {left, p} = unary(p, ctx)
+    infix_loop(p, left, min, ctx)
   end
 
-  defp infix_loop(p, left, min) do
+  defp infix_loop(p, left, min, ctx) do
     # `-. a == ...` starts the definition of unary minus.
     next =
       case {peek(p), raw_at(p, p.pos + 1)} do
@@ -1306,25 +1348,28 @@ defmodule Accord.TLA.Checker.Parser do
     case next do
       {:op, op, _, _} = t ->
         case Map.fetch(@infix, op) do
-          {:ok, {prec, assoc}} when prec >= min ->
-            p = advance(p)
+          {:ok, {lo, hi, assoc}} ->
+            check_conflict(p, ctx, {op, lo, hi, assoc in [:left, :and, :or, :times]}, t)
 
-            case assoc do
-              :times ->
-                {right, p} = expr(p, prec + 1)
-                {sets, p} = more_times(p, [right, left], prec)
-                infix_loop(p, {:times, Enum.reverse(sets)}, min)
+            if lo >= min do
+              p = advance(p)
+              me = {op, lo, hi, assoc in [:left, :and, :or, :times]}
 
-              :right ->
-                {right, p} = expr(p, prec)
-                infix_loop(p, binary(op, left, right, t), min)
+              case assoc do
+                :times ->
+                  {right, p} = expr(p, lo + 1, me)
+                  {sets, p} = more_times(p, [right, left], lo, me)
+                  infix_loop(p, {:times, Enum.reverse(sets)}, min, ctx)
 
-              _ ->
-                {right, p} = expr(p, prec + 1)
-                infix_loop(p, binary(op, left, right, t), min)
+                _ ->
+                  {right, p} = expr(p, lo + 1, me)
+                  infix_loop(p, binary(op, left, right, t), min, ctx)
+              end
+            else
+              {left, p}
             end
 
-          _ ->
+          :error ->
             {left, p}
         end
 
@@ -1333,10 +1378,29 @@ defmodule Accord.TLA.Checker.Parser do
     end
   end
 
-  defp more_times(p, acc, prec) do
+  # SANY: the operators `ctx` (at the left) and `op` (at the right) are in
+  # conflict when their ranges overlap, unless they are the same
+  # left-associative operator.
+  defp check_conflict(_p, nil, _op, _t), do: :ok
+
+  defp check_conflict(p, {cname, clo, chi, cleft}, {name, lo, hi, _}, t) do
+    overlap = not (clo > hi or chi < lo)
+
+    if overlap and not (cname == name and cleft) do
+      error(
+        p,
+        t,
+        "precedence conflict between the operators #{cname} and #{name}; add parentheses"
+      )
+    end
+
+    :ok
+  end
+
+  defp more_times(p, acc, prec, me) do
     if op?(p, "\\X") do
-      {right, p} = expr(advance(p), prec + 1)
-      more_times(p, [right | acc], prec)
+      {right, p} = expr(advance(p), prec + 1, me)
+      more_times(p, [right | acc], prec, me)
     else
       {acc, p}
     end
@@ -1352,13 +1416,13 @@ defmodule Accord.TLA.Checker.Parser do
   defp binary(op, left, right, t), do: {:app, op, [left, right], pos(t)}
 
   # Prefix operators and primaries, then postfix operators.
-  defp unary(p) do
+  defp unary(p, ctx) do
     t = peek(p)
 
     case t do
       {:op, "~", _, _} ->
-        {e, p} = expr(advance(p), 5)
-        postfix(p, {:not, e})
+        {e, p} = prefix_operand(p, "~")
+        postfix(p, {:not, e}, ctx)
 
       # `-.(a)`: the prefix minus in the form of an application.
       {:op, "-", _, _} ->
@@ -1366,48 +1430,61 @@ defmodule Accord.TLA.Checker.Parser do
           {{:op, ".", _, _}, {:op, "(", _, _}} ->
             p = %{p | pos: p.pos + 3} |> push_limit(:none)
             {args, p} = args(p)
-            postfix(pop_limit(p), {:app, "-.", args, pos(t)})
+            postfix(pop_limit(p), {:app, "-.", args, pos(t)}, ctx)
 
           _ ->
-            {e, p} = expr(advance(p), 13)
+            # SANY: a minus sign after an operator of higher precedence
+            # (`a * -b`) is a conflict.
+            case ctx do
+              {cname, clo, _, _} when clo > 120 ->
+                error(
+                  p,
+                  t,
+                  "precedence conflict between the operators #{cname} and -; add parentheses"
+                )
+
+              _ ->
+                :ok
+            end
+
+            {e, p} = prefix_operand(p, "-.")
             {{:app, "-.", [e], pos(t)}, p}
         end
 
       {:op, "[]", _, _} ->
-        {e, p} = expr(advance(p), 5)
+        {e, p} = prefix_operand(p, "[]")
         {{:always, e}, p}
 
       {:op, "<>", _, _} ->
-        {e, p} = expr(advance(p), 5)
+        {e, p} = prefix_operand(p, "<>")
         {{:eventually, e}, p}
 
       {:kw, "ENABLED", _, _} ->
-        {e, p} = expr(advance(p), 5)
+        {e, p} = prefix_operand(p, "ENABLED")
         {{:enabled, e}, p}
 
       {:kw, "UNCHANGED", _, _} ->
-        {e, p} = expr(advance(p), 5)
+        {e, p} = prefix_operand(p, "UNCHANGED")
         {{:unchanged, e}, p}
 
-      {:kw, "SUBSET", _, _} ->
-        {e, p} = expr(advance(p), 9)
-        {{:app, "SUBSET", [e], pos(t)}, p}
-
-      {:kw, "UNION", _, _} ->
-        {e, p} = expr(advance(p), 9)
-        {{:app, "UNION", [e], pos(t)}, p}
-
-      {:kw, "DOMAIN", _, _} ->
-        {e, p} = expr(advance(p), 10)
-        {{:app, "DOMAIN", [e], pos(t)}, p}
+      {:kw, op, _, _} when op in ["SUBSET", "UNION", "DOMAIN"] ->
+        {e, p} = prefix_operand(p, op)
+        {{:app, op, [e], pos(t)}, p}
 
       {:op, bullet, _, col} when bullet in ["/\\", "\\/"] ->
         junction(p, bullet, col, [])
 
       _ ->
         {e, p} = primary(p)
-        postfix(p, e)
+        postfix(p, e, ctx)
     end
+  end
+
+  # The operand of a prefix operator: the operators of higher precedence
+  # are in it.
+  defp prefix_operand(p, op) do
+    {lo, hi} = Map.fetch!(@prefix_ranges, op)
+    expr(advance(p), lo + 1, {op, lo, hi, false})
   end
 
   defp junction(p, bullet, col, acc) do
@@ -1426,25 +1503,26 @@ defmodule Accord.TLA.Checker.Parser do
     end
   end
 
-  defp postfix(p, e) do
+  defp postfix(p, e, ctx) do
     case peek(p) do
-      {:op, "'", _, _} ->
-        postfix(advance(p), {:prime, e})
-
-      {:op, op, _, _} = t when op in ["^+", "^*", "^#"] ->
-        postfix(advance(p), {:app, op, [e], pos(t)})
+      {:op, op, _, _} = t when op in ["'", "^+", "^*", "^#"] ->
+        # SANY: a postfix operator (precedence 150) after a prefix
+        # operator whose range has 150 (`[]x'`) is a conflict.
+        check_conflict(p, ctx, {op, 150, 150, false}, t)
+        e = if op == "'", do: {:prime, e}, else: {:app, op, [e], pos(t)}
+        postfix(advance(p), e, ctx)
 
       {:op, "[", _, _} ->
         p = p |> advance() |> push_limit(:none)
         {args, p} = expr_list(p, "]")
         p = pop_limit(p)
-        postfix(p, {:apply, e, args})
+        postfix(p, {:apply, e, args}, ctx)
 
       {:op, ".", _, _} ->
         case raw_at(p, p.pos + 1) do
-          {:id, field, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, field})
-          {:kw, field, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, field})
-          {:num, n, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, Integer.to_string(n)})
+          {:id, field, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, field}, ctx)
+          {:kw, field, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, field}, ctx)
+          {:num, n, _, _} -> postfix(%{p | pos: p.pos + 2}, {:dot, e, Integer.to_string(n)}, ctx)
           _ -> {e, p}
         end
 

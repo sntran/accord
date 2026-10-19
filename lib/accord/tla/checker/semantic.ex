@@ -410,11 +410,6 @@ defmodule Accord.TLA.Checker.Semantic do
     if name in st.extended do
       st
     else
-      if Map.has_key?(Process.get(:sem_subs), name) and
-           Map.has_key?(Process.get(:sem_infos), name) == false and
-           StandardModules.source(name) != nil and false,
-         do: :ok
-
       info = module_info(name, {1, 1})
 
       ctx =
@@ -532,7 +527,7 @@ defmodule Accord.TLA.Checker.Semantic do
   end
 
   defp item(:assume, name, pos, st, q) do
-    [{e, apos} | rest] = q.assumes
+    [{e, apos, _range} | rest] = q.assumes
     st = close_recursive(st, pos, "an assumption")
     {_named, q} = take_named(q, name, :assume)
     {assumption(st, name, e, apos), %{q | assumes: rest}}

@@ -3,7 +3,8 @@ defmodule Accord.CrossCheck do
   Compares the native explorer (`Accord.Explore`) with a TLA+ checker:
   the native TLA+ checker (`Accord.TLA.Checker`, the default) or TLC.
 
-  The checker is the reference (the text says "TLC" for it). For each protocol, the cross-check runs both
+  The checker is the reference (the outcomes say "TLC" or "native
+  checker" for it). For each protocol, the cross-check runs both
   checkers on the same finite model and compares the results. A
   difference shows a defect in one of the two: in the explorer, or in
   the translation from the protocol to TLA+.
@@ -176,15 +177,26 @@ defmodule Accord.CrossCheck do
         )
 
       outcomes =
-        [compare_state_space(ctx, native)] ++
-          compare_symmetry(ctx, native) ++
-          compare_checks(ctx, native) ++
-          skipped(ctx)
+        ([compare_state_space(ctx, native)] ++
+           compare_symmetry(ctx, native) ++
+           compare_checks(ctx, native) ++
+           skipped(ctx))
+        |> name_reference(reference)
 
       %Report{protocol: protocol, label: opts[:label], outcomes: outcomes}
     else
       {:error, reason} -> %Report{protocol: protocol, label: opts[:label], error: reason}
     end
+  end
+
+  # The texts of the outcomes say "TLC" for the reference checker: with
+  # the native checker as the reference, they say "native checker".
+  defp name_reference(outcomes, :tlc), do: outcomes
+
+  defp name_reference(outcomes, _native) do
+    Enum.map(outcomes, fn o ->
+      %{o | detail: Regex.replace(~r/\bTLC\b/, o.detail || "", "native checker")}
+    end)
   end
 
   defp compile(ir, config) do

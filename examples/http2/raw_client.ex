@@ -68,7 +68,7 @@ defmodule Accord.Examples.Http2.RawClient do
     {block, ctx} = header_list |> Enum.map(fn {k, v} -> {:store, k, v} end) |> HPAX.encode(ctx)
     block = IO.iodata_to_binary(block)
     half = div(byte_size(block), 2)
-    <<first::binary-size(half), second::binary>> = block
+    {first, second} = {binary_part(block, 0, half), binary_part(block, half, byte_size(block) - half)}
 
     # HEADERS with neither END_STREAM nor END_HEADERS (flags 0x00), then a
     # CONTINUATION that closes the block with END_HEADERS (flags 0x04).

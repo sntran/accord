@@ -272,7 +272,9 @@ defmodule Accord.TLA.Checker.Context do
         {:root, _} ->
           %{
             state
-            | assumes: state.assumes ++ Enum.map(mod.assumes, fn {e, pos} -> {e, id, pos} end)
+            | assumes:
+                state.assumes ++
+                  Enum.map(mod.assumes, fn {e, pos, range} -> {e, id, pos, range} end)
           }
 
         _ ->

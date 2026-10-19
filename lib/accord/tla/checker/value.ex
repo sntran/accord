@@ -1027,6 +1027,22 @@ defmodule Accord.TLA.Checker.Value do
     end)
   end
 
+  @doc """
+  Tells if a lazy set has more than `n` elements (or a size that the
+  checker cannot compute): a set filter on it stays lazy, as TLC's
+  `SetPredValue`, and `x \\in S` does not enumerate it.
+  """
+  def lazy_over?(%MapSet{}, _n), do: false
+  def lazy_over?({:interval, _, _}, _n), do: false
+
+  def lazy_over?(v, n) do
+    lazy_set?(v) and
+      case safe_size(v) do
+        k when is_integer(k) -> k > n
+        _ -> true
+      end
+  end
+
   defp large?({kind, _, _} = v) when kind in [:ksubset, :fun_set], do: big_size?(v)
   defp large?({kind, _} = v) when kind in [:subset, :record_set, :times], do: big_size?(v)
   defp large?(_), do: false
