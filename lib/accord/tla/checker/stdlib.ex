@@ -162,9 +162,6 @@ defmodule Accord.TLA.Checker.Stdlib do
     end
   end
 
-  defp checked(n, _a, _op, _b) when n >= -2_147_483_648 and n <= 2_147_483_647, do: n
-  defp checked(_n, a, op, b), do: error("Overflow when computing #{a}#{op}#{b}")
-
   defp op("\\div", [a, b], _) do
     {a, b} = {int(a), int(b)}
     if b == 0, do: error("division by zero")
@@ -540,6 +537,9 @@ defmodule Accord.TLA.Checker.Stdlib do
     do: error("the operator #{name} with #{length(args)} arguments is not supported")
 
   # -- Helpers --
+
+  defp checked(n, _a, _op, _b) when n >= -2_147_483_648 and n <= 2_147_483_647, do: n
+  defp checked(_n, a, op, b), do: error("Overflow when computing #{a}#{op}#{b}")
 
   # EC.TLC_MODULE_ARGUMENT_ERROR.
   defp arg_error(nth, name, what, v),

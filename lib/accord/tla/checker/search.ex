@@ -91,6 +91,11 @@ defmodule Accord.TLA.Checker.Search do
         if(opts[:stop_after],
           do: System.monotonic_time(:millisecond) + trunc(opts[:stop_after] * 1000)
         ),
+      # Depth-limited search (TLC's -dfid n): the states at depth n are
+      # checked, not expanded. The search is breadth first: the result is
+      # the result of TLC's iterative deepening, the order of the states is
+      # not.
+      max_depth: opts[:max_depth],
       generated: 0,
       warnings: [],
       graph: Keyword.get(opts, :graph, false)
@@ -644,6 +649,24 @@ defmodule Accord.TLA.Checker.Search do
     end
   end
 
+  # A fairness condition of the next-state relation of the search, with
+  # no constraint, symmetry, or view.
+  defp next_fairness?(model, {_strength, _sub, a}) do
+    model.constraints == [] and model.action_constraints == [] and model.perms == [] and
+      model.view == nil and model.next != nil and no_pos(a) == no_pos(model.next)
+  end
+
+  # An expression without the positions of its names and applications.
+  defp no_pos({:name, n, _}), do: {:name, n}
+  defp no_pos({:app, op, args, _}), do: {:app, op, no_pos(args)}
+
+  defp no_pos(t) when is_tuple(t),
+    do: t |> Tuple.to_list() |> Enum.map(&no_pos/1) |> List.to_tuple()
+
+  defp no_pos(l) when is_list(l), do: Enum.map(l, &no_pos/1)
+  defp no_pos(%{} = m) when not is_struct(m), do: Map.new(m, fn {k, v} -> {k, no_pos(v)} end)
+  defp no_pos(x), do: x
+
   # The coverage counts of an action (or of the initial predicate).
   defp count(key, generated, distinct) do
     if Process.get(:tla_coverage) do
@@ -681,9 +704,13 @@ defmodule Accord.TLA.Checker.Search do
             }
         end
 
-        st = expand(base, model, st, id)
-        live_eval(base, model, st, id)
-        loop(base, model, safety_step(base, model, st, id))
+        if base.max_depth && elem(Map.fetch!(st.nodes, id), 3) >= base.max_depth do
+          loop(base, model, st)
+        else
+          st = expand(base, model, st, id)
+          live_eval(base, model, st, id)
+          loop(base, model, safety_step(base, model, st, id))
+        end
     end
   end
 
@@ -913,6 +940,12 @@ defmodule Accord.TLA.Checker.Search do
     cache = st.live_cache
 
     # The fairness conditions: first the steps, then ENABLED at the state.
+    # A condition of the next-state relation itself (WF_v(Next)) needs no
+    # evaluation: the steps of the graph are its steps (when no constraint
+    # removes steps).
+    fast = Enum.map(model.fairness, &next_fairness?(model, &1))
+    sub_of = fn fc, x -> fc |> elem(1) |> then(&sub_value(model, &1)) |> then(& &1.(x, nil)) end
+
     model.fairness
     |> Enum.with_index()
     |> Enum.each(fn {fc, index} ->
@@ -921,7 +954,13 @@ defmodule Accord.TLA.Checker.Search do
 
         if :ets.lookup(cache, key) == [] do
           {next, _, _, _} = Map.fetch!(st.nodes, w)
-          :ets.insert(cache, {key, fair_taken?(model, fc, state, next, id == w)})
+
+          taken =
+            if Enum.at(fast, index),
+              do: id != w and not Value.eq?(sub_of.(fc, state), sub_of.(fc, next)),
+              else: fair_taken?(model, fc, state, next, id == w)
+
+          :ets.insert(cache, {key, taken})
         end
       end)
     end)
@@ -931,8 +970,20 @@ defmodule Accord.TLA.Checker.Search do
     |> Enum.each(fn {fc, index} ->
       key = {:fair, index, :enabled, id}
 
-      if :ets.lookup(cache, key) == [],
-        do: :ets.insert(cache, {key, fair_enabled?(model, fc, state)})
+      if :ets.lookup(cache, key) == [] do
+        enabled =
+          if Enum.at(fast, index),
+            do:
+              Enum.any?(
+                to,
+                &(:ets.lookup(cache, {:fair, index, :taken, id, &1}) == [
+                    {{:fair, index, :taken, id, &1}, true}
+                  ])
+              ),
+            else: fair_enabled?(model, fc, state)
+
+        :ets.insert(cache, {key, enabled})
+      end
     end)
 
     model.live

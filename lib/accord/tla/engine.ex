@@ -90,7 +90,10 @@ defmodule Accord.TLA.Engine do
     Checker.Search,
     Checker.Liveness,
     Checker.Constant,
-    Checker.ValueStream
+    Checker.ValueStream,
+    Checker.SafetyTableau,
+    Checker.Fingerprint,
+    Checker.Random
   ]
 
   defp native_fingerprint do

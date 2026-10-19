@@ -455,12 +455,6 @@ defmodule Accord.TLA.Checker.Community do
     |> Enum.reduce(base, fn x, acc -> Eval.apply_op(opv, [Value.apply_fun(f, x), acc], env) end)
   end
 
-  defp combinations(_list, 0), do: [[]]
-  defp combinations([], _k), do: []
-
-  defp combinations([x | rest], k),
-    do: Enum.map(combinations(rest, k - 1), &[x | &1]) ++ combinations(rest, k)
-
   defp permutations([]), do: [[]]
   defp permutations(list), do: for(x <- list, rest <- permutations(list -- [x]), do: [x | rest])
 

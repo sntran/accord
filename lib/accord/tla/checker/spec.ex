@@ -220,10 +220,7 @@ defmodule Accord.TLA.Checker.Spec do
   defp always_part({:always, p} = e, env) do
     cond do
       temporal?(p, env) or action?(p, env) ->
-        case expand(e, env) do
-          {:ok, {body, env2}} -> flatten(body, env2)
-          :error -> [{:temporal, closure(e, env)}]
-        end
+        [{:temporal, closure(e, env)}]
 
       true ->
         raise CannotHandle, message: "TLC cannot handle the temporal formula []#{inspect(p)}"

@@ -147,7 +147,7 @@ defmodule Accord.TLA.Checker.Eval do
   def eval({:choose, {target, set}, body}, env) do
     if set == nil, do: error("TLC cannot evaluate an unbounded CHOOSE")
 
-    values = set |> eval(env) |> Value.enum() |> Value.sort()
+    values = set |> eval(env) |> Value.ordered()
 
     case Enum.find(values, &bool(body, bind(env, target, &1))) do
       nil -> error("no element of the set satisfies the CHOOSE")
@@ -1043,6 +1043,33 @@ defmodule Accord.TLA.Checker.Eval do
     do_gen(e, env, mode)
   end
 
+  # Each `{item, env}` in order, from the partial state `p`.
+  defp gen_all([], p, label, _mode), do: [{p, label}]
+
+  defp gen_all([{item, env} | rest], p, label, mode) do
+    item
+    |> gen_item(with_partial(%{env | label: label}, mode, p), mode)
+    |> Enum.flat_map(fn {p, label} -> gen_all(rest, p, label, mode) end)
+  end
+
+  # The canonical form of a value for a state. TLC fails when it computes
+  # the fingerprint of the state (for example for a set that is too large):
+  # the error is marked `fingerprint`.
+  defp state_value(v) do
+    v = Value.canon(v)
+    # A lazy set in a state: TLC enumerates it for the fingerprint. When
+    # the enumeration cannot give an error (the subsets or the products
+    # of sets in normal form), the set stays lazy (it is large: see
+    # `Value.canon/1`).
+    cond do
+      not Value.lazy?(v) -> v
+      Value.safe_lazy?(v) -> v
+      true -> MapSet.new(Value.enum(v))
+    end
+  rescue
+    e in Value.Error -> reraise %{e | fingerprint: :state}, __STACKTRACE__
+  end
+
   defp partial(env, :next), do: env.next
   defp partial(env, :init), do: env.state
 
@@ -1056,15 +1083,6 @@ defmodule Accord.TLA.Checker.Eval do
   defp do_gen({:and, items}, env, mode) do
     env = %{env | label_mode: false}
     gen_all(Enum.map(items, &{&1, env}), partial(env, mode), env.label, mode)
-  end
-
-  # Each `{item, env}` in order, from the partial state `p`.
-  defp gen_all([], p, label, _mode), do: [{p, label}]
-
-  defp gen_all([{item, env} | rest], p, label, mode) do
-    item
-    |> gen_item(with_partial(%{env | label: label}, mode, p), mode)
-    |> Enum.flat_map(fn {p, label} -> gen_all(rest, p, label, mode) end)
   end
 
   defp do_gen({:or, items}, env, mode), do: Enum.flat_map(items, &do_gen(&1, env, mode))
@@ -1154,17 +1172,6 @@ defmodule Accord.TLA.Checker.Eval do
       :no ->
         guard(e, env, mode)
     end
-  end
-
-  # The canonical form of a value for a state. TLC fails when it computes
-  # the fingerprint of the state (for example for a set that is too large):
-  # the error is marked `fingerprint`.
-  defp state_value(v) do
-    v = Value.canon(v)
-    # A lazy set in a state: TLC enumerates it for the fingerprint.
-    if Value.lazy?(v), do: MapSet.new(Value.enum(v)), else: v
-  rescue
-    e in Value.Error -> reraise %{e | fingerprint: :state}, __STACKTRACE__
   end
 
   defp do_gen({:app, "\\in", [lhs, set], _} = e, env, mode) do

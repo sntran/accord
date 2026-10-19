@@ -86,13 +86,13 @@ defmodule Accord.TLA.Checker.Temporal do
   defp wrap([one], _kind, _empty), do: one
   defp wrap(items, kind, _empty), do: {kind, items}
 
-  @doc "The disjuncts of a formula, each a list of conjuncts."
   @doc "The number of disjuncts of `dnf/1`, without the disjuncts."
   def dnf_size({:or, items}), do: items |> Enum.map(&dnf_size/1) |> Enum.sum()
   def dnf_size({:and, items}), do: items |> Enum.map(&dnf_size/1) |> Enum.product()
   def dnf_size(false), do: 0
   def dnf_size(_), do: 1
 
+  @doc "The disjuncts of a formula, each a list of conjuncts."
   def dnf({:or, items}), do: Enum.flat_map(items, &dnf/1)
 
   def dnf({:and, items}) do

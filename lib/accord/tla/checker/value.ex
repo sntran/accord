@@ -804,6 +804,31 @@ defmodule Accord.TLA.Checker.Value do
 
   # -- Enumeration --
 
+  @doc """
+  The elements of a finite set in the normal order of TLC (the order of
+  CHOOSE). For a power set, a lazy stream: by size, then in order.
+  """
+  def ordered({:subset, s} = set) do
+    size(set)
+    elems = s |> enum() |> sort()
+
+    Stream.flat_map(0..length(elems), fn k ->
+      elems |> combinations_stream(k) |> Stream.map(&MapSet.new/1)
+    end)
+  end
+
+  def ordered(s), do: s |> enum() |> sort()
+
+  defp combinations_stream(_, 0), do: [[]]
+  defp combinations_stream([], _), do: []
+
+  defp combinations_stream([h | t], k) do
+    Stream.flat_map([true, false], fn
+      true -> Stream.map(combinations_stream(t, k - 1), &[h | &1])
+      false -> combinations_stream(t, k)
+    end)
+  end
+
   @doc "The elements of a set, as a list. Raises for an infinite set."
   # TLC enumerates a set in its normal order. A map of more than 32 keys
   # has no order: sort it (the order of terms is the order of TLC for
@@ -948,17 +973,6 @@ defmodule Accord.TLA.Checker.Value do
   end
 
   # TLC has 32-bit sizes.
-  defp checked_product(sizes, s) do
-    Enum.reduce(sizes, 1, fn n, acc ->
-      p = acc * n
-
-      if p > 2_147_483_647,
-        do: error("Overflow when computing the number of elements in #{show_lazy(s)}")
-
-      p
-    end)
-  end
-
   def size({:times, sets} = s),
     do: if(empty?(s), do: 0, else: checked_product(Enum.map(sets, &size/1), s))
 
@@ -985,6 +999,17 @@ defmodule Accord.TLA.Checker.Value do
     do: error("Attempted to compute cardinality of the value\n#{show(set)}")
 
   def size(s), do: length(enum(s))
+
+  defp checked_product(sizes, s) do
+    Enum.reduce(sizes, 1, fn n, acc ->
+      p = acc * n
+
+      if p > 2_147_483_647,
+        do: error("Overflow when computing the number of elements in #{show_lazy(s)}")
+
+      p
+    end)
+  end
 
   defp large?({kind, _, _} = v) when kind in [:ksubset, :fun_set], do: big_size?(v)
   defp large?({kind, _} = v) when kind in [:subset, :record_set, :times], do: big_size?(v)
@@ -1317,6 +1342,37 @@ defmodule Accord.TLA.Checker.Value do
         Enum.map(keys, &{&1, Map.fetch!(m, &1)})
     end
   end
+
+  @doc """
+  Tells if the enumeration of a lazy set cannot give an error: a power
+  set or a product of finite sets whose elements have one kind.
+  """
+  def safe_lazy?(v), do: safe_parts?(v) and sized?(v)
+
+  defp safe_parts?({:subset, s}), do: safe_part?(s)
+  defp safe_parts?({:ksubset, _, s}), do: safe_part?(s)
+  defp safe_parts?({:fun_set, d, r}), do: safe_part?(d) and safe_part?(r)
+  defp safe_parts?({:record_set, fields}), do: Enum.all?(fields, fn {_, s} -> safe_part?(s) end)
+  defp safe_parts?({:times, sets}), do: Enum.all?(sets, &safe_part?/1)
+  defp safe_parts?(_), do: false
+
+  # The size has no overflow (TLC enumerates the set).
+  defp sized?(v) do
+    size(v)
+    true
+  rescue
+    Error -> false
+  end
+
+  defp safe_part?(%MapSet{} = s) do
+    normalize!(s)
+    true
+  rescue
+    Error -> false
+  end
+
+  defp safe_part?({:interval, _, _}), do: true
+  defp safe_part?(s), do: safe_parts?(s) and sized?(s)
 
   @doc "Writes a value in normal form, as TLC prints the values of a state."
   def show_normal(v), do: normal(fn -> show(v) end)

@@ -58,6 +58,9 @@ defmodule Accord.TLA.Checker do
     the counts of states of each action.
   - `:stop_after` — stop the search after this number of seconds (TLC's
     `-Dtlc2.TLC.stopAfter`).
+  - `:max_depth` — do not expand the states at this depth (the initial
+    states are at depth 1), as TLC's `-dfid`. The search stays breadth
+    first.
   - `:properties` — the values of `TLCGet("-Dname")`.
   """
   @spec check(Path.t(), keyword()) :: result()
