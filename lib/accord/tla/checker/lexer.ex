@@ -416,6 +416,10 @@ defmodule Accord.TLA.Checker.Lexer do
 
   defp lex(bin, line, col, open, acc) do
     case unicode(bin) do
+      # `⟩_` starts a subscript, as `>>_`: `⟨A⟩_v`.
+      {">>", len_bytes} when byte_size(bin) > len_bytes and binary_part(bin, len_bytes, 1) == "_" ->
+        lex(drop(bin, len_bytes + 1), line, col + 2, open, [{:op, ">>_", line, col} | acc])
+
       {op, len_bytes} ->
         lex(drop(bin, len_bytes), line, col + 1, open, [{:op, op, line, col} | acc])
 

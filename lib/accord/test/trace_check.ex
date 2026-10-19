@@ -74,7 +74,9 @@ defmodule Accord.Test.TraceCheck do
 
     Engine.check(
       Path.join(tmp_dir, "#{spec.module_name}.tla"),
-      Path.join(tmp_dir, "#{spec.module_name}.cfg"), engine: Keyword.get(opts, :engine))
+      Path.join(tmp_dir, "#{spec.module_name}.cfg"),
+      engine: Keyword.get(opts, :engine)
+    )
   end
 
   # The deadlock trace's last state carries the failing index in ti.

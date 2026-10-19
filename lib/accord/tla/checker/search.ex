@@ -450,7 +450,10 @@ defmodule Accord.TLA.Checker.Search do
       # The fairness conditions whose action has side effects (Print,
       # TLCSet): the liveness check evaluates them as TLC does, with the
       # same count of evaluations.
-      impure: Enum.map(spec.fairness, fn {_, _, {a, scope, bound, _}} -> effects?(ctx, a, scope, bound) end),
+      impure:
+        Enum.map(spec.fairness, fn {_, _, {a, scope, bound, _}} ->
+          effects?(ctx, a, scope, bound)
+        end),
       invariants:
         Enum.map(config.invariants, &{&1, root.(&1)}) ++
           for({name, {:invariant, c}} <- obligations, do: {name, c}),
@@ -1565,7 +1568,10 @@ defmodule Accord.TLA.Checker.Search do
             :ets.insert(cache, {{:fair, i, :taken, id, wid}, taken})
 
           {:strong, :act} ->
-            :ets.insert(cache, {{:fair, i, :taken, id, wid}, fair_taken?(model, fc, s, t, id == wid)})
+            :ets.insert(
+              cache,
+              {{:fair, i, :taken, id, wid}, fair_taken?(model, fc, s, t, id == wid)}
+            )
 
           _ ->
             :ok

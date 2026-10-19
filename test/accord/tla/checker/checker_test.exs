@@ -146,7 +146,7 @@ defmodule Accord.TLA.CheckerTest do
     test "an instance inside LET", %{tmp_dir: dir} do
       File.write!(
         Path.join(dir, "Inner.tla"),
-        "---- MODULE Inner ----\nCONSTANT K\nDouble == K + K\n====\n"
+        "---- MODULE Inner ----\nEXTENDS Naturals\nCONSTANT K\nDouble == K + K\n====\n"
       )
 
       tla = """

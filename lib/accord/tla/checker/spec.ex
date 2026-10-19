@@ -445,6 +445,9 @@ defmodule Accord.TLA.Checker.Spec do
       %{kind: :instance} = d, acc ->
         Eval.let_env([d], acc)
 
+      %{kind: :recursive}, acc ->
+        acc
+
       d, acc ->
         %{
           acc
@@ -539,7 +542,12 @@ defmodule Accord.TLA.Checker.Spec do
 
       case Map.get(Process.get(:tla_levels) || %{}, memo) do
         nil ->
-          bound = ps |> Enum.map(&elem(&1, 0)) |> Enum.zip(Enum.map(arg_levels, &{:level, &1})) |> Map.new()
+          bound =
+            ps
+            |> Enum.map(&elem(&1, 0))
+            |> Enum.zip(Enum.map(arg_levels, &{:level, &1}))
+            |> Map.new()
+
           l = level(d.body, %{env | scope: sid, bound: bound}, MapSet.put(seen, key))
           Process.put(:tla_levels, Map.put(Process.get(:tla_levels) || %{}, memo, l))
           l

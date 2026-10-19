@@ -29,7 +29,7 @@ defmodule Accord.TLA.Checker do
   from `.tla` files in the directory of the root module or in `:paths`.
   """
 
-  alias Accord.TLA.Checker.{Config, Context, Parser, Search, Value}
+  alias Accord.TLA.Checker.{Config, Context, Parser, Search, Semantic, Value}
 
   @type result ::
           {:ok, Accord.TLA.TLCParser.stats()}
@@ -132,7 +132,13 @@ defmodule Accord.TLA.Checker do
   end
 
   defp load(path, config, opts) do
-    {:ok, Context.load(path, config, paths: Keyword.get(opts, :paths, []))}
+    ctx = Context.load(path, config, paths: Keyword.get(opts, :paths, []))
+
+    # The semantic checks of SANY (TLC stops on a semantic error).
+    root = Map.fetch!(ctx.modules, ctx.root_module)
+    errs = root |> Semantic.check(paths: ctx.paths) |> Enum.filter(&(&1.level == :error))
+
+    if errs == [], do: {:ok, ctx}, else: {:error, :parse, semantic_message(errs)}
   rescue
     e in [Parser.Error, Accord.TLA.Checker.Lexer.Error] ->
       {:error, :parse, Exception.message(e)}
@@ -144,6 +150,22 @@ defmodule Accord.TLA.Checker do
 
     e in Value.Error ->
       {:error, :config, Exception.message(e)}
+  end
+
+  # The report of SANY for semantic errors.
+  defp semantic_message(errs) do
+    body =
+      Enum.map_join(errs, "\n\n", fn e ->
+        where =
+          case e.pos do
+            {l, c} -> "line #{l}, col #{c} of module #{e.module}"
+            _ -> "module #{e.module}"
+          end
+
+        "#{where}\n\n#{e.message}"
+      end)
+
+    "Semantic errors:\n\n*** Errors: #{length(errs)}\n\n" <> body
   end
 
   # `:invariant_exprs`: invariants as TLA+ text (as TLC's `-inv`).

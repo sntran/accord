@@ -79,7 +79,7 @@ defmodule Accord.MixProject do
       links: %{
         "GitHub" => @source_url
       },
-      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md .formatter.exs)
+      files: ~w(lib priv mix.exs README.md LICENSE CHANGELOG.md .formatter.exs)
     ]
   end
 

@@ -87,6 +87,14 @@ defmodule Accord.TLA.Checker.Parser do
       assumes: [],
       submodules: [],
       recursive: [],
+      # The theorems (with their proofs) and the USE and HIDE of the
+      # module, for the semantic checks (see `Accord.TLA.Checker.Semantic`).
+      theorems: [],
+      uses: [],
+      # The top-level items in order: `{kind, name, pos}` (kind is
+      # :recursive, :constant, :variable, :def, :instance, :theorem,
+      # :assume, :use, :proof, :module).
+      order: [],
       # For a module inside another module: the name of the outer module.
       outer: nil,
       # The texts of the tokens of the file, and its strings, in the order
@@ -348,16 +356,18 @@ defmodule Accord.TLA.Checker.Parser do
       {:separator, _, _, _} ->
         units(advance(p), mod, false)
 
-      {:module_start, _, _, _} ->
+      {:module_start, _, _, _} = t ->
         {sub, p} = module(p)
+        mod = add_order(mod, :module, sub.name, t)
         units(p, %{mod | submodules: [%{sub | outer: mod.name} | mod.submodules]}, false)
 
       {:kw, "EXTENDS", _, _} ->
         {names, p} = name_list(advance(p))
         units(p, %{mod | extends: mod.extends ++ names}, false)
 
-      {:kw, kw, _, _} when kw in ["CONSTANT", "CONSTANTS"] ->
+      {:kw, kw, _, _} = t when kw in ["CONSTANT", "CONSTANTS"] ->
         {decls, p} = constant_decls(advance(p))
+        mod = Enum.reduce(decls, mod, fn {name, _}, m -> add_order(m, :constant, name, t) end)
         units(p, %{mod | constants: mod.constants ++ decls}, false)
 
       {:kw, kw, _, _} when kw in ["VARIABLE", "VARIABLES"] ->
@@ -370,6 +380,13 @@ defmodule Accord.TLA.Checker.Parser do
               into: mod.var_pos,
               do: {name, {line, col}}
 
+        mod =
+          Enum.reduce(
+            names,
+            mod,
+            &add_order(&2, :variable, &1, {:id, &1, elem(var_pos[&1], 0), elem(var_pos[&1], 1)})
+          )
+
         units(p, %{mod | variables: mod.variables ++ names, var_pos: var_pos}, false)
 
       {:kw, kw, _, _} = t when kw in ["ASSUME", "ASSUMPTION", "AXIOM"] ->
@@ -378,42 +395,403 @@ defmodule Accord.TLA.Checker.Parser do
             units(p, mod, false)
 
           {name, e, p} ->
+            mod = add_order(mod, :assume, name, t)
             mod = %{mod | assumes: mod.assumes ++ [{e, pos(t)}]}
-            mod = if name, do: %{mod | units: [named_unit(name, e, t) | mod.units]}, else: mod
+
+            mod =
+              if name,
+                do: %{mod | units: [Map.put(named_unit(name, e, t), :from, :assume) | mod.units]},
+                else: mod
+
             units(p, mod, false)
         end
 
       {:kw, kw, _, _} = t when kw in ["THEOREM", "LEMMA", "PROPOSITION", "COROLLARY"] ->
+        mod = add_order(mod, :theorem, nil, t)
+        stop = skip_unit(p).pos
+        mod = %{mod | theorems: mod.theorems ++ [theorem(p, stop)]}
+
         case named_theorem(p) do
-          {name, e, p2} -> units(p2, %{mod | units: [named_unit(name, e, t) | mod.units]}, false)
-          nil -> units(skip_unit(p), mod, false)
+          {name, e, p2} ->
+            unit = Map.put(named_unit(name, e, t), :from, :theorem)
+            units(p2, %{mod | units: [unit | mod.units]}, false)
+
+          nil ->
+            units(%{p | pos: stop}, mod, false)
         end
 
-      {:kw, kw, _, _} when kw in ["USE", "HIDE"] ->
-        units(skip_unit(p), mod, false)
+      {:kw, kw, _, _} = t when kw in ["USE", "HIDE"] ->
+        stop = skip_unit(p).pos
+        mod = add_order(mod, :use, nil, t)
+        mod = %{mod | uses: mod.uses ++ [use_unit(p, stop)]}
+        units(%{p | pos: stop}, mod, false)
 
-      {:kw, "PROOF", _, _} ->
-        units(skip_unit(p), mod, false)
+      {:kw, "PROOF", _, _} = t ->
+        units(skip_unit(p), add_order(mod, :proof, nil, t), false)
 
       {:kw, "LOCAL", _, _} ->
         units(advance(p), mod, true)
 
-      {:kw, "RECURSIVE", _, _} ->
+      {:kw, "RECURSIVE", _, _} = t ->
         {decls, p} = constant_decls(advance(p))
+        mod = Enum.reduce(decls, mod, fn {name, _}, m -> add_order(m, :recursive, name, t) end)
         units(p, %{mod | recursive: mod.recursive ++ decls}, false)
 
-      {:kw, "INSTANCE", _, _} ->
+      {:kw, "INSTANCE", _, _} = t ->
         {inst, p} = instance(advance(p), nil, [], local?)
+        mod = add_order(mod, :instance, nil, t)
         units(p, %{mod | units: [inst | mod.units]}, false)
 
-      _ ->
+      t ->
         if proof_start?(p) do
-          units(skip_unit(p), mod, false)
+          units(skip_unit(p), add_order(mod, :proof, nil, t), false)
         else
           {def, p} = definition(p, local?)
+          mod = add_order(mod, if(def.kind == :instance, do: :instance, else: :def), def.name, t)
           units(p, %{mod | units: [def | mod.units]}, false)
         end
     end
+  end
+
+  defp add_order(mod, kind, name, t), do: %{mod | order: mod.order ++ [{kind, name, pos(t)}]}
+
+  # -- Theorems and proofs (for the semantic checks only) --
+
+  # A theorem from its keyword to `stop`: `%{name, body, proof, pos}`.
+  # The body is an expression or an ASSUME/PROVE; the proof is nil,
+  # `{:by, facts, defs, only?}`, `:obvious`, `:omitted`, or `{:steps,
+  # steps}`. A theorem that the parser cannot read gives `%{unparsed:
+  # true}` (the checks skip it).
+  defp theorem(p, stop) do
+    t = raw(p)
+    p = %{p | n: stop} |> advance()
+
+    {name, p} =
+      case {raw(p), raw_at(p, p.pos + 1)} do
+        {{:id, n, _, _}, {:op, "==", _, _}} -> {n, %{p | pos: p.pos + 2}}
+        _ -> {nil, p}
+      end
+
+    body_end = Enum.find(p.pos..(stop - 1)//1, stop, &(proof_token?(p, &1) or proof_kw?(p, &1)))
+    {body, p2} = statement(%{p | n: body_end})
+    if p2.pos != body_end, do: error(p2, raw(p2), "unexpected #{describe(raw(p2))} in a theorem")
+    proof = if body_end < stop, do: proof(%{p2 | n: stop, pos: body_end}, 0), else: nil
+    %{name: name, body: body, proof: proof, pos: pos(t)}
+  rescue
+    e in Error ->
+      %{
+        name: nil,
+        body: nil,
+        proof: nil,
+        pos: pos(raw(p)),
+        unparsed: "#{e.line}:#{e.column} #{e.message}"
+      }
+  end
+
+  # An expression, or `ASSUME ... PROVE ...`.
+  defp statement(p) do
+    if at?(p, :kw, "ASSUME"), do: assume_prove(advance(p)), else: expr(p, 0)
+  end
+
+  # `ASSUME a, b, NEW x \in S PROVE e`: `{:assume_prove, items, e}`.
+  defp assume_prove(p) do
+    {items, p} = assume_items(p, [])
+    p = expect(p, :kw, "PROVE")
+    {goal, p} = expr(p, 0)
+    {{:assume_prove, items, goal}, p}
+  end
+
+  defp assume_items(p, acc) do
+    {item, p} =
+      case {raw(p), raw_at(p, p.pos + 1), raw_at(p, p.pos + 2)} do
+        {{:kw, kw, _, _}, _, _}
+        when kw in ["NEW", "CONSTANT", "VARIABLE", "STATE", "ACTION", "TEMPORAL"] ->
+          new_decl(p)
+
+        {{:kw, "ASSUME", _, _}, _, _} ->
+          assume_prove(advance(p))
+
+        # A labeled ASSUME/PROVE: `lab :: ASSUME ... PROVE ...`.
+        {{:id, lab, _, _}, {:op, "::", _, _}, {:kw, "ASSUME", _, _}} ->
+          {ap, p} = assume_prove(%{p | pos: p.pos + 3})
+          {{:label, lab, [], ap}, p}
+
+        _ ->
+          expr(p, 0)
+      end
+
+    if op?(p, ","),
+      do: assume_items(advance(p), [item | acc]),
+      else: {Enum.reverse([item | acc]), p}
+  end
+
+  # `NEW x`, `NEW x \in S`, `NEW CONSTANT F(_)`, `VARIABLE v`, `NEW TEMPORAL t`:
+  # `{:new, kind, name, arity, set}`.
+  defp new_decl(p) do
+    t = raw(p)
+    p = if at?(p, :kw, "NEW"), do: advance(p), else: p
+
+    {kind, p} =
+      case raw(p) do
+        {:kw, k, _, _} when k in ["CONSTANT", "VARIABLE", "STATE", "ACTION", "TEMPORAL"] ->
+          {k |> String.downcase() |> String.to_atom(), advance(p)}
+
+        _ ->
+          {:constant, p}
+      end
+
+    {[{name, arity}], p} = constant_decls_one(p)
+
+    {set, p} =
+      if op?(p, "\\in") do
+        {s, p} = expr(advance(p), 0)
+        {s, p}
+      else
+        {nil, p}
+      end
+
+    {{:new, kind, name, arity, set, pos(t)}, p}
+  end
+
+  # One declaration of `constant_decls/1`, without a list.
+  defp constant_decls_one(p) do
+    {decl, p} = constant_decl(p)
+    {[decl], p}
+  end
+
+  # A proof: terminal (BY, OBVIOUS, OMITTED) or steps.
+  defp proof(p, level) do
+    p = if at?(p, :kw, "PROOF"), do: advance(p), else: p
+
+    case raw(p) do
+      # `PROOF` before the steps (they come after this step).
+      _ when p.pos >= p.n -> nil
+      {:kw, "OBVIOUS", _, _} -> :obvious
+      {:kw, "OMITTED", _, _} -> :omitted
+      {:kw, "BY", _, _} -> use_body(advance(p), :by)
+      _ -> {:steps, steps(p, level)}
+    end
+  end
+
+  # The steps of a proof. Each step: `%{level, label, kind, body, proof,
+  # pos}`. A step with a higher level belongs to the proof of the step
+  # before it.
+  defp steps(p, base) do
+    starts = Enum.filter(p.pos..(p.n - 1)//1, &step_start?(p, &1))
+    if starts == [] or hd(starts) != p.pos, do: error(p, raw(p), "expected a proof step")
+
+    {flat, _} =
+      starts
+      |> Enum.zip(tl(starts) ++ [p.n])
+      |> Enum.map_reduce(base, fn {i, j}, cur ->
+        step = step(%{p | pos: i, n: j}, base, cur)
+        {step, step.level}
+      end)
+
+    nest(flat)
+  end
+
+  # A step starts a line, and does not continue a list (`BY <1>1,\n <1>2`).
+  defp step_start?(p, i) do
+    {_, _, line, _} = raw_at(p, i)
+    prev = raw_at(p, i - 1)
+
+    (i == p.pos or (elem(prev, 2) < line and not match?({:op, ",", _, _}, prev))) and
+      step_label?(p, i)
+  end
+
+  defp nest([]), do: []
+
+  defp nest([step | rest]) do
+    {sub, rest} = Enum.split_while(rest, &(&1.level > step.level))
+    proof = if sub == [], do: step.proof, else: {:steps, nest(sub)}
+    [%{step | proof: proof} | nest(rest)]
+  end
+
+  # `<1>2. body BY ...`: one step (its own terminal proof only).
+  defp step(p, base, cur) do
+    t = raw(p)
+    # `<+>` and `<*>`: a level from the steps before (`implicit`).
+    {level, implicit, p} =
+      case raw_at(p, p.pos + 1) do
+        {:num, n, _, _} ->
+          {n, false, %{p | pos: p.pos + 3}}
+
+        {:op, "+", _, _} ->
+          {cur + 1, true, %{p | pos: p.pos + 3}}
+
+        {:op, "*", _, _} ->
+          {if(cur == base, do: base + 1, else: cur), true, %{p | pos: p.pos + 3}}
+      end
+
+    {label, p} = step_label(p)
+
+    p = if op?(p, "."), do: advance(p), else: p
+
+    proof_at =
+      Enum.find(
+        p.pos..(p.n - 1)//1,
+        p.n,
+        &match?({:kw, k, _, _} when k in ["PROOF", "BY", "OBVIOUS", "OMITTED"], raw_at(p, &1))
+      )
+
+    {kind, body, p2} = step_body(%{p | n: proof_at})
+
+    if p2.pos != proof_at,
+      do: error(p2, raw(p2), "unexpected #{describe(raw(p2))} in a proof step")
+
+    proof = if proof_at < p.n, do: proof(%{p | pos: proof_at}, level), else: nil
+
+    %{
+      level: level,
+      implicit: implicit,
+      label: label,
+      kind: kind,
+      body: body,
+      proof: proof,
+      pos: pos(t)
+    }
+  rescue
+    e in Error ->
+      {_, _, l, c} = raw(p)
+      reraise %{e | line: e.line || l, message: "step at #{l}:#{c}: #{e.message}"}, __STACKTRACE__
+  end
+
+  # The label right after `<n>` (no space): `<1>a`, `<2>3`.
+  defp step_label(p) do
+    {_, _, gline, gcol} = raw_at(p, p.pos - 1)
+
+    case raw(p) do
+      {kind, v, ^gline, col} when kind in [:id, :num] and col == gcol + 1 ->
+        {to_string(v), advance(p)}
+
+      _ ->
+        {nil, p}
+    end
+  end
+
+  defp step_body(p) do
+    case raw(p) do
+      {:kw, "QED", _, _} ->
+        {:qed, nil, advance(p)}
+
+      {:kw, "SUFFICES", _, _} ->
+        {b, p} = statement(advance(p))
+        {:suffices, b, p}
+
+      {:kw, "CASE", _, _} ->
+        {b, p} = expr(advance(p), 0)
+        {:case, b, p}
+
+      {:kw, "PICK", _, _} ->
+        {binds, p} = binders(advance(p), false)
+        p = expect_op(p, ":")
+        {b, p} = expr(p, 0)
+        {:pick, {binds, b}, p}
+
+      {:kw, "TAKE", _, _} ->
+        {binds, p} = binders(advance(p), false)
+        {:take, binds, p}
+
+      {:kw, "WITNESS", _, _} ->
+        {es, p} = expr_list_until(advance(p))
+        {:witness, es, p}
+
+      {:kw, "HAVE", _, _} ->
+        {b, p} = expr(advance(p), 0)
+        {:have, b, p}
+
+      {:kw, kw, _, _} when kw in ["USE", "HIDE"] ->
+        {:use, use_body(advance(p), String.downcase(kw) |> String.to_atom()), %{p | pos: p.n}}
+
+      {:kw, "DEFINE", _, _} ->
+        {defs, p} = step_defs(advance(p), [])
+        {:define, defs, p}
+
+      {:kw, "INSTANCE", _, _} ->
+        {inst, p} = instance(advance(p), nil, [], false)
+        {:instance, inst, p}
+
+      {:kw, "ASSUME", _, _} ->
+        {b, p} = assume_prove(advance(p))
+        {:assert, b, p}
+
+      _ ->
+        if definition_start?(p, p.pos) do
+          {defs, p} = step_defs(p, [])
+          {:define, defs, p}
+        else
+          {b, p} = expr(p, 0)
+          {:assert, b, p}
+        end
+    end
+  end
+
+  defp step_defs(p, acc) do
+    if p.pos < p.n and not match?({:eof, _, _, _}, raw(p)) do
+      {d, p} = definition(p, false)
+      step_defs(p, [d | acc])
+    else
+      {Enum.reverse(acc), p}
+    end
+  end
+
+  defp expr_list_until(p) do
+    {e, p} = expr(p, 0)
+
+    if op?(p, ","),
+      do: (fn {r, p} -> {[e | r], p} end).(expr_list_until(advance(p))),
+      else: {[e], p}
+  end
+
+  # `USE ...`, `HIDE ...` at the top level.
+  defp use_unit(p, stop) do
+    t = raw(p)
+    kind = if at?(p, :kw, "USE"), do: :use, else: :hide
+    Map.put(use_body(%{p | n: stop} |> advance(), kind), :pos, pos(t))
+  rescue
+    e in Error ->
+      %{kind: :use, facts: [], defs: [], only: false, pos: pos(raw(p)), unparsed: e.message}
+  end
+
+  # `[ONLY] facts [DEF[S] names]`: `%{kind, only, facts, defs}`. A fact is
+  # an expression, `{:module, name}`, or a step name `{:step_ref, level,
+  # label}`.
+  defp use_body(p, kind) do
+    {only, p} = if at?(p, :kw, "ONLY"), do: {true, advance(p)}, else: {false, p}
+
+    {facts, p} =
+      if p.pos < p.n and not match?({:kw, k, _, _} when k in ["DEF", "DEFS"], raw(p)),
+        do: facts(p, []),
+        else: {[], p}
+
+    {defs, _p} =
+      if match?({:kw, k, _, _} when k in ["DEF", "DEFS"], raw(p)),
+        do: facts(advance(p), []),
+        else: {[], p}
+
+    %{kind: kind, only: only, facts: facts, defs: defs, pos: pos(raw(p))}
+  end
+
+  defp facts(p, acc) do
+    {f, p} =
+      case {raw(p), raw_at(p, p.pos + 1)} do
+        {{:kw, "MODULE", _, _}, _} ->
+          {name, p} = expect_id(advance(p))
+          {{:module, name}, p}
+
+        # An operator name: `DEF \\prec, +`.
+        {{:op, op, _, _}, next} when op not in ["(", "{", "[", "<<", "<", "~", "-", "[]", "<>"] ->
+          if p.pos + 1 >= p.n or match?({:op, ",", _, _}, next) or
+               match?({:kw, k, _, _} when k in ["DEF", "DEFS"], next),
+             do: {{:op_name, op}, advance(p)},
+             else: expr(p, 0)
+
+        _ ->
+          expr(p, 0)
+      end
+
+    if op?(p, ","), do: facts(advance(p), [f | acc]), else: {Enum.reverse([f | acc]), p}
   end
 
   defp finish(mod) do
@@ -441,37 +819,44 @@ defmodule Accord.TLA.Checker.Parser do
 
   # `N, Proc, F(_, _), _ + _`.
   defp constant_decls(p) do
-    {decl, p} =
-      case peek(p) do
-        {:id, name, _, _} ->
-          p = advance(p)
-
-          if op?(p, "(") do
-            {arity, p} = underscores(advance(p), 0)
-            {{name, arity}, p}
-          else
-            {{name, 0}, p}
-          end
-
-        {:op, "_", _, _} ->
-          # Infix or postfix constant operator: `_ + _`, `_ ^+`.
-          case {raw_at(p, p.pos + 1), raw_at(p, p.pos + 2)} do
-            {{:op, op, _, _}, {:op, "_", _, _}} -> {{op, 2}, %{p | pos: p.pos + 3}}
-            {{:op, op, _, _}, _} -> {{op, 1}, %{p | pos: p.pos + 2}}
-          end
-
-        {:op, op, _, _} ->
-          {{op, 1}, p |> advance() |> expect_op("_")}
-
-        t ->
-          error(p, t, "expected a constant declaration, found #{describe(t)}")
-      end
+    {decl, p} = constant_decl(p)
 
     if op?(p, ",") do
       {rest, p} = constant_decls(advance(p))
       {[decl | rest], p}
     else
       {[decl], p}
+    end
+  end
+
+  defp constant_decl(p) do
+    case peek(p) do
+      {:id, name, _, _} ->
+        p = advance(p)
+
+        if op?(p, "(") do
+          {arity, p} = underscores(advance(p), 0)
+          {{name, arity}, p}
+        else
+          {{name, 0}, p}
+        end
+
+      {:op, "_", _, _} ->
+        # Infix or postfix constant operator: `_ + _`, `_ ^+`.
+        case {raw_at(p, p.pos + 1), raw_at(p, p.pos + 2)} do
+          {{:op, op, _, _}, {:op, "_", _, _}} -> {{op, 2}, %{p | pos: p.pos + 3}}
+          {{:op, op, _, _}, _} -> {{op, 1}, %{p | pos: p.pos + 2}}
+        end
+
+      # The prefix minus: `-._`.
+      {:op, "-", _, _} when elem(elem(p.toks, p.pos + 1), 1) == "." ->
+        {{"-.", 1}, %{p | pos: p.pos + 2} |> expect_op("_")}
+
+      {:op, op, _, _} ->
+        {{op, 1}, p |> advance() |> expect_op("_")}
+
+      t ->
+        error(p, t, "expected a constant declaration, found #{describe(t)}")
     end
   end
 
@@ -529,6 +914,9 @@ defmodule Accord.TLA.Checker.Parser do
     end
   end
 
+  defp proof_kw?(p, i),
+    do: match?({:kw, kw, _, _} when kw in ["PROOF", "BY", "OBVIOUS", "OMITTED"], raw_at(p, i))
+
   defp proof_token?(p, i) do
     {_, _, line, _} = raw_at(p, i)
     {_, _, prev_line, _} = raw_at(p, i - 1)
@@ -549,9 +937,15 @@ defmodule Accord.TLA.Checker.Parser do
   #
   # Inside the skipped text, definitions between LET and IN, and after a
   # proof DEFINE (to the next step), belong to the theorem or proof.
-  defp skip_unit(p), do: %{p | pos: next_unit(p, p.pos + 1, 0, false)}
+  #
+  # Between ASSUME and PROVE, declarations (`CONSTANT c`, `VARIABLE v`)
+  # belong to the ASSUME/PROVE.
+  defp skip_unit(p) do
+    aps = if at?(p, :kw, "ASSUME"), do: 1, else: 0
+    %{p | pos: next_unit(p, p.pos + 1, 0, false, aps)}
+  end
 
-  defp next_unit(p, i, lets, define?) do
+  defp next_unit(p, i, lets, define?, aps) do
     t = raw_at(p, i)
 
     cond do
@@ -559,25 +953,31 @@ defmodule Accord.TLA.Checker.Parser do
         i
 
       match?({:kw, "LET", _, _}, t) ->
-        next_unit(p, i + 1, lets + 1, define?)
+        next_unit(p, i + 1, lets + 1, define?, aps)
 
       match?({:kw, "IN", _, _}, t) ->
-        next_unit(p, i + 1, max(lets - 1, 0), define?)
+        next_unit(p, i + 1, max(lets - 1, 0), define?, aps)
 
       match?({:kw, "DEFINE", _, _}, t) ->
-        next_unit(p, i + 1, lets, true)
+        next_unit(p, i + 1, lets, true, aps)
+
+      match?({:kw, "PROVE", _, _}, t) ->
+        next_unit(p, i + 1, lets, define?, max(aps - 1, 0))
 
       step_label?(p, i) ->
-        next_unit(p, i + 1, lets, false)
+        next_unit(p, i + 1, lets, false, aps)
 
-      lets == 0 and not define? and unit_start?(p, i, t) ->
+      lets == 0 and not define? and aps == 0 and unit_start?(p, i, t) ->
         i
 
       match?({type, _, _, _} when type in [:module_end, :module_start, :separator], t) ->
         i
 
+      match?({:kw, "ASSUME", _, _}, t) ->
+        next_unit(p, i + 1, lets, define?, aps + 1)
+
       true ->
-        next_unit(p, i + 1, lets, define?)
+        next_unit(p, i + 1, lets, define?, aps)
     end
   end
 
@@ -605,7 +1005,9 @@ defmodule Accord.TLA.Checker.Parser do
       :kw when first_on_line and value in ["ASSUME", "ASSUMPTION"] ->
         # `LEMMA Name ==` and `THEOREM` can start with ASSUME on the next line.
         not match?({:kw, kw, _, _} when kw in ["NEW", "CONSTANT", "VARIABLE"], raw_at(p, i + 1)) and
-          not theorem_head?(p, i - 1)
+          not theorem_head?(p, i - 1) and
+          not match?({:kw, "SUFFICES", _, _}, raw_at(p, i - 1)) and
+          not match?({:op, op, _, _} when op in [",", "("], raw_at(p, i - 1))
 
       :kw when first_on_line ->
         value in @unit_keywords
@@ -618,12 +1020,22 @@ defmodule Accord.TLA.Checker.Parser do
     end
   end
 
+  # `THEOREM` or `THEOREM Name ==` ends at `i`.
   defp theorem_head?(p, i) do
-    case raw_at(p, i) do
-      {:kw, kw, _, _} when kw in ["THEOREM", "LEMMA", "PROPOSITION", "COROLLARY"] -> true
-      {:op, "==", _, _} -> theorem_head?(p, i - 2)
-      {:id, _, _, _} -> theorem_head?(p, i - 1)
-      _ -> false
+    thm? =
+      &match?({:kw, kw, _, _} when kw in ["THEOREM", "LEMMA", "PROPOSITION", "COROLLARY"], &1)
+
+    case {raw_at(p, i - 2), raw_at(p, i - 1), raw_at(p, i)} do
+      {_, _, t}
+      when is_tuple(t) and elem(t, 0) == :kw and
+             elem(t, 1) in ["THEOREM", "LEMMA", "PROPOSITION", "COROLLARY"] ->
+        true
+
+      {k, {:id, _, _, _}, {:op, "==", _, _}} ->
+        thm?.(k)
+
+      _ ->
+        false
     end
   end
 
@@ -865,9 +1277,10 @@ defmodule Accord.TLA.Checker.Parser do
       {:kw, "IN", _, _} ->
         {Enum.reverse(acc), advance(p)}
 
-      {:kw, "RECURSIVE", _, _} ->
-        {_decls, p} = constant_decls(advance(p))
-        let_defs(p, acc)
+      # The checks of SANY use the RECURSIVE declarations of a LET.
+      {:kw, "RECURSIVE", _, _} = t ->
+        {decls, p} = constant_decls(advance(p))
+        let_defs(p, [%{kind: :recursive, name: nil, decls: decls, pos: pos(t)} | acc])
 
       _ ->
         {def, p} = definition(p, false)
@@ -1079,6 +1492,20 @@ defmodule Accord.TLA.Checker.Parser do
         p = p |> expect_op(")") |> pop_limit()
         {e, p}
 
+      # A step name in a proof: `<1>a`.
+      {:op, "<", _, _} = t ->
+        if step_label?(p, p.pos) do
+          level = elem(raw_at(p, p.pos + 1), 1)
+          {label, p2} = step_label(%{p | pos: p.pos + 3})
+
+          # `<1>4!1!(v)`: a part of the step.
+          if op?(p2, "!"),
+            do: instance_path(advance(p2), [{"<#{level}>#{label}", []}], t),
+            else: {{:step_ref, level, label}, p2}
+        else
+          prefix_form(p, t)
+        end
+
       {:op, "{", _, _} ->
         braces(advance(p))
 
@@ -1130,24 +1557,45 @@ defmodule Accord.TLA.Checker.Parser do
 
       {:kw, fair, _, _} when fair in ["WF_", "SF_"] ->
         {sub, p} = subscript(advance(p))
-        p = p |> expect_op("(") |> push_limit(:none)
-        {a, p} = expr(p, 0)
-        p = p |> expect_op(")") |> pop_limit()
+
+        # The subscript can be an application: `WF_f(x)(A)`. Without a
+        # second group, the group is the action: `WF_I!v(A)`.
+        {sub, a, p} =
+          case {sub, op?(p, "(")} do
+            {_, true} ->
+              p = p |> expect_op("(") |> push_limit(:none)
+              {a, p} = expr(p, 0)
+              {sub, a, p |> expect_op(")") |> pop_limit()}
+
+            {{:app, n, [a], pos}, false} ->
+              {{:name, n, pos}, a, p}
+
+            {{:inst, path, n, [a], pos}, false} ->
+              {{:inst, path, n, [], pos}, a, p}
+
+            _ ->
+              {sub, nil, expect_op(p, "(")}
+          end
+
         {{if(fair == "WF_", do: :wf, else: :sf), sub, a}, p}
 
-      # An infix operator in the prefix form: `+(a, b)`.
       {:op, op, _, _}
       when (is_map_key(@infix, op) and op not in ["-", "\\X"]) or op in ["^+", "^*", "^#"] ->
-        if match?({:op, "(", _, _}, raw_at(p, p.pos + 1)) do
-          p = p |> advance() |> advance() |> push_limit(:none)
-          {args, p} = args(p)
-          {{:app, op, args, pos(t)}, pop_limit(p)}
-        else
-          error(p, t, "unexpected #{describe(t)}")
-        end
+        prefix_form(p, t)
 
       _ ->
         error(p, t, "unexpected #{describe(t)}")
+    end
+  end
+
+  # An infix operator in the prefix form: `+(a, b)`.
+  defp prefix_form(p, {:op, op, _, _} = t) do
+    if match?({:op, "(", _, _}, raw_at(p, p.pos + 1)) do
+      p = p |> advance() |> advance() |> push_limit(:none)
+      {args, p} = args(p)
+      {{:app, op, args, pos(t)}, pop_limit(p)}
+    else
+      error(p, t, "unexpected #{describe(t)}")
     end
   end
 
@@ -1191,21 +1639,38 @@ defmodule Accord.TLA.Checker.Parser do
   defp instance_path(p, path, t) do
     {name, p} =
       case peek(p) do
-        {:id, n, _, _} -> {n, advance(p)}
-        {:num, n, _, _} -> {n, advance(p)}
-        {:op, "(", _, _} -> {:null, p}
-        {:op, "<<", _, _} -> {:ll, advance(p)}
-        {:op, ">>", _, _} -> {:gg, advance(p)}
-        {:op, "@", _, _} -> {:at, advance(p)}
-        {:op, ":", _, _} -> {:colon, advance(p)}
+        {:id, n, _, _} ->
+          {n, advance(p)}
+
+        {:num, n, _, _} ->
+          {n, advance(p)}
+
+        {:op, "(", _, _} ->
+          {:null, p}
+
+        {:op, "<<", _, _} ->
+          {:ll, advance(p)}
+
+        {:op, ">>", _, _} ->
+          {:gg, advance(p)}
+
+        {:op, "@", _, _} ->
+          {:at, advance(p)}
+
+        {:op, ":", _, _} ->
+          {:colon, advance(p)}
+
         # `I!-.(a)`: the prefix minus.
         {:op, "-", _, _} ->
           if match?({:op, ".", _, _}, raw_at(p, p.pos + 1)),
             do: {"-.", %{p | pos: p.pos + 2}},
             else: {"-", advance(p)}
 
-        {:op, op, _, _} -> {op, advance(p)}
-        tok -> error(p, tok, "expected a name after `!`")
+        {:op, op, _, _} ->
+          {op, advance(p)}
+
+        tok ->
+          error(p, tok, "expected a name after `!`")
       end
 
     {args, p} =
@@ -1303,11 +1768,7 @@ defmodule Accord.TLA.Checker.Parser do
   defp subscript(p) do
     case peek(p) do
       {:id, name, _, _} = t ->
-        p = advance(p)
-
-        if op?(p, "!"),
-          do: instance_path(advance(p), [{name, []}], t),
-          else: {{:name, name, pos(t)}, p}
+        name_expr(advance(p), name, t)
 
       {:op, "<<", _, _} ->
         angles(advance(p))

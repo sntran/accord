@@ -75,6 +75,9 @@ defmodule Accord.TLA.Checker.Constant do
           %{kind: :instance} ->
             false
 
+          %{kind: :recursive} ->
+            true
+
           %{kind: :fun} = d ->
             binds?(d.binds, ctx, sid, local) and
               expr?(d.body, ctx, sid, bind_names(d.binds, local))
@@ -135,17 +138,34 @@ defmodule Accord.TLA.Checker.Constant do
 
   defp entry?(entry, ctx) do
     case entry do
-      nil -> true
-      {:var, _} -> false
-      {:const, _} -> true
+      nil ->
+        true
+
+      {:var, _} ->
+        false
+
+      {:const, _} ->
+        true
+
       # TLC gives these operators a state or action level, so a
       # definition that uses them is not a constant.
-      {:native, _, name} -> name not in @not_constant
-      {:value, _} -> true
-      {:def, d, sid} -> body?(d, ctx, sid)
-      {:alias, sid, target} -> entry?(Context.lookup(ctx, sid, target), ctx)
-      {:subst, expr, outer, frame} -> not let_frame?(ctx, frame) and expr?(expr, ctx, outer, MapSet.new())
-      _ -> false
+      {:native, _, name} ->
+        name not in @not_constant
+
+      {:value, _} ->
+        true
+
+      {:def, d, sid} ->
+        body?(d, ctx, sid)
+
+      {:alias, sid, target} ->
+        entry?(Context.lookup(ctx, sid, target), ctx)
+
+      {:subst, expr, outer, frame} ->
+        not let_frame?(ctx, frame) and expr?(expr, ctx, outer, MapSet.new())
+
+      _ ->
+        false
     end
   end
 

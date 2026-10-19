@@ -103,7 +103,6 @@ defmodule Accord.TLA.Checker.Value do
     fun(Map.new(keys, fn k -> {k, f.(k)} end))
   end
 
-
   # An infinite set stays lazy: TLC can keep it as a value (for example as
   # an element of a set) as long as nothing enumerates it.
   def canon(v) do

@@ -779,7 +779,6 @@ defmodule Accord.TLA.Checker.Eval do
 
   def op_value({:op_arg, sym}, env), do: {:op_value, sym, op_arity(sym), {:named, sym, env.scope}}
 
-
   def op_value({:name, n, _}, env) do
     case Map.fetch(env.bound, n) do
       {:ok, {:op_value, _, _, _} = opv} -> opv
@@ -812,7 +811,9 @@ defmodule Accord.TLA.Checker.Eval do
   defp expr_op(op, [a, b], env) when op in ["<=>", "\\equiv"], do: eval({:equiv, a, b}, env)
   defp expr_op("/\\", [a, b], env), do: eval({:and, [a, b]}, env)
   defp expr_op("\\/", [a, b], env), do: eval({:or, [a, b]}, env)
-  defp expr_op(sym, args, _env), do: error("the operator #{sym} takes 1 argument, not #{length(args)}")
+
+  defp expr_op(sym, args, _env),
+    do: error("the operator #{sym} takes 1 argument, not #{length(args)}")
 
   @doc "Applies an operator value to values."
   def apply_op({:op_value, _name, _arity, impl}, values, env) do
@@ -1032,9 +1033,16 @@ defmodule Accord.TLA.Checker.Eval do
   # Operand selectors.
   defp sel_sub(cur, [{:colon, _} | rest], env, caller, supply) do
     case rest do
-      [] -> {{:expr, cur, env}, supply}
-      [{name, _} | _] when is_binary(name) -> sel_let_name(cur, rest, env, caller, supply)
-      _ -> error("`!:' can be used only after a name and either at the end or before an operator name.")
+      [] ->
+        {{:expr, cur, env}, supply}
+
+      [{name, _} | _] when is_binary(name) ->
+        sel_let_name(cur, rest, env, caller, supply)
+
+      _ ->
+        error(
+          "`!:' can be used only after a name and either at the end or before an operator name."
+        )
     end
   end
 
@@ -1077,10 +1085,19 @@ defmodule Accord.TLA.Checker.Eval do
           case rest do
             [{j, _} | rest2] ->
               case arg_num(j, 2) do
-                1 when p != nil -> {p, env, rest2, supply}
-                1 -> error("Selecting OTHER in a CASE statement.")
-                2 -> {e, env, rest2, supply}
-                _ -> error("Second selector for CASE subexpression must specify one of two operands.")
+                1 when p != nil ->
+                  {p, env, rest2, supply}
+
+                1 ->
+                  error("Selecting OTHER in a CASE statement.")
+
+                2 ->
+                  {e, env, rest2, supply}
+
+                _ ->
+                  error(
+                    "Second selector for CASE subexpression must specify one of two operands."
+                  )
               end
 
             [] ->
@@ -1143,27 +1160,68 @@ defmodule Accord.TLA.Checker.Eval do
   # The operands of an expression, as SANY numbers them.
   defp operands(e) do
     case e do
-      {:app, _, args, _} -> {:plain, args}
-      {:inst, _, _, args, _} -> {:plain, args}
-      {kind, items} when kind in [:and, :or, :set, :tuple, :times] -> {:plain, items}
-      {kind, x} when kind in [:not, :prime, :unchanged, :enabled, :always, :eventually] -> {:plain, [x]}
-      {kind, a, b} when kind in [:implies, :equiv, :leadsto, :fun_set] -> {:plain, [a, b]}
-      {kind, a, sub} when kind in [:box_action, :diamond_action] -> {:plain, [a, sub]}
-      {kind, sub, a} when kind in [:wf, :sf] -> {:plain, [sub, a]}
-      {:if, c, t, f} -> {:plain, [c, t, f]}
-      {:case, arms, other} -> {:case, arms ++ if(other, do: [{nil, other}], else: [])}
-      {kind, binds, body} when kind in [:forall, :exists, :func] -> bound_operands(binds, body)
-      {:choose, bind, body} -> bound_operands([bind], body)
-      {:set_map, body, binds} -> bound_operands(binds, body)
-      {:set_filter, bind, pred} -> bound_operands([bind], pred)
-      {kind, names, body} when kind in [:temporal_forall, :temporal_exists] -> {:bound, names, [], body}
-      {:lambda, names, body} -> {:bound, names, [], body}
-      {:apply, f, [arg]} -> {:plain, [f, arg]}
-      {:apply, f, args} -> {:plain, [f, {:tuple, args}]}
-      {:dot, r, field} -> {:plain, [r, {:str, field}]}
-      {kind, fields} when kind in [:record, :record_set] -> {:plain, Enum.map(fields, &elem(&1, 1))}
-      {:except, f, updates} -> {:plain, [f | Enum.map(updates, fn _ -> {:at} end)]}
-      _ -> :none
+      {:app, _, args, _} ->
+        {:plain, args}
+
+      {:inst, _, _, args, _} ->
+        {:plain, args}
+
+      {kind, items} when kind in [:and, :or, :set, :tuple, :times] ->
+        {:plain, items}
+
+      {kind, x} when kind in [:not, :prime, :unchanged, :enabled, :always, :eventually] ->
+        {:plain, [x]}
+
+      {kind, a, b} when kind in [:implies, :equiv, :leadsto, :fun_set] ->
+        {:plain, [a, b]}
+
+      {kind, a, sub} when kind in [:box_action, :diamond_action] ->
+        {:plain, [a, sub]}
+
+      {kind, sub, a} when kind in [:wf, :sf] ->
+        {:plain, [sub, a]}
+
+      {:if, c, t, f} ->
+        {:plain, [c, t, f]}
+
+      {:case, arms, other} ->
+        {:case, arms ++ if(other, do: [{nil, other}], else: [])}
+
+      {kind, binds, body} when kind in [:forall, :exists, :func] ->
+        bound_operands(binds, body)
+
+      {:choose, bind, body} ->
+        bound_operands([bind], body)
+
+      {:set_map, body, binds} ->
+        bound_operands(binds, body)
+
+      {:set_filter, bind, pred} ->
+        bound_operands([bind], pred)
+
+      {kind, names, body} when kind in [:temporal_forall, :temporal_exists] ->
+        {:bound, names, [], body}
+
+      {:lambda, names, body} ->
+        {:bound, names, [], body}
+
+      {:apply, f, [arg]} ->
+        {:plain, [f, arg]}
+
+      {:apply, f, args} ->
+        {:plain, [f, {:tuple, args}]}
+
+      {:dot, r, field} ->
+        {:plain, [r, {:str, field}]}
+
+      {kind, fields} when kind in [:record, :record_set] ->
+        {:plain, Enum.map(fields, &elem(&1, 1))}
+
+      {:except, f, updates} ->
+        {:plain, [f | Enum.map(updates, fn _ -> {:at} end)]}
+
+      _ ->
+        :none
     end
   end
 
@@ -1315,6 +1373,9 @@ defmodule Accord.TLA.Checker.Eval do
             error("INSTANCE inside LET is not supported here: #{inst.module}")
         end
 
+      %{kind: :recursive}, acc ->
+        acc
+
       d, acc ->
         closure = %{scope: acc.scope, bound: acc.bound, frames: acc.frames, ref: ref}
         %{acc | bound: Map.put(acc.bound, d.name, {:let_def, d, closure})}
@@ -1432,7 +1493,10 @@ defmodule Accord.TLA.Checker.Eval do
 
   defp uses_name?({:name, n, _}, n), do: true
   defp uses_name?({:app, n, _, _}, n), do: true
-  defp uses_name?(t, n) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&uses_name?(&1, n))
+
+  defp uses_name?(t, n) when is_tuple(t),
+    do: t |> Tuple.to_list() |> Enum.any?(&uses_name?(&1, n))
+
   defp uses_name?(l, n) when is_list(l), do: Enum.any?(l, &uses_name?(&1, n))
   defp uses_name?(%{} = m, n) when not is_struct(m), do: m |> Map.values() |> uses_name?(n)
   defp uses_name?(_, _), do: false
@@ -1826,7 +1890,6 @@ defmodule Accord.TLA.Checker.Eval do
         guard(e, env, mode)
     end
   end
-
 
   defp label(env, name) when is_binary(name), do: if(env.label_mode, do: name, else: env.label)
   defp label(env, _), do: env.label
