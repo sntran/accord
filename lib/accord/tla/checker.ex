@@ -185,6 +185,7 @@ defmodule Accord.TLA.Checker do
   defp tlc_kind(:postcondition), do: :error
   defp tlc_kind(:possible), do: :error
   defp tlc_kind(:init_property), do: :temporal
+  defp tlc_kind(:temporal_safety), do: :temporal
   defp tlc_kind(_), do: :error
 
   defp tlc_trace(result) do
@@ -247,6 +248,9 @@ defmodule Accord.TLA.Checker do
 
             :temporal ->
               "Error: Temporal properties were violated."
+
+            :temporal_safety ->
+              "Error: Temporal property #{result.property} was violated."
 
             :deadlock ->
               "Error: Deadlock reached."

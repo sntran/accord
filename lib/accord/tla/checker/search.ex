@@ -19,7 +19,16 @@ defmodule Accord.TLA.Checker.Search do
     (see `Accord.TLA.Checker.Liveness`).
   """
 
-  alias Accord.TLA.Checker.{Constant, Context, Eval, Liveness, Spec, Temporal, Value}
+  alias Accord.TLA.Checker.{
+    Constant,
+    Context,
+    Eval,
+    Liveness,
+    SafetyTableau,
+    Spec,
+    Temporal,
+    Value
+  }
 
   defmodule Stop do
     @moduledoc false
@@ -435,7 +444,8 @@ defmodule Accord.TLA.Checker.Search do
       depth: 0,
       generated: 0,
       edges: if(live? or base.graph, do: %{}, else: nil),
-      init_ids: []
+      init_ids: [],
+      safety: if(live?, do: SafetyTableau.new(model.live, model.fairness))
     }
 
     st = initial_states(base, model, st)
@@ -590,7 +600,8 @@ defmodule Accord.TLA.Checker.Search do
             }
         end
 
-        loop(base, model, expand(base, model, st, id))
+        st = expand(base, model, st, id)
+        loop(base, model, safety_step(base, model, st, id))
     end
   end
 
@@ -782,9 +793,81 @@ defmodule Accord.TLA.Checker.Search do
 
     # A new state goes in the queue after the checks, as in TLC.
     case unseen do
-      {:new, id} -> %{st | queue: :queue.in(id, st.queue)}
-      _ -> st
+      {:new, id} ->
+        st = %{st | queue: :queue.in(id, st.queue)}
+        if from == nil, do: safety_init(base, model, st, id), else: st
+
+      _ ->
+        st
     end
+  end
+
+  # -- The safety part of temporal properties (see SafetyTableau) --
+
+  defp safety_active?(st), do: st.safety != nil and SafetyTableau.active?(st.safety)
+
+  defp safety_literal(model, st) do
+    fn {:state, {e, scope, bound, frames}}, id ->
+      {state, _, _, _} = Map.fetch!(st.nodes, id)
+      Eval.reset_cache()
+
+      Eval.bool(e, %{
+        Eval.new(model.ctx)
+        | state: state,
+          scope: scope,
+          bound: bound,
+          frames: frames
+      })
+    end
+  end
+
+  defp safety_init(base, model, st, id) do
+    if safety_active?(st) do
+      {:ok, safety} = SafetyTableau.init(st.safety, id, safety_literal(model, st))
+      %{st | safety: safety}
+    else
+      st
+    end
+  rescue
+    err in Value.Error ->
+      raise Stop, result: error_result(model.ctx, Exception.message(err), [], base, st, :error)
+  end
+
+  defp safety_step(base, model, st, id) do
+    if safety_active?(st) do
+      succs = fn s ->
+        to = st.edges |> Map.get(s, []) |> Enum.reverse() |> Enum.map(&elem(&1, 0))
+        Enum.uniq(to ++ [s])
+      end
+
+      case SafetyTableau.step(st.safety, id, succs, safety_literal(model, st)) do
+        {:ok, safety} ->
+          %{st | safety: safety}
+
+        {:violated, name, ids} ->
+          trace =
+            Enum.map(ids, fn i ->
+              {state, _, label, _} = Map.fetch!(st.nodes, i)
+              %{state: state, action: label}
+            end)
+
+          raise Stop,
+            result: %{
+              result(model.ctx)
+              | status: :violated,
+                kind: :temporal_safety,
+                property: name,
+                trace: trace,
+                stats: stats(st),
+                warnings: base.warnings
+            }
+      end
+    else
+      st
+    end
+  rescue
+    err in Value.Error ->
+      raise Stop, result: error_result(model.ctx, Exception.message(err), [], base, st, :error)
   end
 
   defp violation(model, base, st, kind, name, trace) do

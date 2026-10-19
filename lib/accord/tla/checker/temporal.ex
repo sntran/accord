@@ -169,7 +169,15 @@ defmodule Accord.TLA.Checker.Temporal do
     graph =
       Map.new(nodes, fn {name, node} ->
         lits = for {:lit, id, pol} <- node.old, do: {id, pol}
-        {name, %{lits: Enum.sort(lits), succ: succ |> Map.get(name, []) |> Enum.sort()}}
+
+        # A sink: no literal and no obligation for the next positions (TLC's
+        # accepting node: an empty particle with a self-loop).
+        {name,
+         %{
+           lits: Enum.sort(lits),
+           succ: succ |> Map.get(name, []) |> Enum.sort(),
+           sink: lits == [] and MapSet.size(node.next) == 0
+         }}
       end)
 
     init = for {name, node} <- nodes, MapSet.member?(node.incoming, :init), do: name

@@ -250,11 +250,26 @@ defmodule Accord.TLA.Checker.Community do
   defp op("Json", "ToJsonObject", [v], _env), do: v |> json_object() |> json_text()
 
   defp op("Json", "JsonSerialize", [path, v], _env) do
+    record? =
+      match?({:fun, m} when is_map(m), v) and Enum.all?(Map.keys(elem(v, 1)), &is_binary/1)
+
+    unless match?({:seq, _}, v) or record?,
+      do:
+        error(
+          "The second argument of JsonSerialize should be a sequence or record, but instead it is:\n#{Value.show(v)}"
+        )
+
     write!(path, v |> json_node() |> json_text())
     true
   end
 
   defp op("Json", "ndJsonSerialize", [path, v], _env) do
+    unless match?({:seq, _}, v),
+      do:
+        error(
+          "The second argument of ndJsonSerialize should be a sequence, but instead it is:\n#{Value.show(v)}"
+        )
+
     write!(path, v |> Value.seq_list() |> Enum.map_join("", &(json_text(json_node(&1)) <> "\n")))
     true
   end

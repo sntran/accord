@@ -140,9 +140,10 @@ defmodule Accord.TLA.Checker.Stdlib do
   defp op("Infinity", [], _), do: error("Reals are not supported")
   defp op("/", _, _), do: error("Reals are not supported: the operator /")
   defp op("-.", [a], _), do: -int(a)
-  defp op("+", [a, b], _), do: int(a) + int(b)
-  defp op("-", [a, b], _), do: int(a) - int(b)
-  defp op("*", [a, b], _), do: int(a) * int(b)
+  # TLC has 32-bit integers: a result out of range is an overflow error.
+  defp op("+", [a, b], _), do: checked(int(a) + int(b), a, "+", b)
+  defp op("-", [a, b], _), do: checked(int(a) - int(b), a, "-", b)
+  defp op("*", [a, b], _), do: checked(int(a) * int(b), a, "*", b)
 
   defp op("^", [a, b], _) do
     a = int(a)
@@ -151,9 +152,12 @@ defmodule Accord.TLA.Checker.Stdlib do
     cond do
       b < 0 -> error("#{a}^#{b}: the exponent is negative")
       a == 0 and b == 0 -> error("0^0 is not defined")
-      true -> Integer.pow(a, b)
+      true -> checked(Integer.pow(a, b), a, "^", b)
     end
   end
+
+  defp checked(n, _a, _op, _b) when n >= -2_147_483_648 and n <= 2_147_483_647, do: n
+  defp checked(_n, a, op, b), do: error("Overflow when computing #{a}#{op}#{b}")
 
   defp op("\\div", [a, b], _) do
     {a, b} = {int(a), int(b)}
@@ -258,7 +262,7 @@ defmodule Accord.TLA.Checker.Stdlib do
     if Value.member?(e, Value.domain(b)), do: Value.apply_fun(b, e), else: 0
   end
 
-  defp op("(+)", [a, b], _), do: bag_merge(a, b, &+/2)
+  defp op("(+)", [a, b], _), do: bag_merge(a, b, &checked(&1 + &2, &1, "+", &2))
 
   defp op("(-)", [a, b], _) do
     a
@@ -296,11 +300,14 @@ defmodule Accord.TLA.Checker.Stdlib do
     |> Value.fun()
   end
 
-  defp op("BagCardinality", [b], _), do: b |> bag_map() |> Map.values() |> Enum.sum()
+  defp op("BagCardinality", [b], _),
+    do: b |> bag_map() |> Map.values() |> Enum.reduce(0, &checked(&2 + &1, &2, "+", &1))
 
   # -- TLC --
 
   defp op("Print", [out, val], _) do
+    Value.deep_normalize!(out)
+    Value.deep_normalize!(val)
     IO.puts(Value.show(out) <> "  " <> Value.show(val))
     val
   end
@@ -376,6 +383,8 @@ defmodule Accord.TLA.Checker.Stdlib do
   end
 
   defp op("RandomElement", [s], _) do
+    Value.normalize!(s)
+
     case s |> Value.enum() |> Value.sort() do
       [] -> error("RandomElement of the empty set")
       [x | _] -> x
@@ -383,8 +392,9 @@ defmodule Accord.TLA.Checker.Stdlib do
   end
 
   defp op("Any", [], _), do: :any
-  defp op("ToString", [v], _), do: Value.show(v)
-  defp op("TLCEval", [v], _), do: v
+  defp op("ToString", [v], _), do: v |> Value.deep_normalize!() |> Value.show()
+  # TLC's TLCEval normalizes its value (see Value.normalize!/1).
+  defp op("TLCEval", [v], _), do: Value.deep_normalize!(v)
 
   # -- TLCExt --
 
@@ -469,8 +479,16 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   # -- Randomization (deterministic: the first subsets) --
 
-  defp op("RandomSubset", [k, s], _),
-    do: s |> Value.enum() |> Value.sort() |> Enum.take(int(k)) |> Value.set()
+  defp op("RandomSubset", [k, s], _) do
+    k = int(k)
+    if k < 0, do: error("#{k}")
+
+    case s do
+      # A large interval: no enumeration.
+      {:interval, a, b} -> Value.interval(a, min(b, a + k - 1))
+      _ -> s |> Value.enum() |> Value.sort() |> Enum.take(k) |> Value.set()
+    end
+  end
 
   defp op("RandomSetOfSubsets", [k, n, s], _) do
     {k, n} = {int(k), int(n)}

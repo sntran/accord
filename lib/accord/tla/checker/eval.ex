@@ -169,6 +169,7 @@ defmodule Accord.TLA.Checker.Eval do
       {:filter, s, fn x -> bool(pred, bind(frozen, target, x)) end}
     else
       s
+      |> Value.normalize!()
       |> Value.enum()
       |> Enum.filter(&bool(pred, bind(env, target, &1)))
       |> Value.set()
@@ -293,12 +294,18 @@ defmodule Accord.TLA.Checker.Eval do
     sets = a |> eval(env) |> Value.enum()
 
     # UNION of a set with an infinite element stays lazy.
-    if Enum.any?(sets, &Value.infinite?/1),
+    # UNION of a set with an infinite or a very large element stays lazy
+    # (TLC's UNION is lazy); else the union is computed now.
+    if Enum.any?(sets, &Value.infinite?/1) or Enum.sum(Enum.map(sets, &Value.size/1)) > 100_000,
       do: {:union, Value.set(sets)},
-      else: Enum.reduce(sets, MapSet.new(), &MapSet.union(&2, Value.to_set(&1)))
+      else:
+        sets
+        |> Enum.reduce(MapSet.new(), &MapSet.union(&2, Value.to_set(&1)))
+        |> Value.normalize!()
   end
 
-  defp core("DOMAIN", [a], env), do: Value.domain(eval(a, env))
+  # TLC sorts the domain (see Value.normalize!/1).
+  defp core("DOMAIN", [a], env), do: a |> eval(env) |> Value.domain() |> Value.normalize!()
 
   # -- Names and operator calls --
 
@@ -458,6 +465,13 @@ defmodule Accord.TLA.Checker.Eval do
             if env.primed and is_map(env.next) and Map.has_key?(env.next, key),
               do: Map.fetch!(env.next, key),
               else: eval(expr, outer_env)
+
+          # TLC applies the Java override of TLCEval only to a direct call:
+          # through a substitution, TLCEval is its definition (the identity).
+          {[a], {:name, "TLCEval", _}} ->
+            if match?({:native, _, "TLCEval"}, Context.lookup(env.ctx, outer, "TLCEval")),
+              do: eval(a, caller),
+              else: invoke_named("TLCEval", args, caller, outer_env)
 
           {_, {:name, g, _}} ->
             invoke_named(g, args, caller, outer_env)
@@ -876,8 +890,11 @@ defmodule Accord.TLA.Checker.Eval do
     {d, keys(d)}
   end
 
+  # TLC sorts the domain of a function (see Value.normalize!/1).
   defp keys(d) do
-    if finite?(d), do: {:ok, Enum.map(Value.enum(d), &Value.canon/1)}, else: :infinite
+    if finite?(d),
+      do: {:ok, d |> Value.enum() |> Enum.map(&Value.canon/1)},
+      else: :infinite
   end
 
   defp finite?(:nat), do: false
@@ -1170,7 +1187,11 @@ defmodule Accord.TLA.Checker.Eval do
 
     # The middle state starts with the variables that the step has already
     # assigned, with their current values (as TLC's copyWith).
-    start = for {i, _} <- env.next, is_integer(i), into: %{}, do: {i, read_var(i, %{env | primed: false})}
+    start =
+      for {i, _} <- env.next,
+          is_integer(i),
+          into: %{},
+          do: {i, read_var(i, %{env | primed: false})}
 
     middles =
       try do
@@ -1181,7 +1202,8 @@ defmodule Accord.TLA.Checker.Eval do
 
     # Only the outermost composition counts its middle states.
     if depth == 0,
-      do: Process.put(:tla_extra_generated, Process.get(:tla_extra_generated, 0) + length(middles))
+      do:
+        Process.put(:tla_extra_generated, Process.get(:tla_extra_generated, 0) + length(middles))
 
     Enum.flat_map(middles, fn {t, _} ->
       # As in TLC, the middle state can be partial: B fails when it reads a

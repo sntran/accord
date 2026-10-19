@@ -150,7 +150,9 @@ defmodule Accord.TLA.Checker.Value do
         (infinite?(r) or (infinite?(d) and safe_size(r) != 1))
 
   def infinite?({:record_set, fields}),
-    do: not Enum.any?(fields, fn {_, s} -> safe_empty?(s) end) and Enum.any?(fields, fn {_, s} -> infinite?(s) end)
+    do:
+      not Enum.any?(fields, fn {_, s} -> safe_empty?(s) end) and
+        Enum.any?(fields, fn {_, s} -> infinite?(s) end)
 
   def infinite?({:times, sets}),
     do: not Enum.any?(sets, &safe_empty?/1) and Enum.any?(sets, &infinite?/1)
@@ -267,15 +269,25 @@ defmodule Accord.TLA.Checker.Value do
 
   defp first({:cap, a, b}) do
     cond do
-      enumerable?(a) -> a |> enum() |> Enum.find(:none, &member?(&1, b))
-      enumerable?(b) -> b |> enum() |> Enum.find(:none, &member?(&1, a))
-      true -> error("Attempted to enumerate S \\cap T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable")
+      enumerable?(a) ->
+        a |> enum() |> Enum.find(:none, &member?(&1, b))
+
+      enumerable?(b) ->
+        b |> enum() |> Enum.find(:none, &member?(&1, a))
+
+      true ->
+        error(
+          "Attempted to enumerate S \\cap T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable"
+        )
     end
   end
 
   defp first({:cup, [a, b]} = s) do
     if not (enumerable?(a) and enumerable?(b)),
-      do: error("Attempted to enumerate S \\cup T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable")
+      do:
+        error(
+          "Attempted to enumerate S \\cup T when S:\n#{show(a)}\nand T:\n#{show(b)}\nare not both enumerable"
+        )
 
     s |> elem(1) |> Enum.find_value(:none, fn x -> if (f = first_of(x)) != :none, do: f end)
   end
@@ -294,7 +306,10 @@ defmodule Accord.TLA.Checker.Value do
 
   defp first({:filter, inner, pred}) do
     if not enumerable?(inner),
-      do: error("Attempted to enumerate { x \\in S : p(x) } when S:\n#{show(inner)}\nis not enumerable")
+      do:
+        error(
+          "Attempted to enumerate { x \\in S : p(x) } when S:\n#{show(inner)}\nis not enumerable"
+        )
 
     inner |> enum() |> Enum.find(:none, pred)
   end
@@ -325,8 +340,20 @@ defmodule Accord.TLA.Checker.Value do
   """
   def eq?(a, b) when is_integer(a) and is_integer(b), do: a == b
   def eq?(a, b) when is_binary(a) and is_binary(b), do: a == b
-  # The same value (not a lazy set: TLC compares the parts of those).
-  def eq?(a, a) when not is_tuple(a) or elem(a, 0) in [:seq, :fun, :mv], do: true
+  # The same value (not a lazy set: TLC compares the parts of those; a set
+  # or a function is sorted for the comparison).
+  def eq?(a, a) when not is_tuple(a) and not is_struct(a, MapSet), do: true
+  def eq?(a, a) when is_tuple(a) and elem(a, 0) in [:seq, :mv], do: true
+
+  def eq?(%MapSet{} = a, a) do
+    normalize!(a)
+    true
+  end
+
+  def eq?({:fun, m} = a, a) do
+    m |> Map.keys() |> MapSet.new() |> normalize!()
+    true
+  end
 
   def eq?(a, b) do
     case {kind(a), kind(b)} do
@@ -363,10 +390,18 @@ defmodule Accord.TLA.Checker.Value do
 
   defp set_eq?({:record_set, f1} = a, {:record_set, f2} = b) do
     cond do
-      empty?(a) -> empty?(b)
-      empty?(b) -> false
-      length(f1) != length(f2) -> false
-      true -> Enum.zip(Enum.sort(f1), Enum.sort(f2)) |> Enum.all?(fn {{n1, s1}, {n2, s2}} -> n1 == n2 and eq?(s1, s2) end)
+      empty?(a) ->
+        empty?(b)
+
+      empty?(b) ->
+        false
+
+      length(f1) != length(f2) ->
+        false
+
+      true ->
+        Enum.zip(Enum.sort(f1), Enum.sort(f2))
+        |> Enum.all?(fn {{n1, s1}, {n2, s2}} -> n1 == n2 and eq?(s1, s2) end)
     end
   end
 
@@ -383,12 +418,18 @@ defmodule Accord.TLA.Checker.Value do
   defp set_eq?({:subset, s1}, {:subset, s2}), do: eq?(s1, s2)
 
   defp set_eq?(a, b) when elem(a, 0) == :seq_set or elem(b, 0) == :seq_set,
-    do: error("Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}")
+    do:
+      error(
+        "Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}"
+      )
 
   defp set_eq?(a, b) when a in @builtin_sets or b in @builtin_sets do
     if a in @builtin_sets and b in @builtin_sets,
       do: a == b,
-      else: error("Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}")
+      else:
+        error(
+          "Attempted to compare overridden value #{show(a)} with non-overridden value:\n#{show(b)}"
+        )
   end
 
   defp set_eq?(a, b) do
@@ -402,6 +443,9 @@ defmodule Accord.TLA.Checker.Value do
   # TLC compares the elements one by one (so values of different kinds
   # are an error).
   defp elements_eq?(ca, cb) do
+    normalize!(ca)
+    normalize!(cb)
+
     cond do
       ca == cb ->
         true
@@ -413,14 +457,19 @@ defmodule Accord.TLA.Checker.Value do
         false
 
       true ->
-        ca |> MapSet.to_list() |> sort() |> Enum.zip(cb |> MapSet.to_list() |> sort()) |> Enum.all?(fn {x, y} -> eq?(x, y) end)
+        ca
+        |> MapSet.to_list()
+        |> sort()
+        |> Enum.zip(cb |> MapSet.to_list() |> sort())
+        |> Enum.all?(fn {x, y} -> eq?(x, y) end)
     end
   end
 
   # TLC cannot compare a record with a tuple.
   defp fun_eq?({:fun, m} = a, {:seq, t} = b) when tuple_size(t) > 0 do
     if Enum.all?(Map.keys(m), &is_binary/1),
-      do: error("Attempted to check equality of record:\n#{show(a)}\nwith non-record\n#{show(b)}"),
+      do:
+        error("Attempted to check equality of record:\n#{show(a)}\nwith non-record\n#{show(b)}"),
       else: canon(a) == canon(b)
   end
 
@@ -430,7 +479,16 @@ defmodule Accord.TLA.Checker.Value do
       else: canon(a) == canon(b)
   end
 
-  defp fun_eq?(a, b), do: canon(a) == canon(b)
+  defp fun_eq?(a, b) do
+    # TLC sorts the domains to compare two functions.
+    if is_tuple(a) and elem(a, 0) == :fun,
+      do: a |> elem(1) |> Map.keys() |> MapSet.new() |> normalize!()
+
+    if is_tuple(b) and elem(b, 0) == :fun,
+      do: b |> elem(1) |> Map.keys() |> MapSet.new() |> normalize!()
+
+    canon(a) == canon(b)
+  end
 
   defp kind(v) when is_integer(v), do: :int
   defp kind(v) when is_boolean(v), do: :bool
@@ -521,7 +579,21 @@ defmodule Accord.TLA.Checker.Value do
   @doc "`x \\in s`."
   def member?(x, %MapSet{} = s) do
     c = canon(x)
-    MapSet.member?(s, c) or not_member(c, s)
+
+    if MapSet.member?(s, c) do
+      # TLC compares the value with the elements before it: the first
+      # element of another kind is an error (the check uses the first
+      # element only).
+      case first_element(s) do
+        ^c -> true
+        nil -> true
+        {:mv, _} -> true
+        _ when elem(c, 0) == :mv -> true
+        e -> not_member(c, MapSet.new([e])) or true
+      end
+    else
+      not_member(c, s)
+    end
   end
 
   def member?(x, {:interval, a, b} = s),
@@ -561,7 +633,9 @@ defmodule Accord.TLA.Checker.Value do
         fields == []
 
       {:seq, _} ->
-        error("Attempted to check if non-record\n#{show(x)}\nis in the set of records:\n#{show({:record_set, fields})}")
+        error(
+          "Attempted to check if non-record\n#{show(x)}\nis in the set of records:\n#{show({:record_set, fields})}"
+        )
 
       _ ->
         if fun?(x), do: false, else: bad_member(x, {:record_set, fields})
@@ -576,7 +650,10 @@ defmodule Accord.TLA.Checker.Value do
       {:fun, m} ->
         if Enum.all?(Map.keys(m), &is_integer/1),
           do: false,
-          else: error("Attempted to check if non-tuple\n#{show(x)}\nis in the set of tuples:\n#{show({:times, sets})}")
+          else:
+            error(
+              "Attempted to check if non-tuple\n#{show(x)}\nis in the set of tuples:\n#{show({:times, sets})}"
+            )
 
       _ ->
         if fun?(x), do: false, else: bad_member(x, {:times, sets})
@@ -654,7 +731,10 @@ defmodule Accord.TLA.Checker.Value do
     Enum.to_list(a..b)
   end
 
-  def enum({:subset, s}) do
+  def enum({:subset, s} = set) do
+    # TLC cannot enumerate a power set of 2^31 elements or more.
+    size(set)
+
     s
     |> enum()
     |> Enum.reverse()
@@ -749,7 +829,11 @@ defmodule Accord.TLA.Checker.Value do
     max(b - a + 1, 0)
   end
 
-  def size({:subset, s}), do: Integer.pow(2, size(s))
+  def size({:subset, s} = set) do
+    n = size(s)
+    if n >= 31, do: error("Overflow when computing the number of elements in:\n#{show(set)}")
+    Integer.pow(2, n)
+  end
 
   # The size of a set of functions: an empty domain gives 1, an empty
   # range 0, and a range of one element 1 (also for an infinite domain).
@@ -780,7 +864,9 @@ defmodule Accord.TLA.Checker.Value do
   def size({:record_set, fields} = s),
     do: if(empty?(s), do: 0, else: checked_product(Enum.map(fields, &size(elem(&1, 1))), s))
 
-  def size({:seq_set, _} = set), do: error("Attempted to compute cardinality of the value\n#{show(set)}")
+  def size({:seq_set, _} = set),
+    do: error("Attempted to compute cardinality of the value\n#{show(set)}")
+
   def size(s), do: length(enum(s))
 
   # TLC has 32-bit sizes.
@@ -794,19 +880,86 @@ defmodule Accord.TLA.Checker.Value do
 
   # -- Set operations --
 
+  @doc """
+  Checks that the elements of a finite set can be sorted with the rules of
+  TLC: elements of different kinds (an integer and a string, for example)
+  cannot. TLC sorts a set when an operation makes a new set from it (but
+  not for a set literal), so a set with elements of different kinds is an
+  error there. Gives the set.
+  """
+  def normalize!(%MapSet{} = s) do
+    if MapSet.size(s) > 1 do
+      kinds =
+        Enum.reduce_while(s, nil, fn x, acc ->
+          case {kind(x), acc} do
+            {:mv, _} -> {:cont, acc}
+            {:other, _} -> {:cont, acc}
+            {k, nil} -> {:cont, {k, x}}
+            {k, {k, _}} -> {:cont, acc}
+            {_k, {k0, x0}} -> {:halt, {:mixed, k0, x0, x}}
+          end
+        end)
+
+      case kinds do
+        {:mixed, k0, x0, x} -> raise Error, message: compare_message(k0, x0, x)
+        _ -> s
+      end
+    else
+      s
+    end
+  end
+
+  def normalize!(s), do: s
+
+  # A set operation on two sets compares the elements of one with the
+  # elements of the other (TLC): elements of different kinds are an error.
+  # Gives the first set.
+  defp cross_check!(a, b) do
+    if MapSet.size(a) > 0 and MapSet.size(b) > 0, do: normalize!(MapSet.union(a, b))
+    a
+  end
+
+  @doc "`normalize!/1` for all the sets in a value (TLC sorts them to print it)."
+  def deep_normalize!(%MapSet{} = s) do
+    normalize!(s)
+    Enum.each(s, &deep_normalize!/1)
+    s
+  end
+
+  def deep_normalize!({:seq, t} = v) do
+    t |> Tuple.to_list() |> Enum.each(&deep_normalize!/1)
+    v
+  end
+
+  def deep_normalize!({:fun, m} = v) do
+    m |> Map.keys() |> MapSet.new() |> normalize!()
+    Enum.each(m, fn {k, x} -> deep_normalize!(k) && deep_normalize!(x) end)
+    v
+  end
+
+  def deep_normalize!(v), do: v
+
   def union(a, b) do
     cond do
-      not infinite?(a) and not infinite?(b) -> MapSet.union(to_set(a), to_set(b))
+      not infinite?(a) and not infinite?(b) ->
+        cross_check!(to_set(a), to_set(b))
+        MapSet.union(to_set(a), to_set(b))
+
       # S \cup {} is S (also for an infinite S).
-      empty?(b) -> a
-      empty?(a) -> b
-      true -> {:cup, [a, b]}
+      empty?(b) ->
+        a
+
+      empty?(a) ->
+        b
+
+      true ->
+        {:cup, [a, b]}
     end
   end
 
   def intersection(a, b) do
     case {infinite?(a), infinite?(b)} do
-      {false, false} -> MapSet.intersection(to_set(a), to_set(b))
+      {false, false} -> MapSet.intersection(cross_check!(to_set(a), to_set(b)), to_set(b))
       {false, true} -> a |> to_set() |> MapSet.filter(&member?(&1, b))
       {true, false} -> b |> to_set() |> MapSet.filter(&member?(&1, a))
       {true, true} -> {:cap, a, b}
@@ -818,12 +971,22 @@ defmodule Accord.TLA.Checker.Value do
   end
 
   def difference(%MapSet{} = a, b) do
+    if match?(%MapSet{}, b), do: cross_check!(a, b)
+
     if match?(%MapSet{}, b),
       do: MapSet.difference(a, b),
       else: MapSet.reject(a, &member?(&1, b))
   end
 
-  def subseteq?(a, b), do: Enum.all?(enum(a), &member?(&1, b))
+  # SUBSET A \\subseteq SUBSET B is A \\subseteq B (no enumeration of the
+  # power sets).
+  def subseteq?({:subset, a}, {:subset, b}), do: subseteq?(a, b)
+
+  def subseteq?(a, b) do
+    normalize!(a)
+    normalize!(b)
+    Enum.all?(enum(a), &member?(&1, b))
+  end
 
   @doc "A finite set as a MapSet."
   def to_set(%MapSet{} = s), do: s

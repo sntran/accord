@@ -601,6 +601,16 @@ defmodule Accord.TLA.Checker.Spec do
     [{:live, formula, atoms}]
   end
 
+  # The value of a boolean expression that needs no state, or :error.
+  defp constant_bool(c, env) do
+    case Eval.eval(c, %{env | state: nil, next: nil}) do
+      b when is_boolean(b) -> {:ok, b}
+      _ -> :error
+    end
+  rescue
+    Value.Error -> :error
+  end
+
   defp shallow_false?(false), do: true
   defp shallow_false?({:and, items}), do: Enum.any?(items, &shallow_false?/1)
   defp shallow_false?({:or, items}), do: Enum.all?(items, &shallow_false?/1)
@@ -675,14 +685,25 @@ defmodule Accord.TLA.Checker.Spec do
         if pos, do: f, else: Temporal.negate(f)
 
       {:if, c, a, b} ->
-        f =
-          {:or,
-           [
-             {:and, [ltl(c, env, true), ltl(a, env, true)]},
-             {:and, [ltl(c, env, false), ltl(b, env, true)]}
-           ]}
+        # A constant guard selects one branch (as TLC does, which lets a
+        # recursive temporal operator stop).
+        case constant_bool(c, env) do
+          {:ok, true} ->
+            ltl(a, env, pos)
 
-        if pos, do: f, else: Temporal.negate(f)
+          {:ok, false} ->
+            ltl(b, env, pos)
+
+          :error ->
+            f =
+              {:or,
+               [
+                 {:and, [ltl(c, env, true), ltl(a, env, true)]},
+                 {:and, [ltl(c, env, false), ltl(b, env, true)]}
+               ]}
+
+            if pos, do: f, else: Temporal.negate(f)
+        end
 
       {:label, _, inner} ->
         ltl(inner, env, pos)
@@ -730,9 +751,31 @@ defmodule Accord.TLA.Checker.Spec do
 
       _ ->
         case expand(e, env) do
-          {:ok, {body, env2}} -> ltl(body, env2, pos)
+          {:ok, {body, env2}} -> expand_ltl(body, env2, pos)
           :error -> error("this temporal property is not supported: #{inspect(e, limit: 6)}")
         end
+    end
+  end
+
+  # A recursive temporal operator that does not stop (its guard is not a
+  # constant, or it never selects the other branch): TLC cannot handle it.
+  @max_expansion 1_000
+
+  defp expand_ltl(body, env, pos) do
+    depth = Process.get(:tla_ltl_depth, 0)
+
+    if depth > @max_expansion,
+      do:
+        raise(CannotHandle,
+          message: "TLC cannot handle the temporal formula: the recursion does not stop"
+        )
+
+    Process.put(:tla_ltl_depth, depth + 1)
+
+    try do
+      ltl(body, env, pos)
+    after
+      Process.put(:tla_ltl_depth, depth)
     end
   end
 end
