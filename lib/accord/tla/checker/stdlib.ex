@@ -86,8 +86,7 @@ defmodule Accord.TLA.Checker.Stdlib do
       "RandomSetOfSubsets",
       "RandomSubsetSet",
       "TestRandomSetOfSubsets"
-    ],
-    "Toolbox" => []
+    ]
   }
   # The module of each native operator (the first module that has it).
   @module_of @modules
@@ -127,6 +126,30 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   @doc "The arities of the parameters of a native operator, or nil when all are 0."
   def op_params(op), do: Map.get(@op_params, op)
+
+  # Standard modules that are TLA+ text: the definitions of the trace
+  # exploration of TLC (the specs `_TTrace` that TLC writes use them).
+  @sources %{
+    "Toolbox" => """
+    ---- MODULE Toolbox ----
+    LOCAL INSTANCE Naturals
+    LOCAL INSTANCE FiniteSets
+    LOCAL INSTANCE TLC
+
+    _TETrace == CHOOSE f \\in [(Nat \\ {0}) -> STRING] : TRUE
+
+    LOCAL _TETraceLength == Cardinality(DOMAIN _TETrace)
+
+    _TEPosition ==
+        IF TLCGet("level") >= _TETraceLength
+           THEN _TETraceLength
+           ELSE IF TLCGet("level") = 0 THEN 1 ELSE TLCGet("level")
+    ====
+    """
+  }
+
+  @doc "The TLA+ text of a standard module that is not native, or nil."
+  def module_source(name), do: Map.get(@sources, name)
 
   @doc "Calls a native operator by name (any module)."
   def call(op, args, env), do: call_native(Map.get(@module_of, op), op, args, env)

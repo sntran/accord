@@ -158,6 +158,10 @@ defmodule Accord.TLA.Checker.Context do
       Stdlib.native?(name) ->
         {:native, state}
 
+      source = Stdlib.module_source(name) ->
+        mod = Parser.parse_module(source, file: "#{name}.tla")
+        {mod, %{state | modules: Map.put(state.modules, name, mod)}}
+
       path = Enum.find_value(state.paths, &existing(Path.join(&1, name <> ".tla"))) ->
         mod = parse_file(path)
         modules = Map.put(state.modules, name, mod)
