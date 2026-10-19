@@ -25,6 +25,16 @@ defmodule Accord.TLA.Checker.Spec do
   A closure `{expr, scope, bound, frames}` keeps the scope of each part.
   """
 
+  defmodule CannotHandle do
+    @moduledoc "A temporal formula that TLC cannot check."
+    defexception [:message]
+  end
+
+  defmodule Tautology do
+    @moduledoc "A temporal property that is a tautology: TLC does not check it."
+    defexception message: "Temporal formula is a tautology (its negation is unsatisfiable)."
+  end
+
   alias Accord.TLA.Checker.{Temporal, Context, Eval, Value}
   import Value, only: [error: 1]
 
@@ -42,19 +52,18 @@ defmodule Accord.TLA.Checker.Spec do
         nexts = for {:next, a, sub} <- parts, do: {a, sub}
         fairness = for {:fair, f} <- parts, do: f
 
-        others = for {:other, e} <- parts, do: e
+        # Other temporal parts (`<>P`, `[]<>P`, ...): TLC adds them to the
+        # assumptions of the liveness check, as fairness.
+        temporals = for {:temporal, c} <- parts, do: c
 
-        if others != [],
-          do:
-            error(
-              "the specification #{config.specification} has a part that is not supported: #{inspect(hd(others) |> elem(0))}"
-            )
+        spec =
+          case nexts do
+            [{next, sub}] -> %{init: inits, next: next, sub: sub, fairness: fairness}
+            [] -> %{init: inits, next: nil, sub: nil, fairness: fairness}
+            _ -> error("the specification has more than one [][Next]_v")
+          end
 
-        case nexts do
-          [{next, sub}] -> %{init: inits, next: next, sub: sub, fairness: fairness}
-          [] -> %{init: inits, next: nil, sub: nil, fairness: fairness}
-          _ -> error("the specification has more than one [][Next]_v")
-        end
+        Map.put(spec, :temporals, temporals)
 
       config.init && config.next ->
         %{
@@ -160,9 +169,13 @@ defmodule Accord.TLA.Checker.Spec do
   defp flatten({:always, {:name, _, _} = n}, env) do
     case expand(n, env) do
       {:ok, {{:box_action, a, sub}, env2}} -> [{:next, closure(a, env2), closure(sub, env2)}]
-      _ -> [{:other, {:always, n}}]
+      _ -> always_part({:always, n}, env)
     end
   end
+
+  # TLC cannot handle `[]P` in a specification where P is a state
+  # predicate.
+  defp flatten({:always, _} = e, env), do: always_part(e, env)
 
   defp flatten({kind, sub, a}, env) when kind in [:wf, :sf],
     do: [{:fair, {strength(kind), closure(sub, env), closure(a, env)}}]
@@ -181,10 +194,23 @@ defmodule Accord.TLA.Checker.Spec do
     if temporal?(e, env) do
       case expand(e, env) do
         {:ok, {body, env2}} -> flatten(body, env2)
-        :error -> [{:other, e}]
+        :error -> [{:temporal, closure(e, env)}]
       end
     else
       [{:init, closure(e, env)}]
+    end
+  end
+
+  defp always_part({:always, p} = e, env) do
+    cond do
+      temporal?(p, env) or action?(p, env) ->
+        case expand(e, env) do
+          {:ok, {body, env2}} -> flatten(body, env2)
+          :error -> [{:temporal, closure(e, env)}]
+        end
+
+      true ->
+        raise CannotHandle, message: "TLC cannot handle the temporal formula []#{inspect(p)}"
     end
   end
 
@@ -210,6 +236,7 @@ defmodule Accord.TLA.Checker.Spec do
     expand_entry(Context.lookup(env.ctx, env2.scope, name), name, args, env, env2)
   end
 
+  defp expand({:let, defs, body}, env), do: {:ok, {body, let_bound(defs, env)}}
   defp expand(_e, _env), do: :error
 
   defp expand_call(n, args, env) do
@@ -290,7 +317,16 @@ defmodule Accord.TLA.Checker.Spec do
 
   defp navigate(path, env) do
     Enum.reduce(path, {nil, env}, fn {seg, args}, {_, cur} ->
-      case Context.lookup(cur.ctx, cur.scope, seg) do
+      entry =
+        case Map.fetch(cur.bound, seg) do
+          {:ok, {:let_instance, _, _, _} = li} -> li
+          _ -> Context.lookup(cur.ctx, cur.scope, seg)
+        end
+
+      case entry do
+        {:let_instance, sid, frame, bound} ->
+          {nil, %{cur | scope: sid, bound: %{}, frames: Map.put(cur.frames, frame, bound)}}
+
         {:instance, sid, params, frame} ->
           values =
             params |> Enum.zip(args) |> Map.new(fn {{p, _}, a} -> {p, Eval.eval(a, env)} end)
@@ -363,16 +399,20 @@ defmodule Accord.TLA.Checker.Spec do
   defp sub_level(_, _env, _seen), do: :state
 
   defp let_bound(defs, env) do
-    Enum.reduce(defs, env, fn d, acc ->
-      %{
-        acc
-        | bound:
-            Map.put(
-              acc.bound,
-              d.name,
-              {:let_def, d, %{scope: acc.scope, bound: acc.bound, frames: acc.frames, ref: nil}}
-            )
-      }
+    Enum.reduce(defs, env, fn
+      %{kind: :instance} = d, acc ->
+        Eval.let_env([d], acc)
+
+      d, acc ->
+        %{
+          acc
+          | bound:
+              Map.put(
+                acc.bound,
+                d.name,
+                {:let_def, d, %{scope: acc.scope, bound: acc.bound, frames: acc.frames, ref: nil}}
+              )
+        }
     end)
   end
 
@@ -463,9 +503,15 @@ defmodule Accord.TLA.Checker.Spec do
     the liveness check (see `Accord.TLA.Checker.Temporal`). `atoms` maps
     an atom id to `{:state | :action, closure}`.
   """
-  def property(ctx, name) do
+  def property(ctx, name, assumptions \\ []) do
     env = Eval.new(ctx)
-    obligations(ref(name, env), env)
+    Process.put(:tla_spec_assumptions, assumptions)
+
+    try do
+      obligations(ref(name, env), env)
+    after
+      Process.delete(:tla_spec_assumptions)
+    end
   end
 
   defp obligations({:and, items}, env), do: Enum.flat_map(items, &obligations(&1, env))
@@ -473,7 +519,11 @@ defmodule Accord.TLA.Checker.Spec do
 
   defp obligations({:forall, binds, body} = e, env) do
     if temporal?(body, env) do
-      env |> bindings(binds) |> Enum.flat_map(&obligations(body, &1))
+      case bindings(env, binds) do
+        # TLC: a property `\A x \in {} : ...` is a tautology, an error.
+        [] -> raise Tautology
+        envs -> Enum.flat_map(envs, &obligations(body, &1))
+      end
     else
       [{:init, closure(e, env)}]
     end
@@ -517,8 +567,14 @@ defmodule Accord.TLA.Checker.Spec do
     end
   end
 
+  # The negation of the property, with the temporal assumptions of the
+  # specification (see `analyze/2`).
   defp live(e, env) do
-    formula = e |> ltl(env, false) |> Temporal.simplify()
+    assumptions =
+      for {a, scope, bound, frames} <- Process.get(:tla_spec_assumptions) || [],
+          do: ltl(a, %{env | scope: scope, bound: bound, frames: frames}, true)
+
+    formula = {:and, [ltl(e, env, false) | assumptions]} |> Temporal.simplify()
     {formula, atoms} = number_atoms(formula)
     [{:live, formula, atoms}]
   end

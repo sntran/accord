@@ -144,32 +144,145 @@ defmodule Accord.TLA.Checker.Value do
 
   # -- Equality and membership --
 
-  @doc "TLA+ equality."
+  @doc """
+  TLA+ equality, with the rules of TLC: two values of different kinds (an
+  integer and a set, for example) cannot be compared, and the comparison
+  is an error. A model value is not equal to a value of another kind; a
+  typed model value (`A_x`) cannot be compared with a value of another
+  kind or with a model value of another type.
+  """
   def eq?(a, b) when is_integer(a) and is_integer(b), do: a == b
   def eq?(a, b) when is_binary(a) and is_binary(b), do: a == b
   def eq?(a, a), do: true
-  def eq?(a, b), do: canon(a) == canon(b)
+
+  def eq?(a, b) do
+    case {kind(a), kind(b)} do
+      {:mv, :mv} -> model_values_eq?(a, b)
+      {:mv, _} -> model_value_other(a, b)
+      {_, :mv} -> model_value_other(b, a)
+      {k, k} -> canon(a) == canon(b)
+      {:other, _} -> canon(a) == canon(b)
+      {_, :other} -> canon(a) == canon(b)
+      {k, _} -> error(mismatch(k, a, b))
+    end
+  end
+
+  defp kind(v) when is_integer(v), do: :int
+  defp kind(v) when is_boolean(v), do: :bool
+  defp kind(v) when is_binary(v), do: :str
+  defp kind({:mv, _}), do: :mv
+
+  defp kind(v) do
+    cond do
+      fun?(v) -> :fun
+      set?(v) -> :set
+      true -> :other
+    end
+  end
+
+  defp mismatch(:int, a, b),
+    do: "Attempted to check equality of integer #{show(a)} with non-integer:\n#{show(b)}"
+
+  defp mismatch(:bool, a, b),
+    do: "Attempted to compare equality of boolean #{show(a)} with non-boolean:\n#{show(b)}"
+
+  defp mismatch(:str, a, b),
+    do: "Attempted to check equality of string #{show(a)} with non-string:\n#{show(b)}"
+
+  defp mismatch(:set, a, b),
+    do: "Attempted to check equality of the set #{show(a)} with the value:\n#{show(b)}"
+
+  defp mismatch(:fun, a, b),
+    do: "Attempted to check equality of the function #{show(a)} with the value:\n#{show(b)}"
+
+  @doc "The type of a model value (`A_x` has the type `A`), or `nil`."
+  def model_value_type({:mv, <<t, ?_, _, _::binary>>}), do: t
+  def model_value_type({:mv, _}), do: nil
+
+  defp model_values_eq?(a, b) do
+    ta = model_value_type(a)
+    tb = model_value_type(b)
+
+    if ta && tb && ta != tb,
+      do:
+        error(
+          "Attempted to check equality of the differently-typed model values #{show(a)} and #{show(b)}"
+        )
+
+    a == b
+  end
+
+  defp model_value_other(mv, other) do
+    if model_value_type(mv),
+      do:
+        error(
+          "Attempted to check equality of typed model value #{show(mv)} and non-model value\n#{show(other)}"
+        )
+
+    false
+  end
+
+  @doc """
+  Checks that the elements of a set (or the domain of a function) can be
+  ordered with the rules of TLC: a typed model value cannot be in a set
+  with a value of another kind or a model value of another type.
+  """
+  def check_order!(values) do
+    typed = for {:mv, _} = v <- values, t = model_value_type(v), uniq: true, do: {t, v}
+
+    case typed do
+      [] ->
+        :ok
+
+      [{t, v} | _] ->
+        Enum.each(values, fn
+          {:mv, _} = w ->
+            u = model_value_type(w)
+
+            if u && u != t,
+              do:
+                error(
+                  "Attempted to compare the differently-typed model values #{show(w)} and #{show(v)}"
+                )
+
+          w ->
+            error(
+              "Attempted to compare the typed model value #{show(v)} and non-model value\n#{show(w)}"
+            )
+        end)
+    end
+  end
 
   @doc "`x \\in s`."
-  def member?(x, %MapSet{} = s), do: MapSet.member?(s, canon(x))
-  def member?(x, {:interval, a, b}), do: is_integer(x) and x >= a and x <= b
-  def member?(x, :nat), do: is_integer(x) and x >= 0
-  def member?(x, :int), do: is_integer(x)
+  def member?(x, %MapSet{} = s) do
+    c = canon(x)
+    MapSet.member?(s, c) or not_member(c, s)
+  end
+
+  def member?(x, {:interval, a, b} = s),
+    do: if(is_integer(x), do: x >= a and x <= b, else: bad_member(x, s))
+
+  def member?(x, :nat), do: if(is_integer(x), do: x >= 0, else: bad_member(x, :nat))
+  def member?(x, :int), do: is_integer(x) or bad_member(x, :int)
   def member?(x, :string), do: is_binary(x)
   def member?(_x, :any), do: true
 
-  def member?(x, {:subset, s}) do
-    set?(x) and Enum.all?(enum(x), &member?(&1, s))
+  def member?(x, {:subset, s} = set) do
+    if set?(x),
+      do: Enum.all?(enum(x), &member?(&1, s)),
+      else: bad_member(x, set)
   end
 
-  def member?(x, {:fun_set, d, r}) do
-    fun?(x) and eq?(domain(x), d) and Enum.all?(enum(domain(x)), &member?(apply_fun(x, &1), r))
+  def member?(x, {:fun_set, d, r} = s) do
+    if fun?(x),
+      do: eq?(domain(x), d) and Enum.all?(enum(domain(x)), &member?(apply_fun(x, &1), r)),
+      else: bad_member(x, s)
   end
 
-  def member?(x, {:seq_set, s}) do
+  def member?(x, {:seq_set, s} = set) do
     case x do
       {:seq, t} -> Enum.all?(Tuple.to_list(t), &member?(&1, s))
-      _ -> false
+      _ -> if fun?(x), do: false, else: bad_member(x, set)
     end
   end
 
@@ -183,7 +296,7 @@ defmodule Accord.TLA.Checker.Value do
         fields == []
 
       _ ->
-        false
+        if fun?(x), do: false, else: bad_member(x, {:record_set, fields})
     end
   end
 
@@ -193,7 +306,7 @@ defmodule Accord.TLA.Checker.Value do
         sets |> Enum.with_index() |> Enum.all?(fn {s, i} -> member?(elem(t, i), s) end)
 
       _ ->
-        false
+        if fun?(x), do: false, else: bad_member(x, {:times, sets})
     end
   end
 
@@ -203,6 +316,46 @@ defmodule Accord.TLA.Checker.Value do
   def member?(x, {:cup, sets}), do: Enum.any?(sets, &member?(x, &1))
   def member?(x, {:filter, s, pred}), do: member?(x, s) and pred.(x)
   def member?(_x, s), do: error("`\\in` needs a set, not #{show(s)}")
+
+  # TLC compares the value with the elements of the set: a value of
+  # another kind cannot be compared. The check uses one element.
+  defp not_member(c, s) do
+    case first_element(s) do
+      nil ->
+        false
+
+      {:mv, _} ->
+        false
+
+      e ->
+        case {kind(c), kind(e)} do
+          {:mv, _} -> model_value_other(c, s)
+          {k, k} -> false
+          {:other, _} -> false
+          {_, :other} -> false
+          _ -> error("Attempted to check if the value:\n#{show(c)}\nis an element of #{show(s)}")
+        end
+    end
+  end
+
+  defp first_element(%MapSet{map: map}) do
+    case :maps.next(:maps.iterator(map)) do
+      {e, _, _} -> e
+      :none -> nil
+    end
+  end
+
+  # A value of the wrong kind for a set: an error in TLC, except for an
+  # untyped model value (it is not in the set).
+  defp bad_member({:mv, _} = x, s) do
+    if model_value_type(x),
+      do: error("Attempted to check if the typed model value #{show(x)} is in #{show(s)}")
+
+    false
+  end
+
+  defp bad_member(x, s),
+    do: error("Attempted to check if the value:\n#{show(x)}\nis an element of #{show(s)}")
 
   # -- Enumeration --
 

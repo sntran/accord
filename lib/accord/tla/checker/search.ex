@@ -19,7 +19,7 @@ defmodule Accord.TLA.Checker.Search do
     (see `Accord.TLA.Checker.Liveness`).
   """
 
-  alias Accord.TLA.Checker.{Context, Eval, Liveness, Spec, Temporal, Value}
+  alias Accord.TLA.Checker.{Constant, Context, Eval, Liveness, Spec, Temporal, Value}
 
   defmodule Stop do
     @moduledoc false
@@ -44,6 +44,11 @@ defmodule Accord.TLA.Checker.Search do
     Process.put(:tla_warn, Keyword.get(opts, :warn, true))
     Process.put(:tla_deadlock, Keyword.get(opts, :deadlock, config.check_deadlock))
 
+    Process.put(
+      :tla_typed_model_values,
+      ctx.constants |> Map.values() |> Enum.any?(&typed_model_values?/1)
+    )
+
     base = %{
       ctx: ctx,
       deadlock: Keyword.get(opts, :deadlock, config.check_deadlock),
@@ -54,6 +59,7 @@ defmodule Accord.TLA.Checker.Search do
     }
 
     try do
+      check_replacements(ctx, base)
       check_assumptions(ctx)
       # An error in the analysis of the config is a config error in TLC.
       spec = setup(ctx, base, fn -> Spec.analyze(ctx, config) end)
@@ -64,6 +70,23 @@ defmodule Accord.TLA.Checker.Search do
       else
         model = setup(ctx, base, fn -> model(ctx, spec, config) end)
         constant_invariants(model, base)
+        check_dnf_size(model, base)
+
+        # Temporal properties whose negations are all FALSE: TLC has nothing
+        # to check, an error.
+        if model.live != [] and Enum.all?(model.live, fn {_, f, _} -> f == false end),
+          do:
+            raise(Stop,
+              result:
+                error_result(
+                  ctx,
+                  "Temporal formula is a tautology (its negation is unsatisfiable).",
+                  [],
+                  base,
+                  nil,
+                  :liveness_eval
+                )
+            )
 
         extra =
           for {text, e} <- Keyword.get(opts, :invariant_exprs, []),
@@ -115,6 +138,24 @@ defmodule Accord.TLA.Checker.Search do
 
   # An invariant that is a constant FALSE: TLC reports it as a config
   # error, before the search.
+  # TLC puts the fairness conditions (each one has two disjuncts) and the
+  # negated property in one formula in disjunctive normal form, with a
+  # count of at most 2^31 - 1 disjuncts.
+  defp check_dnf_size(model, base) do
+    Enum.each(model.live, fn {name, formula, _atoms} ->
+      if Temporal.dnf_size(formula) * Integer.pow(2, length(model.fairness)) > 2_147_483_647 do
+        raise Stop,
+          result:
+            error_result(
+              model.ctx,
+              "TLC cannot handle the temporal formula #{name} because it exceeds the maximum supported size in disjunctive normal form.",
+              [],
+              base
+            )
+      end
+    end)
+  end
+
   defp constant_invariants(model, base) do
     Enum.each(model.invariants, fn {name, {e, scope, bound, frames}} ->
       env = %{
@@ -154,7 +195,71 @@ defmodule Accord.TLA.Checker.Search do
   rescue
     e in Value.Error ->
       raise Stop, result: error_result(ctx, Exception.message(e), [], base, nil, :config)
+
+    e in Spec.CannotHandle ->
+      raise Stop, result: error_result(ctx, Exception.message(e), [], base, nil, :error)
+
+    e in Spec.Tautology ->
+      raise Stop, result: error_result(ctx, Exception.message(e), [], base, nil, :liveness_eval)
   end
+
+  # A constant that the config replaces with a definition (`C <- Def`):
+  # TLC evaluates it when it reads the spec, before the model checker
+  # starts (so TLCGet has no value). A failure is a config error when the
+  # definition is not a constant; else TLC ignores it.
+  defp check_replacements(ctx, base) do
+    Process.put(:tla_phase, :processing)
+
+    ctx.constant_replacements
+    |> Enum.filter(fn {_name, target} ->
+      match?({:def, %{params: []}, _}, Context.root_entry(ctx, target))
+    end)
+    |> Enum.each(fn {name, target} ->
+      try do
+        Eval.eval({:name, name, nil}, %{Eval.new(ctx) | level: 0})
+      rescue
+        e in Value.Error ->
+          unless constant_target?(ctx, target) do
+            raise Stop,
+              result:
+                error_result(
+                  ctx,
+                  "The constant parameter #{name} is not assigned a constant expression by the configuration file: #{target} (#{Exception.message(e)})",
+                  [],
+                  base,
+                  nil,
+                  :config
+                )
+          end
+      end
+    end)
+  after
+    Process.delete(:tla_phase)
+  end
+
+  defp constant_target?(ctx, target) do
+    case Context.root_entry(ctx, target) do
+      {:def, d, sid} -> Constant.definition?(ctx, sid, d)
+      _ -> true
+    end
+  end
+
+  defp typed_model_values?({:mv, _} = v), do: Value.model_value_type(v) != nil
+  defp typed_model_values?(%MapSet{} = s), do: Enum.any?(s, &typed_model_values?/1)
+  defp typed_model_values?(_), do: false
+
+  defp check_order(%MapSet{} = s) do
+    Value.check_order!(MapSet.to_list(s))
+    Enum.each(s, &check_order/1)
+  end
+
+  defp check_order({:fun, m}) do
+    Value.check_order!(Map.keys(m))
+    Enum.each(m, fn {k, v} -> check_order(k) && check_order(v) end)
+  end
+
+  defp check_order({:seq, t}), do: t |> Tuple.to_list() |> Enum.each(&check_order/1)
+  defp check_order(_), do: true
 
   defp check_assumptions(ctx) do
     Enum.each(ctx.assumes, fn {e, scope, {line, col}} ->
@@ -195,7 +300,7 @@ defmodule Accord.TLA.Checker.Search do
 
     obligations =
       Enum.flat_map(config.properties, fn name ->
-        Enum.map(Spec.property(ctx, name), &{name, &1})
+        Enum.map(Spec.property(ctx, name, Map.get(spec, :temporals, [])), &{name, &1})
       end)
 
     %{
@@ -396,16 +501,22 @@ defmodule Accord.TLA.Checker.Search do
     env = %{Eval.new(model.ctx) | state: %{}, label: "Init", level: 0}
 
     partials =
-      model.init
-      |> Enum.reduce([{%{}, "Init"}], fn {e, scope, bound, frames}, acc ->
-        Enum.flat_map(acc, fn {p, label} ->
-          Eval.gen(
-            e,
-            %{env | scope: scope, bound: bound, frames: frames, state: p, label: label},
-            :init
-          )
+      try do
+        model.init
+        |> Enum.reduce([{%{}, "Init"}], fn {e, scope, bound, frames}, acc ->
+          Enum.flat_map(acc, fn {p, label} ->
+            Eval.gen(
+              e,
+              %{env | scope: scope, bound: bound, frames: frames, state: p, label: label},
+              :init
+            )
+          end)
         end)
-      end)
+      rescue
+        err in Value.Error ->
+          raise Stop,
+            result: error_result(model.ctx, Exception.message(err), [], base, st, :spec_eval)
+      end
 
     st = %{st | generated: st.generated + length(partials)}
 
@@ -540,15 +651,19 @@ defmodule Accord.TLA.Checker.Search do
   # 4. Each step must satisfy the action properties.
   defp visit(base, model, st, state, from, label, depth) do
     parent = if from, do: elem(from, 0)
+    # TLC sorts the sets of a state when it computes the fingerprint; a set
+    # with typed model values of different types cannot be sorted.
+    if Process.get(:tla_typed_model_values), do: check_order(state)
 
     partial_trace = fn ->
       if(parent, do: trace(st, parent), else: []) ++ [%{state: state, action: label}]
     end
 
     Process.put(:tla_trace_fun, fn _ -> trace_value(model, partial_trace.()) end)
-    # TLC checks a new state with the level of its predecessor (0 for an
-    # initial state).
-    env = %{Eval.new(model.ctx) | state: state, level: depth - 1}
+    # TLCGet("level") is the level of the state (1 for an initial state);
+    # in a step, the level of the first state (the primed level is one
+    # more).
+    env = %{Eval.new(model.ctx) | state: state, level: depth}
 
     step_env =
       if from, do: %{Eval.new(model.ctx) | state: elem(from, 1), next: state, level: depth - 1}
@@ -596,8 +711,12 @@ defmodule Accord.TLA.Checker.Search do
         end)
       end
 
+      # TLC reports an error in an invariant of an initial state as an
+      # error of the initial predicate.
+      eval_kind = if from == nil, do: :spec_eval, else: :safety_eval
+
       Enum.each(model.invariants, fn {name, closure} ->
-        unless holds?(closure, env, model, st, nil, base, partial_trace, :safety_eval),
+        unless holds?(closure, env, model, st, nil, base, partial_trace, eval_kind),
           do: violation(model, base, st, :invariant, name, partial_trace.())
       end)
     end

@@ -1083,17 +1083,22 @@ defmodule Accord.TLA.Checker.Eval do
   defp do_gen({:unchanged, e}, env, :next) do
     case unchanged_vars(e, env) do
       {:ok, vars} ->
-        Enum.reduce_while(vars, leaf(env, :next), fn i, [{p, label}] ->
-          current =
-            case i do
-              {:pseudo, sid, n} -> eval({:name, n, nil}, %{env | scope: sid, primed: false})
-              _ -> read_var(i, %{env | primed: false})
-            end
+        Enum.reduce_while(vars, leaf(env, :next), fn
+          {:expr, x, scope, bound, frames}, [{p, label}] ->
+            env2 = %{env | scope: scope, bound: bound, frames: frames, next: p}
+            if bool({:unchanged, x}, env2), do: {:cont, [{p, label}]}, else: {:halt, []}
 
-          case Map.fetch(p, i) do
-            {:ok, v} -> if v == current, do: {:cont, [{p, label}]}, else: {:halt, []}
-            :error -> {:cont, [{Map.put(p, i, current), label}]}
-          end
+          i, [{p, label}] ->
+            current =
+              case i do
+                {:pseudo, sid, n} -> eval({:name, n, nil}, %{env | scope: sid, primed: false})
+                _ -> read_var(i, %{env | primed: false})
+              end
+
+            case Map.fetch(p, i) do
+              {:ok, v} -> if v == current, do: {:cont, [{p, label}]}, else: {:halt, []}
+              :error -> {:cont, [{Map.put(p, i, current), label}]}
+            end
         end)
 
       :complex ->
@@ -1343,14 +1348,38 @@ defmodule Accord.TLA.Checker.Eval do
       {:ok, {:thunk, _, te, scope, bound, frames, _}} ->
         target(te, %{env | scope: scope, bound: bound, frames: frames}, mode)
 
-      _ when mode == :init ->
+      {:ok, {:let_def, %{kind: :op, params: []} = d, closure}} ->
+        target(
+          d.body,
+          %{env | scope: closure.scope, bound: closure.bound, frames: closure.frames},
+          mode
+        )
+
+      {:ok, _} ->
+        :no
+
+      # A definition without parameters: its body decides (as in TLC).
+      :error when mode == :init ->
         var_of(lhs, env)
 
-      _ ->
-        :no
+      :error ->
+        case def_body(Context.lookup(env.ctx, env.scope, n), env) do
+          {:ok, body, env2} -> target(body, env2, mode)
+          :no -> :no
+        end
     end
   end
 
+  defp target({:inst, path, name, [], _}, env, mode) do
+    {entry, env2} = navigate(path, name, env)
+
+    case def_body(entry, env2) do
+      {:ok, body, env3} -> target(body, %{env3 | state: env.state, next: env.next}, mode)
+      :no -> :no
+    end
+  end
+
+  defp target({:let, defs, body}, env, mode), do: target(body, let_env(defs, env), mode)
   defp target({:label, _, e}, env, mode), do: target(e, env, mode)
   defp target({:prime, inner}, env, :next), do: var_of(inner, env)
   defp target(_lhs, _env, :next), do: :no
@@ -1372,12 +1401,42 @@ defmodule Accord.TLA.Checker.Eval do
   end
 
   defp var_of({:label, _, e}, env), do: var_of(e, env)
+  defp var_of({:let, defs, body}, env), do: var_of(body, let_env(defs, env))
+
+  defp var_of({:inst, path, name, [], _}, env) do
+    {entry, env2} = navigate(path, name, env)
+
+    case def_body(entry, env2) do
+      {:ok, body, env3} -> var_of(body, env3)
+      :no -> :no
+    end
+  end
+
   defp var_of(_, _env), do: :no
+
+  # The body of a definition without parameters, and its environment.
+  defp def_body({:def, %{kind: :op, params: []} = d, sid}, env),
+    do: {:ok, d.body, %{env | scope: sid, bound: %{}}}
+
+  defp def_body({:alias, sid, target}, env),
+    do: def_body(Context.lookup(env.ctx, sid, target), %{env | scope: sid})
+
+  defp def_body(_, _env), do: :no
 
   defp var_of_entry(n, env) do
     case Context.lookup(env.ctx, env.scope, n) do
       {:var, i} ->
         {:ok, i}
+
+      {:def, %{kind: :op, params: []}, _} = entry ->
+        {:ok, body, env2} = def_body(entry, env)
+        var_of(body, env2)
+
+      {:alias, _, _} = entry ->
+        case def_body(entry, env) do
+          {:ok, body, env2} -> var_of(body, env2)
+          :no -> :no
+        end
 
       {:subst, expr, outer, frame} ->
         case var_of(expr, %{env | scope: outer, bound: Map.get(env.frames, frame, %{})}) do
@@ -1396,7 +1455,8 @@ defmodule Accord.TLA.Checker.Eval do
     Enum.reduce_while(elems, {:ok, []}, fn e, {:ok, acc} ->
       case unchanged_vars(e, env) do
         {:ok, vs} -> {:cont, {:ok, acc ++ vs}}
-        :complex -> {:halt, :complex}
+        # An element that is not a variable: TLC checks `UNCHANGED e` for it.
+        :complex -> {:cont, {:ok, acc ++ [{:expr, e, env.scope, env.bound, env.frames}]}}
       end
     end)
   end

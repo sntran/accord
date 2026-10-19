@@ -13,6 +13,8 @@ defmodule Accord.TLA.Checker.Constant do
 
   alias Accord.TLA.Checker.Context
 
+  @not_constant ~w(TLCGet CounterExample Trace _TLCState _Counts PickSuccessor)
+
   @doc "Tells if the zero-arity definition `d` in scope `sid` is of constant level."
   def definition?(ctx, sid, d) do
     key = {ctx.id, sid, d.name}
@@ -136,7 +138,9 @@ defmodule Accord.TLA.Checker.Constant do
       nil -> true
       {:var, _} -> false
       {:const, _} -> true
-      {:native, _, _} -> true
+      # TLC gives these operators a state or action level, so a
+      # definition that uses them is not a constant.
+      {:native, _, name} -> name not in @not_constant
       {:value, _} -> true
       {:def, d, sid} -> body?(d, ctx, sid)
       {:alias, sid, target} -> entry?(Context.lookup(ctx, sid, target), ctx)

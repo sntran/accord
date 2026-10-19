@@ -60,7 +60,8 @@ defmodule Accord.TLA.Checker.Context do
             assumes: [],
             paths: [],
             root_scopes: MapSet.new(),
-            let_instances: %{}
+            let_instances: %{},
+            constant_replacements: []
 
   @type t :: %__MODULE__{}
 
@@ -471,6 +472,13 @@ defmodule Accord.TLA.Checker.Context do
         end
 
       {:replace, name, target} ->
+        # TLC evaluates a constant that the config replaces with a
+        # definition at startup (see `Accord.TLA.Checker.Search`).
+        ctx =
+          if constant?(ctx, name),
+            do: %{ctx | constant_replacements: ctx.constant_replacements ++ [{name, target}]},
+            else: ctx
+
         override(ctx, name, {:alias, ctx.root, target}, :root)
 
       {:op_case, name, args, value} ->

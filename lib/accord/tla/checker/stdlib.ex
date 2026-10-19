@@ -323,9 +323,15 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp op("JavaTime", [], _), do: System.os_time(:second)
 
+  # Before the model checker starts (while TLC reads the spec), these
+  # values do not exist.
   defp op("TLCGet", [key], env) do
+    if Process.get(:tla_phase) == :processing and is_binary(key) and
+         key in ~w(level distinct queue generated duration diameter config stats spec),
+       do: error("TLCGet(#{Value.show(key)}) has no value before the model checker starts")
+
     case key do
-      "level" -> env.level
+      "level" -> if env.primed, do: env.level + 1, else: env.level
       "distinct" -> Process.get(:tla_stats_distinct, 0)
       "queue" -> Process.get(:tla_stats_queue, 0)
       "generated" -> Process.get(:tla_stats_generated, 0)
@@ -445,7 +451,13 @@ defmodule Accord.TLA.Checker.Stdlib do
   end
 
   defp op("AssertError", [_msg, _failed], _), do: true
-  defp op("TLCModelValue", [name], _), do: {:mv, name}
+
+  defp op("TLCModelValue", [name], _) do
+    v = {:mv, name}
+    if Value.model_value_type(v), do: Process.put(:tla_typed_model_values, true)
+    v
+  end
+
   defp op("TLCNoOp", [v], _), do: v
   defp op("TLCDefer", [v], _), do: v
   defp op("TLCCache", [v, _key], _), do: v
