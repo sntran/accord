@@ -1105,8 +1105,14 @@ defmodule Accord.TLA.Checker.Value do
 
   def apply_fun({:fun, m} = f, x) do
     case Map.fetch(m, canon(x)) do
-      {:ok, v} -> v
-      :error -> error("#{show(x)} is not in the domain of #{show(f)}")
+      {:ok, v} ->
+        v
+
+      :error ->
+        # TLC compares the argument with each element of the domain (in
+        # order): an element of another kind gives an error.
+        m |> Map.keys() |> sort() |> Enum.each(&eq?(&1, x))
+        error("#{show(x)} is not in the domain of #{show(f)}")
     end
   end
 

@@ -1097,7 +1097,7 @@ defmodule Accord.TLA.Checker.Eval do
     # A lazy set in a state: TLC enumerates it for the fingerprint.
     if Value.lazy?(v), do: MapSet.new(Value.enum(v)), else: v
   rescue
-    e in Value.Error -> reraise %{e | fingerprint: true}, __STACKTRACE__
+    e in Value.Error -> reraise %{e | fingerprint: :state}, __STACKTRACE__
   end
 
   defp do_gen({:app, "\\in", [lhs, set], _} = e, env, mode) do

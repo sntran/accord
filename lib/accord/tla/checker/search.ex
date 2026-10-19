@@ -445,9 +445,18 @@ defmodule Accord.TLA.Checker.Search do
       generated: 0,
       edges: if(live? or base.graph, do: %{}, else: nil),
       init_ids: [],
-      safety: if(live?, do: SafetyTableau.new(model.live, model.fairness))
+      safety: if(live?, do: SafetyTableau.new(model.live, model.fairness)),
+      live_cache: if(live?, do: :ets.new(:tla_live_atoms, [:set, :private]))
     }
 
+    try do
+      explore(base, model, st, live?)
+    after
+      if st.live_cache, do: :ets.delete(st.live_cache)
+    end
+  end
+
+  defp explore(base, model, st, live?) do
     st = initial_states(base, model, st)
 
     # Without a next-state action, TLC stops after the initial states: an
@@ -601,6 +610,7 @@ defmodule Accord.TLA.Checker.Search do
         end
 
         st = expand(base, model, st, id)
+        live_eval(base, model, st, id)
         loop(base, model, safety_step(base, model, st, id))
     end
   end
@@ -641,7 +651,7 @@ defmodule Accord.TLA.Checker.Search do
             err in Value.Error ->
               kind = if err.module, do: :error, else: :spec_eval
               # The state that TLC cannot fingerprint counts as generated.
-              st = if err.fingerprint, do: %{st | generated: st.generated + 1}, else: st
+              st = if err.fingerprint == :state, do: %{st | generated: st.generated + 1}, else: st
 
               raise Stop,
                 result:
@@ -802,6 +812,72 @@ defmodule Accord.TLA.Checker.Search do
       _ ->
         st
     end
+  end
+
+  # -- Liveness atoms during the search --
+
+  # TLC evaluates the predicates of the liveness check on the steps of a
+  # state when it expands the state (so an error comes up at once). The
+  # values go to a cache for the check after the search.
+  defp live_eval(_base, _model, %{live_cache: nil}, _id), do: :ok
+
+  defp live_eval(base, model, st, id) do
+    to = st.edges |> Map.get(id, []) |> Enum.reverse() |> Enum.map(&elem(&1, 0))
+    succs = Enum.uniq(to ++ [id])
+    {state, _, _, _} = Map.fetch!(st.nodes, id)
+    cache = st.live_cache
+
+    # The fairness conditions: first the steps, then ENABLED at the state.
+    model.fairness
+    |> Enum.with_index()
+    |> Enum.each(fn {fc, index} ->
+      Enum.each(to, fn w ->
+        key = {:fair, index, :taken, id, w}
+
+        if :ets.lookup(cache, key) == [] do
+          {next, _, _, _} = Map.fetch!(st.nodes, w)
+          :ets.insert(cache, {key, fair_taken?(model, fc, state, next, id == w)})
+        end
+      end)
+    end)
+
+    model.fairness
+    |> Enum.with_index()
+    |> Enum.each(fn {fc, index} ->
+      key = {:fair, index, :enabled, id}
+
+      if :ets.lookup(cache, key) == [],
+        do: :ets.insert(cache, {key, fair_enabled?(model, fc, state)})
+    end)
+
+    model.live
+    |> Enum.with_index()
+    |> Enum.each(fn {{_name, _formula, atoms}, index} ->
+      Enum.each(atoms, fn {aid, {kind, {e, scope, bound, frames}}} ->
+        Enum.each(succs, fn w ->
+          key = if kind == :state, do: {index, aid, w, nil}, else: {index, aid, id, w}
+
+          if :ets.lookup(st.live_cache, key) == [] do
+            {next, _, _, _} = Map.fetch!(st.nodes, w)
+            Eval.reset_cache()
+
+            env = %{Eval.new(model.ctx) | scope: scope, bound: bound, frames: frames}
+
+            value =
+              case kind do
+                :state -> Eval.bool(e, %{env | state: next})
+                :action -> Eval.bool(e, %{env | state: state, next: next})
+              end
+
+            :ets.insert(st.live_cache, {key, value})
+          end
+        end)
+      end)
+    end)
+  rescue
+    err in Value.Error ->
+      raise Stop,
+        result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st, :error)
   end
 
   # -- The safety part of temporal properties (see SafetyTableau) --
@@ -1032,11 +1108,17 @@ defmodule Accord.TLA.Checker.Search do
       |> List.to_tuple()
 
     graph = %{n: n, states: states, succ: succ, init: Enum.reverse(st.init_ids)}
-    conds = Enum.map(model.fairness, &fair_condition(model, graph, &1))
+
+    conds =
+      model.fairness
+      |> Enum.with_index()
+      |> Enum.map(&fair_condition(model, graph, &1, st.live_cache))
 
     failure =
-      Enum.find_value(model.live, fn {name, formula, atoms} ->
-        lit = atom_evaluator(model, graph, atoms)
+      model.live
+      |> Enum.with_index()
+      |> Enum.find_value(fn {{name, formula, atoms}, index} ->
+        lit = atom_evaluator(model, graph, atoms, {st.live_cache, index})
         kind = fn id -> atoms |> Map.fetch!(id) |> elem(0) end
 
         formula
@@ -1081,23 +1163,12 @@ defmodule Accord.TLA.Checker.Search do
 
   # Evaluates the atoms of a property, with a memo: a state predicate at a
   # state, an action on a step.
-  defp atom_evaluator(model, graph, atoms) do
+  defp atom_evaluator(model, graph, atoms, {cache, index}) do
     memo(fn
-      {id, v, w} ->
-        {kind, {e, scope, bound, frames}} = Map.fetch!(atoms, id)
-        Eval.reset_cache()
-
-        env = %{
-          Eval.new(model.ctx)
-          | state: elem(graph.states, v),
-            scope: scope,
-            bound: bound,
-            frames: frames
-        }
-
-        case kind do
-          :state -> Eval.bool(e, env)
-          :action -> Eval.bool(e, %{env | next: elem(graph.states, w)})
+      {id, v, w} = key ->
+        case cache && :ets.lookup(cache, Tuple.insert_at(key, 0, index)) do
+          [{_, value}] -> value
+          _ -> eval_atom(model, graph, atoms, id, v, w)
         end
     end)
     |> then(fn f ->
@@ -1110,14 +1181,76 @@ defmodule Accord.TLA.Checker.Search do
     end)
   end
 
+  defp eval_atom(model, graph, atoms, id, v, w) do
+    {kind, {e, scope, bound, frames}} = Map.fetch!(atoms, id)
+    Eval.reset_cache()
+
+    env = %{
+      Eval.new(model.ctx)
+      | state: elem(graph.states, v),
+        scope: scope,
+        bound: bound,
+        frames: frames
+    }
+
+    case kind do
+      :state -> Eval.bool(e, env)
+      :action -> Eval.bool(e, %{env | next: elem(graph.states, w)})
+    end
+  end
+
   # A fairness condition WF_sub(a) or SF_sub(a): the states where <a>_sub
   # is enabled, and a test for the steps that take it.
-  defp fair_condition(
-         model,
-         graph,
-         {strength, {sub, sscope, sbound, sframes}, {a, ascope, abound, aframes}}
-       ) do
-    sub_value = fn state, next ->
+  defp fair_condition(model, graph, {fc, index}, cache) do
+    cached = fn key, fun ->
+      case :ets.lookup(cache, key) do
+        [{_, value}] -> value
+        [] -> fun.()
+      end
+    end
+
+    enabled =
+      for v <- 0..(graph.n - 1)//1,
+          cached.({:fair, index, :enabled, v}, fn ->
+            fair_enabled?(model, fc, elem(graph.states, v))
+          end),
+          into: MapSet.new(),
+          do: v
+
+    taken = fn {v, w} ->
+      cached.({:fair, index, :taken, v, w}, fn ->
+        fair_taken?(model, fc, elem(graph.states, v), elem(graph.states, w), v == w)
+      end)
+    end
+
+    taken = memo(taken)
+    %{strength: elem(fc, 0), enabled: enabled, taken: fn v, w -> taken.({v, w}) end}
+  end
+
+  defp fair_enabled?(model, {_, sub, {a, ascope, abound, aframes}}, state) do
+    enabled_at?(model, state, a, ascope, abound, aframes, sub_value(model, sub))
+  end
+
+  defp fair_taken?(_model, _fc, _s, _t, true), do: false
+
+  defp fair_taken?(model, {_, sub, {a, ascope, abound, aframes}}, s, t, false) do
+    sub_value = sub_value(model, sub)
+
+    env = %{
+      Eval.new(model.ctx)
+      | state: s,
+        next: t,
+        scope: ascope,
+        bound: abound,
+        frames: aframes
+    }
+
+    Eval.reset_cache()
+    not Value.eq?(sub_value.(s, nil), sub_value.(s, t)) and Eval.bool(a, env)
+  end
+
+  defp sub_value(model, {sub, sscope, sbound, sframes}) do
+    fn state, next ->
       env = %{
         Eval.new(model.ctx)
         | state: state,
@@ -1129,34 +1262,6 @@ defmodule Accord.TLA.Checker.Search do
 
       Eval.eval(sub, if(next, do: %{env | primed: true}, else: env))
     end
-
-    enabled =
-      for v <- 0..(graph.n - 1)//1,
-          state = elem(graph.states, v),
-          enabled_at?(model, state, a, ascope, abound, aframes, sub_value),
-          into: MapSet.new(),
-          do: v
-
-    taken = fn {v, w} ->
-      s = elem(graph.states, v)
-      t = elem(graph.states, w)
-
-      env = %{
-        Eval.new(model.ctx)
-        | state: s,
-          next: t,
-          scope: ascope,
-          bound: abound,
-          frames: aframes
-      }
-
-      Eval.reset_cache()
-
-      v != w and not Value.eq?(sub_value.(s, nil), sub_value.(s, t)) and Eval.bool(a, env)
-    end
-
-    taken = memo(taken)
-    %{strength: strength, enabled: enabled, taken: fn v, w -> taken.({v, w}) end}
   end
 
   defp enabled_at?(model, state, a, scope, bound, frames, sub_value) do
