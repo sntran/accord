@@ -68,6 +68,7 @@ defmodule Accord.TLA.Checker.Search do
       if spec.init == nil do
         %{result(ctx) | status: :ok}
       else
+        check_invariant_levels(ctx, base, config)
         model = setup(ctx, base, fn -> model(ctx, spec, config) end)
         constant_invariants(model, base)
         check_dnf_size(model, base)
@@ -109,8 +110,14 @@ defmodule Accord.TLA.Checker.Search do
   # specification trivial: TLC reports a config error.
   defp trivial_check(_ctx, _base, %{init: nil}), do: :ok
 
+  # Only for a SPECIFICATION, and only for a part that is a name (or
+  # FALSE), as in TLC.
+  defp trivial_check(%{config: %{specification: nil}}, _base, _spec), do: :ok
+
   defp trivial_check(ctx, base, spec) do
-    Enum.each(spec.init, fn {e, scope, bound, frames} ->
+    spec.init
+    |> Enum.filter(&match?({{:name, _, _}, _, _, _}, &1))
+    |> Enum.each(fn {e, scope, bound, frames} ->
       env = %{Eval.new(ctx) | scope: scope, bound: bound, frames: frames, state: nil, level: 0}
 
       constant_false =
@@ -187,6 +194,29 @@ defmodule Accord.TLA.Checker.Search do
                 :config
               )
           )
+    end)
+  end
+
+  # TLC checks the level of each invariant before the properties: an
+  # invariant must be a state predicate.
+  defp check_invariant_levels(ctx, base, config) do
+    env = Eval.new(ctx)
+
+    Enum.each(config.invariants, fn name ->
+      e = {:name, name, nil}
+
+      if Context.root_entry(ctx, name) != nil and (Spec.action?(e, env) or Spec.temporal?(e, env)) do
+        raise Stop,
+          result:
+            error_result(
+              ctx,
+              "The invariant #{name} is not a state predicate (one with no primes or temporal operators).",
+              [],
+              base,
+              nil,
+              :safety_eval
+            )
+      end
     end)
   end
 
@@ -395,9 +425,6 @@ defmodule Accord.TLA.Checker.Search do
 
     base = %{base | warnings: warnings}
 
-    if model.next == nil,
-      do: raise(Value.Error, message: "the specification has no next-state action")
-
     st = %{
       seen: %{},
       nodes: %{},
@@ -410,7 +437,23 @@ defmodule Accord.TLA.Checker.Search do
     }
 
     st = initial_states(base, model, st)
-    st = loop(base, model, st)
+
+    # Without a next-state action, TLC stops after the initial states: an
+    # error when there are initial states.
+    if model.next == nil and not :queue.is_empty(st.queue) do
+      raise Stop,
+        result:
+          error_result(
+            model.ctx,
+            "No next state actions defined to generate successor states from.",
+            [],
+            base,
+            st,
+            :spec_eval
+          )
+    end
+
+    st = if model.next == nil, do: st, else: loop(base, model, st)
 
     stats = stats(st)
 
@@ -579,9 +622,14 @@ defmodule Accord.TLA.Checker.Search do
           try do
             Eval.gen(e, env, :next)
           rescue
+            # TLC: an error of an operator of a standard module is a general
+            # error; an error of the core semantics is an error of the spec.
             err in Value.Error ->
+              kind = if err.module, do: :error, else: :spec_eval
+
               raise Stop,
-                result: error_result(model.ctx, Exception.message(err), trace(st, id), base, st)
+                result:
+                  error_result(model.ctx, Exception.message(err), trace(st, id), base, st, kind)
           end
 
         st = %{
@@ -755,13 +803,15 @@ defmodule Accord.TLA.Checker.Search do
     %{st | edges: Map.update(st.edges, from, [{to, label}], &[{to, label} | &1])}
   end
 
-  defp holds?(closure, env, model, st, id, base, trace_fun \\ nil, kind \\ :error)
+  # `kind` :auto: as an error of the next-state relation (see `expand/4`).
+  defp holds?(closure, env, model, st, id, base, trace_fun \\ nil, kind \\ :auto)
 
   defp holds?({e, scope, bound, frames}, env, model, st, id, base, trace_fun, kind) do
     Eval.bool(e, %{env | scope: scope, bound: bound, frames: frames})
   rescue
     err in Value.Error ->
       trace = if trace_fun, do: trace_fun.(), else: if(id, do: trace(st, id), else: [])
+      kind = if kind == :auto, do: if(err.module, do: :error, else: :spec_eval), else: kind
       raise Stop, result: error_result(model.ctx, Exception.message(err), trace, base, st, kind)
   end
 

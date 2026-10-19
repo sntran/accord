@@ -128,6 +128,8 @@ defmodule Accord.TLA.Checker.Stdlib do
     if mod != nil and (mod == "Json" or Community.module?(mod)),
       do: Community.call(mod, op, args, env),
       else: op(op, args, env)
+  rescue
+    e in Value.Error -> reraise %{e | module: true}, __STACKTRACE__
   end
 
   # -- Naturals and Integers --
@@ -231,9 +233,7 @@ defmodule Accord.TLA.Checker.Stdlib do
 
   defp op("IsFiniteSet", [s], _) do
     case s do
-      x when x in [:nat, :int, :string, :any] -> false
-      {:seq_set, _} -> false
-      _ -> Value.set?(s) || error("IsFiniteSet needs a set")
+      _ -> if Value.set?(s), do: not Value.infinite?(s), else: error("IsFiniteSet needs a set")
     end
   end
 

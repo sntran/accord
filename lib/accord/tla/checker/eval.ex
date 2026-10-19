@@ -290,10 +290,12 @@ defmodule Accord.TLA.Checker.Eval do
   defp core("SUBSET", [a], env), do: {:subset, eval(a, env)}
 
   defp core("UNION", [a], env) do
-    a
-    |> eval(env)
-    |> Value.enum()
-    |> Enum.reduce(MapSet.new(), &MapSet.union(&2, Value.to_set(&1)))
+    sets = a |> eval(env) |> Value.enum()
+
+    # UNION of a set with an infinite element stays lazy.
+    if Enum.any?(sets, &Value.infinite?/1),
+      do: {:union, Value.set(sets)},
+      else: Enum.reduce(sets, MapSet.new(), &MapSet.union(&2, Value.to_set(&1)))
   end
 
   defp core("DOMAIN", [a], env), do: Value.domain(eval(a, env))
@@ -900,15 +902,20 @@ defmodule Accord.TLA.Checker.Eval do
         {:field, name} -> name
       end
 
-    old = Value.apply_fun(fv, key)
+    # TLC: a key that is not in the domain leaves the function unchanged.
+    if Value.fun?(fv) and not Value.member?(key, Value.domain(fv)) do
+      fv
+    else
+      old = Value.apply_fun(fv, key)
 
-    new =
-      case rest do
-        [] -> eval(value, %{env | at: {:at, old}})
-        _ -> except_path(old, rest, value, env)
-      end
+      new =
+        case rest do
+          [] -> eval(value, %{env | at: {:at, old}})
+          _ -> except_path(old, rest, value, env)
+        end
 
-    Value.update(fv, key, new)
+      Value.update(fv, key, new)
+    end
   end
 
   # -- ENABLED --

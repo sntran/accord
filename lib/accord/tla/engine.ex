@@ -88,7 +88,9 @@ defmodule Accord.TLA.Engine do
     Checker.Spec,
     Checker.Temporal,
     Checker.Search,
-    Checker.Liveness
+    Checker.Liveness,
+    Checker.Constant,
+    Checker.ValueStream
   ]
 
   defp native_fingerprint do

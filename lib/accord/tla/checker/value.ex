@@ -38,8 +38,12 @@ defmodule Accord.TLA.Checker.Value do
   """
 
   defmodule Error do
-    @moduledoc "An evaluation error."
-    defexception [:message]
+    @moduledoc """
+    An evaluation error. `module: true` for an error in an operator of a
+    standard module: TLC reports these with another exit code than the
+    errors of the core semantics.
+    """
+    defexception [:message, module: false]
   end
 
   @big_interval 2_000
@@ -125,16 +129,46 @@ defmodule Accord.TLA.Checker.Value do
 
   @doc "Tells if a set is infinite (or TLC cannot enumerate it)."
   def infinite?(s) when s in [:nat, :int, :string, :any], do: true
-  def infinite?({:seq_set, _}), do: true
+  # Seq({}) is {<<>>}.
+  def infinite?({:seq_set, s}), do: not empty?(s)
   def infinite?({:diff, a, _}), do: infinite?(a)
   def infinite?({:cap, a, b}), do: infinite?(a) and infinite?(b)
   def infinite?({:cup, sets}), do: Enum.any?(sets, &infinite?/1)
   def infinite?({:filter, s, _}), do: infinite?(s)
   def infinite?({:subset, s}), do: infinite?(s)
-  def infinite?({:fun_set, d, r}), do: infinite?(d) or infinite?(r)
-  def infinite?({:record_set, fields}), do: Enum.any?(fields, fn {_, s} -> infinite?(s) end)
-  def infinite?({:times, sets}), do: Enum.any?(sets, &infinite?/1)
+  def infinite?({:union, s}), do: s |> enum() |> Enum.any?(&infinite?/1)
+
+  # An empty domain gives {<<>>}; an empty range (with a domain that is
+  # not empty) gives {}.
+  def infinite?({:fun_set, d, r}),
+    do:
+      not empty?(d) and not empty?(r) and
+        (infinite?(r) or (infinite?(d) and size(r) > 1))
+
+  def infinite?({:record_set, fields}),
+    do: not empty?({:record_set, fields}) and Enum.any?(fields, fn {_, s} -> infinite?(s) end)
+
+  def infinite?({:times, sets}), do: not empty?({:times, sets}) and Enum.any?(sets, &infinite?/1)
   def infinite?(_), do: false
+
+  @doc """
+  Tells if a set is empty. For a lazy set, the check does not enumerate
+  the infinite parts.
+  """
+  def empty?(%MapSet{} = s), do: MapSet.size(s) == 0
+  def empty?({:interval, a, b}), do: b < a
+  def empty?(s) when s in [:nat, :int, :string, :any], do: false
+  def empty?({:subset, _}), do: false
+  def empty?({:seq_set, _}), do: false
+  def empty?({:fun_set, d, r}), do: not empty?(d) and empty?(r)
+  def empty?({:record_set, fields}), do: Enum.any?(fields, fn {_, s} -> empty?(s) end)
+  def empty?({:times, sets}), do: Enum.any?(sets, &empty?/1)
+  def empty?({:cup, sets}), do: Enum.all?(sets, &empty?/1)
+  def empty?({:union, s}), do: s |> enum() |> Enum.all?(&empty?/1)
+  def empty?({:cap, a, b} = s), do: empty?(a) or empty?(b) or (not infinite?(s) and enum(s) == [])
+  def empty?({:diff, a, _} = s), do: empty?(a) or (not infinite?(s) and enum(s) == [])
+  def empty?({:filter, inner, _} = s), do: empty?(inner) or (not infinite?(s) and enum(s) == [])
+  def empty?(v), do: enum(v) == []
 
   @doc "Tells if a value is a function (also a sequence or a record)."
   def fun?({:seq, _}), do: true
@@ -160,12 +194,23 @@ defmodule Accord.TLA.Checker.Value do
       {:mv, :mv} -> model_values_eq?(a, b)
       {:mv, _} -> model_value_other(a, b)
       {_, :mv} -> model_value_other(b, a)
+      {:set, :set} -> set_eq?(a, b)
       {k, k} -> canon(a) == canon(b)
       {:other, _} -> canon(a) == canon(b)
       {_, :other} -> canon(a) == canon(b)
       {k, _} -> error(mismatch(k, a, b))
     end
   end
+
+  # Two sets of functions with an infinite domain (and one function each):
+  # equal when the domains and the ranges are equal.
+  defp set_eq?({:fun_set, d1, r1} = a, {:fun_set, d2, r2} = b) do
+    if (infinite?(d1) or infinite?(d2)) and not empty?(a) and not empty?(b),
+      do: eq?(d1, d2) and eq?(r1, r2),
+      else: canon(a) == canon(b)
+  end
+
+  defp set_eq?(a, b), do: canon(a) == canon(b)
 
   defp kind(v) when is_integer(v), do: :int
   defp kind(v) when is_boolean(v), do: :bool
@@ -361,7 +406,11 @@ defmodule Accord.TLA.Checker.Value do
 
   @doc "The elements of a set, as a list. Raises for an infinite set."
   def enum(%MapSet{} = s), do: MapSet.to_list(s)
-  def enum({:interval, a, b}), do: Enum.to_list(a..b)
+
+  def enum({:interval, a, b} = s) do
+    check_interval_size!(s)
+    Enum.to_list(a..b)
+  end
 
   def enum({:subset, s}) do
     s
@@ -371,30 +420,29 @@ defmodule Accord.TLA.Checker.Value do
   end
 
   def enum({:fun_set, d, r}) do
-    keys = enum(d)
-    values = enum(r)
+    cond do
+      empty?(d) ->
+        [{:seq, {}}]
 
-    keys
-    |> Enum.reduce([%{}], fn k, acc -> for m <- acc, v <- values, do: Map.put(m, k, v) end)
-    |> Enum.map(&fun/1)
+      empty?(r) ->
+        []
+
+      true ->
+        values = enum(r)
+
+        d
+        |> enum()
+        |> Enum.reduce([%{}], fn k, acc -> for m <- acc, v <- values, do: Map.put(m, k, v) end)
+        |> Enum.map(&fun/1)
+    end
   end
 
-  def enum({:record_set, fields}) do
-    fields
-    |> Enum.reduce([%{}], fn {f, s}, acc ->
-      values = enum(s)
-      for m <- acc, v <- values, do: Map.put(m, f, v)
-    end)
-    |> Enum.map(&fun/1)
+  def enum({:record_set, fields} = s) do
+    if empty?(s), do: [], else: enum_fields(fields)
   end
 
-  def enum({:times, sets}) do
-    sets
-    |> Enum.reduce([[]], fn s, acc ->
-      values = enum(s)
-      for l <- acc, v <- values, do: [v | l]
-    end)
-    |> Enum.map(&(&1 |> Enum.reverse() |> List.to_tuple() |> then(fn t -> {:seq, t} end)))
+  def enum({:times, sets} = s) do
+    if empty?(s), do: [], else: enum_times(sets)
   end
 
   def enum({:union, s}), do: s |> enum() |> Enum.flat_map(&enum/1) |> Enum.uniq()
@@ -412,29 +460,79 @@ defmodule Accord.TLA.Checker.Value do
   def enum(s) when s in [:nat, :int, :string, :any, {:seq_set, nil}],
     do: error("cannot enumerate the infinite set #{show(s)}")
 
-  def enum({:seq_set, _} = s), do: error("cannot enumerate the infinite set #{show(s)}")
+  def enum({:seq_set, s} = set) do
+    if empty?(s), do: [{:seq, {}}], else: error("cannot enumerate the infinite set #{show(set)}")
+  end
+
   def enum(v), do: error("expected a set, not #{show(v)}")
+
+  defp enum_fields(fields) do
+    fields
+    |> Enum.reduce([%{}], fn {f, s}, acc ->
+      values = enum(s)
+      for m <- acc, v <- values, do: Map.put(m, f, v)
+    end)
+    |> Enum.map(&fun/1)
+  end
+
+  defp enum_times(sets) do
+    sets
+    |> Enum.reduce([[]], fn s, acc ->
+      values = enum(s)
+      for l <- acc, v <- values, do: [v | l]
+    end)
+    |> Enum.map(&(&1 |> Enum.reverse() |> List.to_tuple() |> then(fn t -> {:seq, t} end)))
+  end
 
   @doc "The number of elements of a finite set."
   def size(%MapSet{} = s), do: MapSet.size(s)
-  def size({:interval, a, b}), do: max(b - a + 1, 0)
+
+  def size({:interval, a, b} = s) do
+    check_interval_size!(s)
+    max(b - a + 1, 0)
+  end
+
   def size({:subset, s}), do: Integer.pow(2, size(s))
 
+  # The size of a set of functions: an empty domain gives 1, an empty
+  # range 0, and a range of one element 1 (also for an infinite domain).
   def size({:fun_set, d, r}) do
-    case size(d) do
-      0 -> 1
-      n -> Integer.pow(size(r), n)
+    cond do
+      empty?(d) -> 1
+      empty?(r) -> 0
+      size(r) == 1 -> 1
+      true -> Integer.pow(size(r), size(d))
     end
   end
 
-  def size({:times, sets}), do: Enum.reduce(sets, 1, &(size(&1) * &2))
-  def size({:record_set, fields}), do: Enum.reduce(fields, 1, fn {_, s}, acc -> size(s) * acc end)
+  def size({:times, sets} = s),
+    do: if(empty?(s), do: 0, else: Enum.reduce(sets, 1, &(size(&1) * &2)))
+
+  def size({:record_set, fields} = s),
+    do: if(empty?(s), do: 0, else: Enum.reduce(fields, 1, fn {_, f}, acc -> size(f) * acc end))
+
+  def size({:seq_set, s} = set), do: if(empty?(s), do: 1, else: length(enum(set)))
   def size(s), do: length(enum(s))
+
+  # TLC has 32-bit sizes.
+  defp check_interval_size!({:interval, a, b}) do
+    if b - a + 1 > 2_147_483_647,
+      do:
+        error(
+          "Size of interval value exceeds the maximum representable size (32bits): #{a}..#{b}."
+        )
+  end
 
   # -- Set operations --
 
   def union(a, b) do
-    if infinite?(a) or infinite?(b), do: {:cup, [a, b]}, else: MapSet.union(to_set(a), to_set(b))
+    cond do
+      not infinite?(a) and not infinite?(b) -> MapSet.union(to_set(a), to_set(b))
+      # S \cup {} is S (also for an infinite S).
+      empty?(b) -> a
+      empty?(a) -> b
+      true -> {:cup, [a, b]}
+    end
   end
 
   def intersection(a, b) do
@@ -513,7 +611,16 @@ defmodule Accord.TLA.Checker.Value do
       else: error("#{show(x)} is not in the domain of #{show(f)}")
   end
 
-  def update({:lazy_fun, _, _} = f, x, v), do: update(canon(f), x, v)
+  def update({:lazy_fun, d, g} = f, x, v) do
+    if infinite?(d) do
+      k = canon(x)
+      v = canon(v)
+      {:lazy_fun, d, fn y -> if canon(y) == k, do: v, else: g.(y) end}
+    else
+      update(canon(f), x, v)
+    end
+  end
+
   def update({:seq, _} = f, x, _v), do: error("#{show(x)} is not in the domain of #{show(f)}")
   def update(f, _x, _v), do: error("EXCEPT needs a function, not #{show(f)}")
 
@@ -591,14 +698,23 @@ defmodule Accord.TLA.Checker.Value do
   def show(:int), do: "Int"
   def show(:string), do: "STRING"
   def show(:any), do: "the set of all values"
+  # TLC prints a lazy set that is empty as {}, and a set of functions
+  # with an empty domain as {<<>>}.
+  def show({kind, _} = s) when kind in [:record_set, :times] do
+    if empty?(s), do: "{}", else: show_lazy(s)
+  end
+
+  def show({:fun_set, d, r} = s) do
+    cond do
+      empty?(d) -> "{<<>>}"
+      empty?(r) -> "{}"
+      true -> show_lazy(s)
+    end
+  end
+
   def show({:subset, s}), do: "SUBSET #{show(s)}"
-  def show({:fun_set, d, r}), do: "[#{show(d)} -> #{show(r)}]"
   def show({:seq_set, s}), do: "Seq(#{show(s)})"
   def show({:union, s}), do: "UNION #{show(s)}"
-  def show({:times, sets}), do: Enum.map_join(sets, " \\X ", &show/1)
-
-  def show({:record_set, fields}),
-    do: "[" <> Enum.map_join(fields, ", ", fn {f, s} -> "#{f} : #{show(s)}" end) <> "]"
 
   def show({:diff, a, b}), do: "(#{show(a)} \\ #{show(b)})"
   def show({:cap, a, b}), do: "(#{show(a)} \\cap #{show(b)})"
@@ -607,6 +723,12 @@ defmodule Accord.TLA.Checker.Value do
   def show({:lazy_fun, d, _}), do: "[x \\in #{show(d)} |-> ...]"
   def show({:op_value, name, _, _}), do: "operator #{name}"
   def show(other), do: inspect(other)
+
+  defp show_lazy({:fun_set, d, r}), do: "[#{show(d)} -> #{show(r)}]"
+  defp show_lazy({:times, sets}), do: Enum.map_join(sets, " \\X ", &show/1)
+
+  defp show_lazy({:record_set, fields}),
+    do: "[" <> Enum.map_join(fields, ", ", fn {f, s} -> "#{f}: #{show(s)}" end) <> "]"
 
   @doc "Raises an evaluation error."
   @spec error(String.t()) :: no_return()

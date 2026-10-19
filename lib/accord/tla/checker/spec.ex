@@ -190,7 +190,23 @@ defmodule Accord.TLA.Checker.Spec do
     end
   end
 
-  defp flatten(e, env) do
+  # A part that is a variable or a constant: a config error in TLC.
+  defp flatten({:name, n, _} = e, env) do
+    case Map.has_key?(env.bound, n) || Context.lookup(env.ctx, env.scope, n) do
+      {:var, _} ->
+        error("The operator #{n} cannot be used as a spec")
+
+      {:def, %{kind: :op, params: [], body: {:name, _, _} = body}, sid} ->
+        flatten(body, %{env | scope: sid, bound: %{}})
+
+      _ ->
+        flatten_part(e, env)
+    end
+  end
+
+  defp flatten(e, env), do: flatten_part(e, env)
+
+  defp flatten_part(e, env) do
     if temporal?(e, env) do
       case expand(e, env) do
         {:ok, {body, env2}} -> flatten(body, env2)
@@ -613,6 +629,9 @@ defmodule Accord.TLA.Checker.Spec do
   def ltl(e, env, pos) do
     if temporal?(e, env), do: temporal_ltl(e, env, pos), else: atom(e, env, pos)
   end
+
+  # The constants TRUE and FALSE are not atoms (TLC folds them).
+  defp atom({:name, b, _}, _env, pos) when b in ["TRUE", "FALSE"], do: b == "TRUE" == pos
 
   defp atom(e, env, pos) do
     kind = if action?(e, env), do: :action, else: :state

@@ -61,7 +61,12 @@ defmodule Accord.TLA.Checker.Community do
       "ndJsonSerialize" => [0, 0],
       "ndJsonDeserialize" => [0]
     },
-    "IOUtils" => %{"IOEnv" => [], "atoi" => [0]}
+    "IOUtils" => %{
+      "IOEnv" => [],
+      "atoi" => [0],
+      "IODeserialize" => [0, 0],
+      "IOSerialize" => [0, 0, 0]
+    }
   }
 
   @doc "The native operators of a module, as `%{name => arities}`."
@@ -277,6 +282,23 @@ defmodule Accord.TLA.Checker.Community do
       {n, ""} -> n
       _ -> error("atoi: #{Value.show(s)} is not a number")
     end
+  end
+
+  defp op("IOUtils", "IODeserialize", [path, compressed], _env) do
+    case File.read(to_string(path)) do
+      {:ok, bin} ->
+        Accord.TLA.Checker.ValueStream.decode(bin, compressed == true)
+
+      {:error, reason} ->
+        error("IODeserialize: cannot read #{path}: #{:file.format_error(reason)}")
+    end
+  end
+
+  defp op("IOUtils", "IOSerialize", [value, path, compressed], _env) do
+    bin = Accord.TLA.Checker.ValueStream.encode(value, compressed == true)
+    File.mkdir_p!(Path.dirname(to_string(path)))
+    File.write!(to_string(path), bin)
+    true
   end
 
   defp op(module, name, args, _env),
